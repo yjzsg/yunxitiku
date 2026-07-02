@@ -428,6 +428,17 @@ function ensureMobileControls() {
     const footer = document.querySelector(".answer-card-wrap");
     footer?.insertBefore(btn, footer.firstChild);
   }
+
+  if (!$("pickerDoneBtn")) {
+    const btn = document.createElement("button");
+    btn.id = "pickerDoneBtn";
+    btn.className = "picker-done-btn";
+    btn.type = "button";
+    btn.textContent = "进入做题";
+    btn.title = "收起题库并回到答题界面";
+    const pane = document.querySelector(".course-pane");
+    pane?.appendChild(btn);
+  }
 }
 
 function ensureVerifyModeControl() {
@@ -706,6 +717,27 @@ function setCoursePicker(open) {
   if (state.pickerOpen) setMobileTools(false);
   const pickerBtn = $("coursePickerBtn");
   if (pickerBtn) pickerBtn.textContent = state.pickerOpen ? "收起科目" : "切换科目";
+  updatePickerHint();
+}
+
+function shouldAutoClosePicker() {
+  return window.matchMedia("(max-width: 760px)").matches;
+}
+
+function closePickerAfterSelection() {
+  if (!isAdmin() && state.mode === "practice" && shouldAutoClosePicker()) {
+    setCoursePicker(false);
+    toast("已进入答题界面");
+  }
+}
+
+function updatePickerHint() {
+  const btn = $("pickerDoneBtn");
+  if (!btn) return;
+  const selected = state.currentChapter ? `已选：${state.currentChapter.name}` : state.currentCourse ? "已选：全部章节" : "请选择科目和章节";
+  btn.textContent = state.currentCourse ? "进入做题" : "选择题库后进入做题";
+  btn.dataset.hint = selected;
+  btn.disabled = !state.currentCourse;
 }
 
 function isAdmin() {
@@ -730,6 +762,7 @@ function renderCourses() {
     btn.onclick = () => selectCourse(course);
     $("courseList").appendChild(btn);
   }
+  updatePickerHint();
 }
 
 async function selectCourse(course, options = {}) {
@@ -761,6 +794,7 @@ async function selectCourse(course, options = {}) {
   await loadTypes();
   await loadQuestions();
   if (!isAdmin() && options.closePicker) setCoursePicker(false);
+  updatePickerHint();
   scheduleSave();
 }
 
@@ -790,6 +824,7 @@ function renderChapters() {
   indexTree(roots);
   ensureChapterExpansion(roots);
   renderChapterNodes(roots, $("chapterList"));
+  updatePickerHint();
 }
 
 function buildChapterTree(chapters) {
@@ -886,6 +921,8 @@ async function selectChapter(chapter) {
   renderChapters();
   await loadTypes();
   await loadQuestions();
+  closePickerAfterSelection();
+  updatePickerHint();
   scheduleSave();
 }
 
@@ -3048,6 +3085,13 @@ $("logoutBtn").onclick = () => logout().catch((err) => toast(err.message));
 $("mobileMenuBtn").onclick = () => setMobileMenu(!state.mobileMenuOpen);
 $("mobileToolsBtn").onclick = () => setMobileTools(!state.mobileToolsOpen);
 $("answerCardCollapseBtn").onclick = () => setAnswerCardCollapsed(!state.answerCardCollapsed);
+$("pickerDoneBtn").onclick = () => {
+  if (!state.currentCourse) {
+    toast("请先选择题库");
+    return;
+  }
+  setCoursePicker(false);
+};
 $("prevBtn").onclick = () => moveQuestion(-1);
 $("nextBtn").onclick = () => moveQuestion(1);
 $("answerToggleBtn").onclick = toggleAnswer;

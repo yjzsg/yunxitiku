@@ -549,6 +549,10 @@ body.picker-open .course-pane {
   display: grid;
 }
 
+body.picker-open .picker-done-btn {
+  display: inline-flex;
+}
+
 body.admin-view .workspace {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -750,6 +754,44 @@ body.admin-view .workspace {
 
 .chapter-row.leaf .chapter-item span::before {
   content: "◇";
+}
+
+.picker-done-btn {
+  display: none;
+  margin: 8px 10px 10px;
+  border-color: transparent;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 10px 22px rgba(99, 102, 241, 0.22);
+}
+
+.picker-done-btn:hover {
+  border-color: transparent;
+  background: var(--primary-600);
+  color: #fff;
+}
+
+.picker-done-btn:disabled {
+  border-color: var(--border);
+  background: #f1f5f9;
+  color: var(--muted);
+  opacity: 1;
+}
+
+.picker-done-btn::before {
+  content: attr(data-hint);
+  max-width: min(52vw, 320px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.picker-done-btn:disabled::before {
+  color: var(--muted);
 }
 
 .question-pane {
@@ -2438,7 +2480,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .course-pane {
     min-height: 0;
     max-height: calc(100dvh - 122px);
-    grid-template-rows: auto minmax(116px, 24dvh) auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(116px, 24dvh) auto minmax(0, 1fr) auto;
     border-radius: 16px;
   }
 
@@ -2458,6 +2500,21 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .course-list,
   .chapter-list {
     padding: 8px;
+  }
+
+  .picker-done-btn {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    min-height: 42px;
+    margin: 7px;
+    border-radius: 14px;
+    justify-content: space-between;
+    padding-inline: 12px;
+  }
+
+  .picker-done-btn::before {
+    max-width: 62vw;
   }
 
   .course-item {
