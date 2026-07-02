@@ -1015,10 +1015,7 @@ sealed class AppPaths
     private string ResolvePublicRoot(string? configured)
     {
         if (!string.IsNullOrWhiteSpace(configured)) return Resolve(configured);
-        var bundled = Resolve("public");
-        if (Directory.Exists(bundled)) return bundled;
-        var sibling = Path.GetFullPath(Path.Combine(BaseRoot, "..", "..", "webapp", "public"));
-        return Directory.Exists(sibling) ? sibling : bundled;
+        return Resolve("public");
     }
 }
 

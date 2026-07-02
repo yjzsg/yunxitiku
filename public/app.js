@@ -61,7 +61,12 @@ function setText(id, value) {
 }
 
 async function api(path, options) {
-  const res = await fetch(path, options);
+  let res;
+  try {
+    res = await fetch(path, options);
+  } catch (err) {
+    throw new Error("网络连接失败，请检查服务是否已启动");
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
@@ -754,8 +759,15 @@ async function loadUserData(user) {
   const res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
   state.user = res.user;
   state.storage = normalizeStorage(res.data || {});
+  state.zoom = normalizeZoom(state.storage.settings?.zoom);
   localStorage.setItem(LAST_USER_KEY, state.user);
   renderUsers();
+}
+
+function normalizeZoom(value) {
+  const zoom = Number(value || 1);
+  if (!Number.isFinite(zoom)) return 1;
+  return Math.max(0.8, Math.min(1.5, zoom));
 }
 
 function normalizeStorage(data) {
@@ -1726,6 +1738,7 @@ function renderAnswerCardPage(options = {}) {
     };
     content.appendChild(btn);
   }
+  content.querySelector(".card-cell.current")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 function updateStats() {
@@ -1809,6 +1822,15 @@ function toggleVerifyMode() {
   scheduleSave();
   renderVerifyModeControls();
   toast(next === "single" ? "已切换为逐题验证" : "已切换为统一验证");
+}
+
+function changeZoom(delta) {
+  state.zoom = normalizeZoom(Math.round((state.zoom + delta) * 10) / 10);
+  state.storage.settings ||= {};
+  state.storage.settings.zoom = state.zoom;
+  scheduleSave();
+  if (state.questions[state.currentIndex]?.detail) renderQuestion();
+  else $("questionView")?.style.setProperty("--zoom", state.zoom);
 }
 
 function markQuestionVerified(q) {
@@ -3071,6 +3093,14 @@ function stopExamTimer() {
   state.examTimer = null;
 }
 
+function syncExamTimer() {
+  if (state.mode !== "exam" || !state.exam) return;
+  renderExamStatus();
+  if (!state.submitted && Date.now() >= state.exam.endsAt) {
+    submitPaper(true).catch((err) => toast(err.message));
+  }
+}
+
 function renderExamStatus() {
   const host = $("examStatus");
   if (!host) return;
@@ -3378,10 +3408,18 @@ if ($("coursePickerBtn")) $("coursePickerBtn").onclick = () => setCoursePicker(!
 $("searchToggleBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
 $("filterBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
 $("printBtn").onclick = () => window.print();
-$("zoomInBtn").onclick = () => { state.zoom = Math.min(1.5, state.zoom + 0.1); renderQuestion(); };
-$("zoomOutBtn").onclick = () => { state.zoom = Math.max(0.8, state.zoom - 0.1); renderQuestion(); };
+$("zoomInBtn").onclick = () => changeZoom(0.1);
+$("zoomOutBtn").onclick = () => changeZoom(-0.1);
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
 document.addEventListener("fullscreenchange", updateFullscreenState);
+document.addEventListener("visibilitychange", () => {
+  if (state.mode !== "exam" || !state.exam) return;
+  if (document.hidden) stopExamTimer();
+  else {
+    startExamTimer();
+    syncExamTimer();
+  }
+});
 document.querySelector('[data-action="refresh"]').onclick = () => loadCourses().then(() => toast("已重新读取本地题库"));
 
 $("courseSearch").addEventListener("input", debounce(loadCourses));
