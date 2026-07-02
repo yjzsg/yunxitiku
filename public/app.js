@@ -456,8 +456,28 @@ function setMobileTools(open) {
   }
 }
 
+function updateFullscreenState() {
+  const btn = $("fullscreenBtn");
+  if (!btn) return;
+  const active = !!document.fullscreenElement;
+  btn.textContent = active ? "收起" : "全屏";
+  btn.classList.toggle("active", active);
+  btn.setAttribute("aria-expanded", String(active));
+}
+
+async function toggleFullscreen() {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+    updateFullscreenState();
+    return;
+  }
+  await document.documentElement.requestFullscreen();
+  updateFullscreenState();
+}
+
 async function init() {
   ensureMobileControls();
+  updateFullscreenState();
   await loadUsers();
   const sessionUser = localStorage.getItem(SESSION_USER_KEY);
   if (sessionUser && state.users.some((item) => item.name.toLowerCase() === sessionUser.toLowerCase() && !item.disabled)) {
@@ -2351,9 +2371,18 @@ async function uploadAdminData(type, btn) {
     state.adminDataStatus = result.status || null;
     input.value = "";
     if (type === "bank") {
+      state.adminDataStatus = null;
       state.adminCourses = [];
+      state.courses = [];
+      state.chapters = [];
+      state.types = [];
+      state.questions = [];
+      state.currentCourse = null;
+      state.currentChapter = null;
+      state.currentIndex = -1;
       await loadCourses();
       await loadAdminCourses().catch(() => {});
+      state.adminView = "banks";
     } else {
       await loadUsers();
     }
@@ -2830,6 +2859,11 @@ async function updateQuestionBank(courseId = 0) {
   const query = new URLSearchParams({ user: state.user });
   if (courseId) query.set("courseId", String(courseId));
   const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
+  if (result.reserved || result.mode === "upload") {
+    toast(result.message || "当前部署使用上传题库包更新");
+    if (isAdmin() && state.adminView === "banks") renderAdminRows(state.adminRows, state.adminFailedCount);
+    return;
+  }
   if (result.ok && Array.isArray(result.results)) {
     const updated = result.results.filter((r) => Number(r.chapters || 0) > 0 || Number(r.subjects || 0) > 0);
     if (updated.length) {
@@ -3024,7 +3058,8 @@ $("filterBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
 $("printBtn").onclick = () => window.print();
 $("zoomInBtn").onclick = () => { state.zoom = Math.min(1.5, state.zoom + 0.1); renderQuestion(); };
 $("zoomOutBtn").onclick = () => { state.zoom = Math.max(0.8, state.zoom - 0.1); renderQuestion(); };
-$("fullscreenBtn").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+$("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
+document.addEventListener("fullscreenchange", updateFullscreenState);
 document.querySelector('[data-action="refresh"]').onclick = () => loadCourses().then(() => toast("已重新读取本地题库"));
 
 $("courseSearch").addEventListener("input", debounce(loadCourses));

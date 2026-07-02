@@ -256,12 +256,14 @@ app.MapPost("/api/admin/update-bank", (string? user, int? courseId) =>
         return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     }
     var results = courseId.HasValue && courseId.Value > 0
-        ? new[] { new { courseId = courseId.Value, chapters = 0, subjects = 0, reserved = true } }
+        ? new[] { new { courseId = courseId.Value, chapters = 0, subjects = 0, reserved = true, mode = "upload" } }
         : Array.Empty<object>();
     return Results.Json(new
     {
         ok = true,
-        message = "Docker 版已预留更新接口。请在管理员数据管理中上传题库包，或直接替换挂载目录里的 data/question-bank.db。",
+        reserved = true,
+        mode = "upload",
+        message = "当前部署使用上传题库包更新。请到管理员“数据管理”上传题库 zip，或直接替换挂载目录里的 data/question-bank.db 与 data/assets。",
         results
     });
 });
