@@ -783,6 +783,8 @@ function normalizeStorage(data) {
     examHistory: Array.isArray(data.examHistory) ? data.examHistory : [],
     dailyReports: Array.isArray(data.dailyReports) ? data.dailyReports : [],
     confidence: data.confidence && typeof data.confidence === "object" ? data.confidence : {},
+    wrongReasons: data.wrongReasons && typeof data.wrongReasons === "object" ? data.wrongReasons : {},
+    smartPractice: data.smartPractice && typeof data.smartPractice === "object" ? data.smartPractice : null,
     tags,
     tagLabels,
     settings: data.settings || {},
@@ -1050,6 +1052,7 @@ function renderChapterNodes(nodes, container) {
 }
 
 async function selectChapter(chapter) {
+  if (state.mode === "smart") state.mode = "practice";
   state.currentChapter = chapter;
   state.currentIndex = -1;
   state.submitted = false;
@@ -1213,6 +1216,16 @@ function getModeQuestionIds(courseStore) {
 }
 
 function getSmartPracticeIds(courseStore = userCourseStore()) {
+  const saved = state.storage.smartPractice;
+  if (saved && Number(saved.courseId || 0) === Number(state.currentCourse?.id || 0) && Array.isArray(saved.ids) && saved.ids.length) {
+    return saved.ids.map(Number).filter(Boolean);
+  }
+  const ids = buildSmartPracticeIds(courseStore);
+  saveSmartPracticeSession(ids);
+  return ids;
+}
+
+function buildSmartPracticeIds(courseStore = userCourseStore()) {
   const ids = [];
   const pushUnique = (id) => {
     const n = Number(id);
@@ -1233,6 +1246,16 @@ function getSmartPracticeIds(courseStore = userCourseStore()) {
     .slice(0, 60 - ids.length)
     .forEach((item) => pushUnique(item.id));
   return ids.slice(0, 60);
+}
+
+function saveSmartPracticeSession(ids) {
+  state.storage.smartPractice = {
+    courseId: state.currentCourse?.id || 0,
+    courseName: state.currentCourse?.name || "",
+    ids: ids.map(Number).filter(Boolean),
+    createdAt: nowText(),
+  };
+  scheduleSave();
 }
 
 function findStartIndex(items, subjectId) {
@@ -1351,7 +1374,7 @@ function renderQuestionTags(q) {
   const labels = tagLabels();
   const tagSummary = currentTags.length ? currentTags.join("、") : "未添加";
   const confidence = state.storage.confidence?.[q.id] || "";
-  const wrongReason = state.storage.wrong?.[q.id]?.reason || "";
+  const wrongReason = questionWrongReason(q.id);
   panel.innerHTML = `
     <button id="tagPanelToggleBtn" class="tag-panel-toggle" type="button" aria-expanded="false">
       <span>标签</span>
@@ -1413,14 +1436,20 @@ function setQuestionConfidence(questionId, value) {
 
 function setQuestionWrongReason(q, value) {
   if (!q) return;
-  state.storage.wrong ||= {};
-  const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
-  record.reason = record.reason === value ? "" : value;
-  state.storage.wrong[q.id] = record;
-  if (record.reason) userCourseStore().wrong[q.id] = true;
+  state.storage.wrongReasons ||= {};
+  const current = questionWrongReason(q.id);
+  if (current === value) state.storage.wrongReasons[q.id] = "";
+  else state.storage.wrongReasons[q.id] = value;
   scheduleSave();
   renderQuestionTags(q);
   renderAnswerCardPage({ updateNav: false });
+}
+
+function questionWrongReason(questionId) {
+  if (state.storage.wrongReasons && Object.prototype.hasOwnProperty.call(state.storage.wrongReasons, questionId)) {
+    return state.storage.wrongReasons[questionId] || "";
+  }
+  return state.storage.wrongReasons?.[questionId] || state.storage.wrong?.[questionId]?.reason || "";
 }
 
 function addQuestionTag(questionId, rawLabel) {
@@ -1812,8 +1841,9 @@ function updateStats() {
 }
 
 function renderMode() {
+  const visualMode = state.mode === "smart" ? "practice" : state.mode;
   document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.mode === state.mode);
+    btn.classList.toggle("active", btn.dataset.mode === visualMode);
   });
   document.body.dataset.mode = state.mode;
   renderVerifyModeControls();
@@ -2000,8 +2030,10 @@ function renderStudyDashboard(courseStore, stats, items) {
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
   const report = getTodayReport();
   const reportText = report
-    ? `今日已记录：${report.done} 题 · 正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
+    ? `已记录快照：${report.done} 题 · 正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
     : buildStudyReportSummary(courseStore, stats, items).summary;
+  const smart = state.storage.smartPractice;
+  const canContinueSmart = smart && Number(smart.courseId || 0) === Number(state.currentCourse?.id || 0) && Array.isArray(smart.ids) && smart.ids.length;
   return `
     <div class="study-dashboard">
       <div class="study-card">
@@ -2015,9 +2047,14 @@ function renderStudyDashboard(courseStore, stats, items) {
         <small>${weak.map((item) => `${item.name} ${item.rate}%`).join(" · ") || "继续积累做题数据后会更准"}</small>
       </div>
       <div class="study-card">
-        <span>日报</span>
+        <span>进度快照</span>
         <b>${report ? "已生成" : "未生成"}</b>
-        <button id="dailyReportBtn" type="button">${report ? "更新日报" : "生成今日日报"}</button>
+        <button id="dailyReportBtn" type="button">${report ? "更新快照" : "生成今日快照"}</button>
+      </div>
+      <div class="study-card ${canContinueSmart ? "" : "muted-card"}">
+        <span>智能练习</span>
+        <b>${canContinueSmart ? `${smart.ids.length} 题可继续` : "暂无练习批次"}</b>
+        <button id="continueSmartBtn" type="button" ${canContinueSmart ? "" : "disabled"}>继续上次</button>
       </div>
     </div>
   `;
@@ -2035,8 +2072,10 @@ function bindStudyDashboardActions(courseStore) {
     state.storage.dailyReports = state.storage.dailyReports.slice(0, 60);
     scheduleSave();
     renderProgress();
-    toast("学习日报已生成");
+    toast("进度快照已生成");
   };
+  const smartBtn = $("continueSmartBtn");
+  if (smartBtn) smartBtn.onclick = () => continueSmartPractice().catch((err) => toast(err.message));
 }
 
 function getTodayReport() {
@@ -2056,7 +2095,7 @@ function buildStudyReportSummary(courseStore, stats, items) {
     rate,
     due,
     focus,
-    summary: `累计 ${stats.done} 题 · 正确率 ${rate}% · ${focus}`,
+    summary: `当前进度快照：累计 ${stats.done} 题 · 正确率 ${rate}% · ${focus}`,
   };
 }
 
@@ -2084,10 +2123,29 @@ function getWeakChapterRows(courseStore, items) {
 async function startSmartPractice() {
   if (!state.currentCourse) return;
   if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  const ids = buildSmartPracticeIds(userCourseStore());
+  if (!ids.length) {
+    toast("暂无可生成的智能练习");
+    return;
+  }
+  saveSmartPracticeSession(ids);
   state.mode = "smart";
   setCoursePicker(false);
   await loadQuestions();
   toast("已生成智能练习");
+}
+
+async function continueSmartPractice() {
+  if (!state.currentCourse) return;
+  const smart = state.storage.smartPractice;
+  if (!smart || Number(smart.courseId || 0) !== Number(state.currentCourse.id) || !Array.isArray(smart.ids) || !smart.ids.length) {
+    toast("没有可继续的智能练习");
+    return;
+  }
+  state.mode = "smart";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast("已继续上次智能练习");
 }
 
 async function startDueWrongReview() {
@@ -3524,8 +3582,11 @@ function escapeHtml(value) {
 }
 
 function isTypingTarget(target) {
-  const tag = target?.tagName;
-  return !!(target?.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT");
+  const isEditable = (el) => {
+    const tag = el?.tagName;
+    return !!(el?.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT");
+  };
+  return isEditable(target) || isEditable(document.activeElement);
 }
 
 function hasOpenModal() {
