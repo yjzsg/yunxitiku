@@ -1925,7 +1925,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .analysis-row {
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 10px;
   text-align: left;
@@ -1950,6 +1950,40 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .analysis-row.good b { color: var(--success); }
 .analysis-row.warn b { color: var(--warning); }
 .analysis-row.bad b { color: var(--danger); }
+
+.mastery-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.mastery-badge.none {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.mastery-badge.weak {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.mastery-badge.normal {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.mastery-badge.stable {
+  background: #dcfce7;
+  color: #166534;
+}
 
 .review-plan-panel {
   display: grid;
@@ -3045,11 +3079,18 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .analysis-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
   .analysis-row em {
     grid-column: 1 / -1;
+  }
+
+  .mastery-badge {
+    min-width: 46px;
+    min-height: 22px;
+    padding-inline: 7px;
+    font-size: 11px;
   }
 
   .exam-rule-list > div {

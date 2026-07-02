@@ -54,6 +54,8 @@ const SESSION_USER_KEY = "yunxi-session-user";
 const LAST_USER_KEY = "yunxi-current-user";
 const REVIEW_INTERVAL_DAYS = [1, 2, 4, 7, 15, 30];
 const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "待复盘"];
+const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
+const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
 
 function setText(id, value) {
   const el = $(id);
@@ -1232,6 +1234,7 @@ function buildSmartPracticeIds(courseStore = userCourseStore()) {
     const n = Number(id);
     if (n && !ids.includes(n)) ids.push(n);
   };
+  const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
   getWrongRecordsForCurrentCourse(courseStore)
     .filter(([, item]) => isReviewDue(item) || Number(item.count || 0) >= 2)
     .slice(0, 20)
@@ -1240,9 +1243,15 @@ function buildSmartPracticeIds(courseStore = userCourseStore()) {
   Object.keys(courseStore.done || {})
     .filter((id) => !courseStore.correct?.[id])
     .forEach(pushUnique);
+  getWeakChapterRows(courseStore, allItems).slice(0, 5).forEach((chapter) => {
+    allItems
+      .filter((item) => chapterPathForId(item.chapterId).slice(0, 2).some((node) => Number(node.id) === Number(chapter.id)))
+      .filter((item) => !courseStore.correct?.[item.id])
+      .slice(0, 10)
+      .forEach((item) => pushUnique(item.id));
+  });
   if (ids.length >= 30) return ids.slice(0, 60);
-  const remaining = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
-  remaining
+  allItems
     .filter((item) => !courseStore.done?.[item.id])
     .slice(0, 60 - ids.length)
     .forEach((item) => pushUnique(item.id));
@@ -1379,6 +1388,7 @@ function renderQuestionTags(q) {
   const tagSummary = currentTags.length ? currentTags.join("、") : "未添加";
   const confidence = state.storage.confidence?.[q.id] || "";
   const wrongReason = questionWrongReason(q.id);
+  const favoriteGroup = favoriteGroupOf(q.id);
   panel.innerHTML = `
     <button id="tagPanelToggleBtn" class="tag-panel-toggle" type="button" aria-expanded="false">
       <span>标签</span>
@@ -1405,6 +1415,14 @@ function renderQuestionTags(q) {
         <strong>错因</strong>
         ${["概念不清", "计算错误", "审题错误", "记忆错误", "选项陷阱"].map((label) => `<button type="button" class="quick-mark ${wrongReason === label ? "active" : ""}" data-wrong-reason="${label}">${label}</button>`).join("")}
       </div>
+      <div class="quick-mark-row">
+        <strong>收藏夹</strong>
+        ${FAVORITE_GROUPS.map((label) => `<button type="button" class="quick-mark ${favoriteGroup === label ? "active" : ""}" data-favorite-group="${label}">${label}</button>`).join("")}
+      </div>
+      <div class="quick-mark-row">
+        <strong>笔记</strong>
+        <button type="button" class="quick-mark" id="noteTemplateBtn">套用模板</button>
+      </div>
     </div>
   `;
   setMobileTagsOpen(false);
@@ -1421,6 +1439,10 @@ function renderQuestionTags(q) {
   panel.querySelectorAll("[data-wrong-reason]").forEach((btn) => {
     btn.onclick = () => setQuestionWrongReason(q, btn.dataset.wrongReason);
   });
+  panel.querySelectorAll("[data-favorite-group]").forEach((btn) => {
+    btn.onclick = () => setFavoriteGroup(q, btn.dataset.favoriteGroup);
+  });
+  $("noteTemplateBtn").onclick = () => applyNoteTemplate(q.id);
   $("addTagBtn").onclick = () => addQuestionTag(q.id, $("tagInput").value);
   $("tagInput").onkeydown = (event) => {
     if (event.key === "Enter") {
@@ -1454,6 +1476,50 @@ function questionWrongReason(questionId) {
     return state.storage.wrongReasons[questionId] || "";
   }
   return state.storage.wrongReasons?.[questionId] || state.storage.wrong?.[questionId]?.reason || "";
+}
+
+function favoriteGroupOf(questionId) {
+  return state.storage.favorite?.[questionId]?.group || "";
+}
+
+function ensureFavoriteRecord(q, group = "") {
+  state.storage.favorite ||= {};
+  state.storage.favorite[q.id] ||= {
+    courseId: q.courseId,
+    chapterName: q.chapterName,
+    type: q.type,
+    title: stripText(q.stem).slice(0, 120),
+    at: nowText(),
+  };
+  if (group) state.storage.favorite[q.id].group = group;
+  return state.storage.favorite[q.id];
+}
+
+function setFavoriteGroup(q, group) {
+  if (!q || !group) return;
+  const record = ensureFavoriteRecord(q, group);
+  if (record.group === group && record.groupToggledAt) {
+    record.group = "";
+    record.groupToggledAt = "";
+  } else {
+    record.group = group;
+    record.groupToggledAt = nowText();
+  }
+  scheduleSave();
+  renderQuestion();
+  toast(record.group ? `已加入${record.group}` : "已取消收藏分组");
+}
+
+function applyNoteTemplate(questionId) {
+  const editor = $("noteEditor");
+  if (!editor) return;
+  const current = editor.value.trim();
+  if (!current) editor.value = NOTE_TEMPLATE;
+  else if (!current.includes("考点：") && !current.includes("易错点：")) editor.value = `${NOTE_TEMPLATE}\n${current}`;
+  editor.classList.remove("hidden");
+  saveNote();
+  editor.focus();
+  toast("已套用笔记模板");
 }
 
 function addQuestionTag(questionId, rawLabel) {
@@ -1697,6 +1763,10 @@ function saveSubjectiveAnswer(q, answer) {
   else delete courseStore.done[q.id];
   if (normalizeAnswer(answer)) recordPracticeActivity(q);
   if (state.submitted && normalizeAnswer(answer) && !isSubjective(q)) markResult(q);
+  if (currentVerifyMode() === "instant" && normalizeAnswer(answer)) {
+    verifyQuestionResult(q);
+    state.answerVisible = true;
+  }
   scheduleSave();
   renderVerifyModeControls();
   renderAnswerCardPage({ updateNav: false });
@@ -1717,6 +1787,10 @@ function chooseOption(q, label) {
   else delete courseStore.done[q.id];
   if (answer) recordPracticeActivity(q);
   if (state.submitted && state.answers[q.id]) markResult(q);
+  if (answer && currentVerifyMode() === "instant") {
+    verifyQuestionResult(q);
+    state.answerVisible = true;
+  }
   scheduleSave();
   renderQuestion();
 }
@@ -1947,7 +2021,7 @@ function renderMode() {
 
 function currentVerifyMode() {
   const stored = state.storage.settings?.verifyMode;
-  return stored === "single" ? "single" : "paper";
+  return ["paper", "single", "instant", "review"].includes(stored) ? stored : "paper";
 }
 
 function isQuestionVerified(questionId) {
@@ -1962,21 +2036,30 @@ function isQuestionVerified(questionId) {
 }
 
 function shouldRevealCurrentAnswer(q) {
-  return !!(state.answerVisible || state.submitted || isQuestionVerified(q?.id));
+  return !!(state.answerVisible || state.submitted || currentVerifyMode() === "review" || isQuestionVerified(q?.id));
 }
 
 function renderVerifyModeControls() {
   state.verifyMode = currentVerifyMode();
   const isExam = state.mode === "exam";
+  const modeLabels = {
+    paper: "统一验证",
+    single: "逐题验证",
+    instant: "立即反馈",
+    review: "背题模式",
+  };
   const modeBtn = $("verifyModeBtn");
   if (modeBtn) {
     modeBtn.classList.toggle("hidden", isExam || isAdmin());
-    modeBtn.classList.toggle("active", state.verifyMode === "single");
-    modeBtn.textContent = state.verifyMode === "single" ? "逐题验证" : "统一验证";
-    modeBtn.setAttribute("aria-pressed", String(state.verifyMode === "single"));
-    modeBtn.title = state.verifyMode === "single"
-      ? "当前为逐题验证：每题点击确认答案后立即显示解析"
-      : "当前为统一验证：点击提交答卷后统一显示对错";
+    modeBtn.classList.toggle("active", state.verifyMode !== "paper");
+    modeBtn.textContent = modeLabels[state.verifyMode] || modeLabels.paper;
+    modeBtn.setAttribute("aria-pressed", String(state.verifyMode !== "paper"));
+    modeBtn.title = {
+      paper: "考试式练习：提交答卷后统一显示对错",
+      single: "逐题验证：每题点击确认答案后立即显示解析",
+      instant: "立即反馈：选择答案后立刻显示答案和解析",
+      review: "背题模式：先看答案，再做信心、错因和笔记标记",
+    }[state.verifyMode] || "";
   }
   const confirmBtn = $("confirmAnswerBtn");
   if (confirmBtn) {
@@ -2004,12 +2087,15 @@ function renderVerifyModeControls() {
 
 function toggleVerifyMode() {
   state.storage.settings ||= {};
-  const next = currentVerifyMode() === "single" ? "paper" : "single";
+  const modes = ["paper", "single", "instant", "review"];
+  const current = currentVerifyMode();
+  const next = modes[(Math.max(0, modes.indexOf(current)) + 1) % modes.length];
   state.storage.settings.verifyMode = next;
   state.verifyMode = next;
   scheduleSave();
-  renderVerifyModeControls();
-  toast(next === "single" ? "已切换为逐题验证" : "已切换为统一验证");
+  if (state.questions[state.currentIndex]?.detail) renderQuestion();
+  else renderVerifyModeControls();
+  toast(`已切换为${{ paper: "统一验证", single: "逐题验证", instant: "立即反馈", review: "背题模式" }[next]}`);
 }
 
 function changeZoom(delta) {
@@ -2106,6 +2192,8 @@ function renderProgress() {
       <div class="practice-quick-actions">
         <button class="primary-action" id="smartPracticeBtn">智能练习</button>
         <button class="primary-action secondary" id="dueReviewBtn">今日错题复习</button>
+        <button class="primary-action secondary" id="similarWrongBtn">相似错题重练</button>
+        <button class="primary-action secondary" id="sprintPracticeBtn">考前冲刺</button>
         <button id="progressStartBtn">进入强化练习</button>
       </div>
     </div>
@@ -2120,6 +2208,8 @@ function renderProgress() {
   };
   $("smartPracticeBtn").onclick = () => startSmartPractice().catch((err) => toast(err.message));
   $("dueReviewBtn").onclick = () => startDueWrongReview().catch((err) => toast(err.message));
+  $("similarWrongBtn").onclick = () => startSimilarWrongPractice().catch((err) => toast(err.message));
+  $("sprintPracticeBtn").onclick = () => startSprintPractice().catch((err) => toast(err.message));
   bindLearningSignalActions();
 }
 
@@ -2127,7 +2217,7 @@ function renderStudyDashboard(courseStore, stats, items) {
   const records = getWrongRecordsForCurrentCourse(courseStore);
   const due = records.filter(([, item]) => isReviewDue(item)).length;
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
-  const report = getTodayReport();
+  const report = getTodayReport() || buildDailyReport(courseStore, stats, items);
   const today = getTodayActivity();
   const reportText = report
     ? `已记录快照：${report.done} 题 · 正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
@@ -2152,9 +2242,10 @@ function renderStudyDashboard(courseStore, stats, items) {
         <small>${weak.map((item) => `${item.name} ${item.rate}%`).join(" · ") || "继续积累做题数据后会更准"}</small>
       </div>
       <div class="study-card">
-        <span>进度快照</span>
-        <b>${report ? "已生成" : "未生成"}</b>
-        <button id="dailyReportBtn" type="button">${report ? "更新快照" : "生成今日快照"}</button>
+        <span>学习日报</span>
+        <b>${report.todayTotal || today.total} 题</b>
+        <small>${escapeHtml(report.tomorrow || "明天继续保持节奏")}</small>
+        <button id="dailyReportBtn" type="button">更新日报</button>
       </div>
       <div class="study-card ${canContinueSmart ? "" : "muted-card"}">
         <span>智能练习</span>
@@ -2169,7 +2260,7 @@ function bindStudyDashboardActions(courseStore) {
   const btn = $("dailyReportBtn");
   if (!btn) return;
   btn.onclick = () => {
-    const report = buildStudyReportSummary(courseStore, getCourseStats(), state.analysisQuestions.length ? state.analysisQuestions : state.questions);
+    const report = buildDailyReport(courseStore, getCourseStats(), state.analysisQuestions.length ? state.analysisQuestions : state.questions);
     state.storage.dailyReports ||= [];
     const key = todayKey();
     state.storage.dailyReports = state.storage.dailyReports.filter((item) => item.key !== key);
@@ -2177,7 +2268,7 @@ function bindStudyDashboardActions(courseStore) {
     state.storage.dailyReports = state.storage.dailyReports.slice(0, 60);
     scheduleSave();
     renderProgress();
-    toast("进度快照已生成");
+    toast("学习日报已更新");
   };
   const smartBtn = $("continueSmartBtn");
   if (smartBtn) smartBtn.onclick = () => continueSmartPractice().catch((err) => toast(err.message));
@@ -2201,6 +2292,27 @@ function buildStudyReportSummary(courseStore, stats, items) {
     due,
     focus,
     summary: `当前进度快照：累计 ${stats.done} 题 · 正确率 ${rate}% · ${focus}`,
+  };
+}
+
+function buildDailyReport(courseStore, stats, items) {
+  const base = buildStudyReportSummary(courseStore, stats, items);
+  const today = getTodayActivity();
+  const weak = getWeakChapterRows(courseStore, items)[0];
+  const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
+  const tomorrow = weak
+    ? `明天优先练「${weak.name}」+ 到期错题 ${due} 道`
+    : due
+      ? `明天优先复习到期错题 ${due} 道`
+      : "明天可继续智能练习 30 题";
+  return {
+    ...base,
+    todayTotal: today.total,
+    todayVerified: today.verified,
+    todayCorrect: today.correct,
+    todayRate: today.rate,
+    tomorrow,
+    summary: `今日 ${today.total} 题 · 确认正确率 ${today.rate}% · ${tomorrow}`,
   };
 }
 
@@ -2228,7 +2340,8 @@ function getWeakChapterRows(courseStore, items) {
 function renderLearningSignalPanel(courseStore) {
   const wrongReasonRows = buildSignalRows(state.storage.wrongReasons || {}, courseStore, "reason");
   const confidenceRows = buildSignalRows(state.storage.confidence || {}, courseStore, "confidence");
-  if (!wrongReasonRows.length && !confidenceRows.length) {
+  const favoriteRows = buildFavoriteGroupRows(courseStore);
+  if (!wrongReasonRows.length && !confidenceRows.length && !favoriteRows.length) {
     return `
       <div class="learning-signal-panel">
         <div class="trend-title">学习信号</div>
@@ -2254,9 +2367,27 @@ function renderLearningSignalPanel(courseStore) {
           <strong>信心分布</strong>
           <div class="signal-list">${renderRows(confidenceRows, "confidence")}</div>
         </div>
+        <div>
+          <strong>收藏分组</strong>
+          <div class="signal-list">${renderRows(favoriteRows, "favorite")}</div>
+        </div>
       </div>
     </div>
   `;
+}
+
+function buildFavoriteGroupRows(courseStore) {
+  const counts = new Map();
+  const validCourseId = Number(state.currentCourse?.id || 0);
+  Object.entries(state.storage.favorite || {}).forEach(([id, item]) => {
+    if (validCourseId && Number(item?.courseId || 0) !== validCourseId) return;
+    const label = item?.group || "未分组";
+    const row = counts.get(label) || { label, count: 0, ids: [] };
+    row.count++;
+    row.ids.push(Number(id));
+    counts.set(label, row);
+  });
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
 }
 
 function buildSignalRows(source, courseStore, type) {
@@ -2289,6 +2420,19 @@ function bindLearningSignalActions() {
 async function startSignalPractice(type, label) {
   if (!state.currentCourse || !label) return;
   const courseStore = userCourseStore();
+  if (type === "favorite") {
+    const match = buildFavoriteGroupRows(courseStore).find((row) => row.label === label);
+    if (!match?.ids?.length) {
+      toast("当前分组没有收藏题");
+      return;
+    }
+    saveSmartPracticeSession(match.ids.slice(0, 80), `收藏：${label}`);
+    state.mode = "smart";
+    setCoursePicker(false);
+    await loadQuestions();
+    toast(`已生成「${label}」收藏练习`);
+    return;
+  }
   const source = type === "confidence" ? state.storage.confidence : state.storage.wrongReasons;
   const rows = buildSignalRows(source || {}, courseStore, type);
   const match = rows.find((row) => row.label === label);
@@ -2348,6 +2492,101 @@ async function startDueWrongReview() {
   setCoursePicker(false);
   await loadQuestions();
   toast("已进入今日错题复习");
+}
+
+async function startSimilarWrongPractice() {
+  if (!state.currentCourse) return;
+  if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  const ids = buildSimilarWrongIds(userCourseStore());
+  if (!ids.length) {
+    toast("暂无可重练的相似错题");
+    return;
+  }
+  saveSmartPracticeSession(ids.slice(0, 80), "相似错题重练");
+  state.mode = "smart";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast("已生成相似错题重练");
+}
+
+function buildSimilarWrongIds(courseStore = userCourseStore()) {
+  const wrongRecords = getWrongRecordsForCurrentCourse(courseStore)
+    .sort((a, b) => Number(b[1]?.count || 0) - Number(a[1]?.count || 0))
+    .slice(0, 12);
+  const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const ids = [];
+  const pushUnique = (id) => {
+    const n = Number(id);
+    if (n && !ids.includes(n)) ids.push(n);
+  };
+  wrongRecords.forEach(([id, record]) => {
+    pushUnique(id);
+    const keywords = extractKeywords(record.title || "");
+    allItems
+      .filter((item) => {
+        const sameChapter = Number(item.chapterId || 0) === Number(record.chapterId || 0) || item.chapterName === record.chapterName;
+        const sameType = !record.type || item.type === record.type;
+        const text = stripText(item.title || item.stem || item.detail?.stem || "");
+        const keywordHit = keywords.length && keywords.some((word) => text.includes(word));
+        return Number(item.id) !== Number(id) && (sameChapter || keywordHit) && sameType;
+      })
+      .slice(0, 6)
+      .forEach((item) => pushUnique(item.id));
+  });
+  return ids;
+}
+
+function extractKeywords(text) {
+  return [...new Set(String(text || "")
+    .replace(/[，。、“”‘’；：！？（）()《》【】\[\],.;:!?]/g, " ")
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 2 && item.length <= 12)
+  )].slice(0, 8);
+}
+
+async function startSprintPractice() {
+  if (!state.currentCourse) return;
+  if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  const ids = buildSprintPracticeIds(userCourseStore());
+  if (!ids.length) {
+    toast("暂无可生成的冲刺题");
+    return;
+  }
+  saveSmartPracticeSession(ids.slice(0, 100), "考前冲刺");
+  state.mode = "smart";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast("已生成考前冲刺题");
+}
+
+function buildSprintPracticeIds(courseStore = userCourseStore()) {
+  const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const ids = [];
+  const pushUnique = (id) => {
+    const n = Number(id);
+    if (n && !ids.includes(n)) ids.push(n);
+  };
+  const cutoff = Date.now() - 7 * 86400000;
+  getWrongRecordsForCurrentCourse(courseStore)
+    .filter(([, item]) => {
+      const at = parseDate(item?.at || item?.wrongAt);
+      return !at || at.getTime() >= cutoff || Number(item.count || 0) >= 2;
+    })
+    .slice(0, 30)
+    .forEach(([id]) => pushUnique(id));
+  getWeakChapterRows(courseStore, allItems).slice(0, 6).forEach((chapter) => {
+    allItems
+      .filter((item) => chapterPathForId(item.chapterId).slice(0, 2).some((node) => Number(node.id) === Number(chapter.id)))
+      .filter((item) => !courseStore.correct?.[item.id])
+      .slice(0, 10)
+      .forEach((item) => pushUnique(item.id));
+  });
+  allItems
+    .filter((item) => !courseStore.done?.[item.id])
+    .slice(0, 100 - ids.length)
+    .forEach((item) => pushUnique(item.id));
+  return ids;
 }
 
 function renderDeepAnalysis(courseStore, items = state.questions) {
@@ -2417,14 +2656,25 @@ function renderAnalysisRows(rows, clickable) {
   return rows.map((row) => {
     const rate = row.done ? Math.round(row.correct / row.done * 100) : 0;
     const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
+    const mastery = chapterMastery(row);
     return `
       <button type="button" class="analysis-row ${level}" disabled>
         <span>${escapeHtml(row.name)}</span>
         <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
+        <i class="mastery-badge ${mastery.level}">${mastery.label}</i>
         <b>${rate}%</b>
       </button>
     `;
   }).join("");
+}
+
+function chapterMastery(row) {
+  const done = Number(row.done || 0);
+  const rate = done ? Math.round(Number(row.correct || 0) / done * 100) : 0;
+  if (!done) return { label: "未开始", level: "none" };
+  if (done < 5 || rate < 60) return { label: "薄弱", level: "weak" };
+  if (rate < 80) return { label: "一般", level: "normal" };
+  return { label: "稳定", level: "stable" };
 }
 
 function renderAnalysisChapterTree(rows) {
@@ -2439,6 +2689,7 @@ function renderAnalysisChapterTree(rows) {
     const expanded = state.analysisExpandedChapters.has(Number(node.id));
     const rate = row.done ? Math.round(row.correct / row.done * 100) : 0;
     const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
+    const mastery = chapterMastery(row);
     return `
       <div class="analysis-tree-node level-${depth}">
         <div class="analysis-tree-row">
@@ -2446,6 +2697,7 @@ function renderAnalysisChapterTree(rows) {
           <button type="button" class="analysis-row ${level} ${depth === 1 ? "heading" : ""}" ${depth === 1 ? "disabled" : `data-analysis-chapter="${row.id}"`}>
             <span>${escapeHtml(row.name)}</span>
             <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
+            <i class="mastery-badge ${mastery.level}">${mastery.label}</i>
             <b>${rate}%</b>
           </button>
         </div>
@@ -3323,13 +3575,7 @@ function toggleFavorite() {
   const q = state.questions[state.currentIndex]?.detail;
   if (!q) return;
   if (state.storage.favorite[q.id]) delete state.storage.favorite[q.id];
-  else state.storage.favorite[q.id] = {
-    courseId: q.courseId,
-    chapterName: q.chapterName,
-    type: q.type,
-    title: stripText(q.stem).slice(0, 120),
-    at: nowText(),
-  };
+  else ensureFavoriteRecord(q, "考前速看");
   scheduleSave();
   renderQuestion();
 }
@@ -3830,6 +4076,26 @@ function handleGlobalShortcuts(event) {
     event.preventDefault();
     confirmCurrentAnswer();
     return;
+  }
+  if (!event.ctrlKey && !event.shiftKey && event.code === "Space" && state.currentIndex >= 0) {
+    event.preventDefault();
+    toggleFavorite();
+    return;
+  }
+  if (!event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "s" && state.currentIndex >= 0) {
+    event.preventDefault();
+    toggleAnswer();
+    return;
+  }
+  if (!event.ctrlKey && !event.shiftKey && /^[1-9]$/.test(event.key) && state.currentIndex >= 0) {
+    const q = state.questions[state.currentIndex]?.detail;
+    const index = Number(event.key) - 1;
+    const option = q?.options?.[index];
+    if (option && !shouldRevealCurrentAnswer(q)) {
+      event.preventDefault();
+      chooseOption(q, option.label);
+      return;
+    }
   }
   if (!event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "a" && state.currentIndex >= 0) {
     const q = state.questions[state.currentIndex]?.detail;
