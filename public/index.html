@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>云习题库</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <section id="loginView" class="login-view">
+    <div class="login-panel">
+      <h1>云习题库</h1>
+      <p>模拟考试 · 错题回顾 · 进度追踪</p>
+      <label>
+        <span>账号</span>
+        <input id="loginUserSelect" type="text" autocomplete="username" placeholder="请输入账号">
+      </label>
+      <label>
+        <span>密码</span>
+        <input id="loginPassword" type="password" placeholder="请输入密码">
+      </label>
+      <div class="login-actions">
+        <button id="loginBtn" class="primary-action">登录</button>
+      </div>
+      <label class="login-check">
+        <input type="checkbox" checked disabled>
+        <span>第一次登录必须修改密码</span>
+      </label>
+      <small>默认密码为123456</small>
+      <div id="changePasswordBox" class="change-password-box hidden">
+        <strong>首次登录，请先修改密码</strong>
+        <label>
+          <span>新密码</span>
+          <input id="newPassword" type="password" placeholder="至少 6 位">
+        </label>
+        <label>
+          <span>确认新密码</span>
+          <input id="confirmPassword" type="password" placeholder="再次输入新密码">
+        </label>
+        <button id="changePasswordBtn" class="primary-action" type="button">保存并进入</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="appShell" class="app-shell hidden">
+    <header class="main-nav">
+      <button class="nav-item study-only active" data-mode="practice">考试题库</button>
+      <button class="nav-item study-only" data-mode="exam">模拟考场</button>
+      <button class="nav-item study-only" data-mode="wrong">错题强化</button>
+      <button class="nav-item study-only" data-mode="progress">进度分析</button>
+      <button class="nav-item study-only" data-mode="favorite">收藏试题</button>
+      <button class="hidden" data-action="refresh" type="button">刷新列表</button>
+      <div class="account-box">
+        <span id="accountLabel">账号：未登录</span>
+        <button id="logoutBtn">退出</button>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <button id="searchToggleBtn">搜索</button>
+      <button id="answerToggleBtn">显示答案</button>
+      <button id="resetBtn">重新做题</button>
+      <button id="submitBtn">提交答卷</button>
+      <span class="toolbar-spacer"></span>
+      <button id="filterBtn">试题筛选</button>
+      <button id="printBtn">打印</button>
+      <button id="zoomInBtn">放大</button>
+      <button id="zoomOutBtn">缩小</button>
+      <button id="fullscreenBtn">全屏</button>
+    </section>
+
+    <div id="searchPanel" class="search-panel hidden">
+      <input id="courseSearch" placeholder="搜索科目">
+      <input id="questionSearch" placeholder="题目内搜索">
+      <select id="typeSelect"></select>
+      <select id="orderSelect">
+        <option value="">章节顺序</option>
+        <option value="random">随机练习</option>
+      </select>
+      <select id="limitSelect">
+        <option value="80">80题</option>
+        <option value="160">160题</option>
+        <option value="400">400题</option>
+        <option value="1000">1000题</option>
+      </select>
+    </div>
+    <div id="searchMatchPanel" class="search-match-panel hidden"></div>
+
+    <main class="workspace">
+      <aside class="course-pane">
+        <div class="pane-title"><span>科目</span><small>题库</small></div>
+        <div id="courseList" class="course-list"></div>
+        <div class="pane-title"><span>章节</span><small>当前科目</small></div>
+        <div id="chapterList" class="chapter-list"></div>
+      </aside>
+
+      <section class="question-pane">
+        <div class="course-head">
+          <div>
+            <div id="courseTitle" class="course-title">请选择科目</div>
+            <div id="courseMeta" class="course-meta">读取本机已更新题库 · 当前账号 <span id="userName">未登录</span></div>
+          </div>
+          <button id="coursePickerBtn" class="course-picker-btn" type="button">切换科目</button>
+        </div>
+
+        <div id="examStatus" class="exam-status hidden"></div>
+        <section id="adminDashboard" class="admin-dashboard hidden"></section>
+
+        <article id="questionView" class="question-view">
+          <div id="emptyState" class="empty">
+            <strong>选择科目开始刷题</strong>
+            <span>左侧选择科目和章节，底部答题卡会记录本次进度。</span>
+          </div>
+          <div id="questionBody" class="hidden">
+            <div class="question-head">
+              <span id="questionNo"></span>
+              <span id="questionType"></span>
+              <span id="questionChapter"></span>
+            </div>
+            <div id="stem" class="stem"></div>
+            <div id="extraQuestion" class="extra"></div>
+            <div id="options" class="options"></div>
+            <textarea id="noteEditor" class="note-editor hidden" placeholder="本题笔记，只保存到当前账号"></textarea>
+            <div id="answerBox" class="answer hidden">
+              <div><b>正确答案：</b><span id="answerText"></span></div>
+              <div id="description" class="description"></div>
+            </div>
+          </div>
+        </article>
+
+        <div class="question-actions">
+          <button id="prevBtn">上一题</button>
+          <button id="confirmAnswerBtn" class="confirm-answer-btn hidden" type="button">确认答案</button>
+          <button id="nextBtn">下一题</button>
+          <span class="toolbar-spacer"></span>
+          <button id="noteBtn">笔记</button>
+          <button id="favoriteBtn">收藏本题</button>
+          <button id="wrongBtn">纠错</button>
+        </div>
+
+        <footer class="answer-card-wrap">
+          <div class="stats">
+            <span>总题量：<b id="totalCount">0</b>题</span>
+            <span>已完成：<b id="doneCount">0</b>题</span>
+            <span>未完成：<b id="todoCount">0</b>题</span>
+            <span><i class="mark selected"></i>已做</span>
+            <span><i class="mark wrong"></i>错误</span>
+            <span><i class="mark correct"></i>正确</span>
+          </div>
+          <div id="answerCard" class="answer-card"></div>
+        </footer>
+      </section>
+    </main>
+  </div>
+
+  <div id="correctionModal" class="modal-backdrop hidden">
+    <div class="modal-panel correction-modal">
+      <div class="modal-head">
+        <strong>题目纠错</strong>
+        <button id="correctionCloseBtn" type="button">关闭</button>
+      </div>
+      <label>
+        <span>问题类型</span>
+        <select id="correctionType">
+          <option value="答案错误">答案错误</option>
+          <option value="题干错误">题干错误</option>
+          <option value="解析错误">解析错误</option>
+          <option value="选项错误">选项错误</option>
+          <option value="其他">其他</option>
+        </select>
+      </label>
+      <label>
+        <span>纠错说明</span>
+        <textarea id="correctionNote" placeholder="请描述哪里有问题，便于管理员核对"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button id="correctionCancelBtn" type="button">取消</button>
+        <button id="correctionSaveBtn" class="primary-action" type="button">保存纠错</button>
+      </div>
+    </div>
+  </div>
+  <div id="adminUserModal" class="modal-backdrop hidden">
+    <div class="modal-panel admin-user-modal">
+      <div class="modal-head">
+        <strong>添加用户</strong>
+        <button id="adminUserCloseBtn" type="button">关闭</button>
+      </div>
+      <label>
+        <span>账号名</span>
+        <input id="adminUserNameInput" type="text" autocomplete="off" placeholder="请输入新用户账号名">
+      </label>
+      <small>新账号默认密码为123456，首次登录必须修改密码。</small>
+      <div class="modal-actions">
+        <button id="adminUserCancelBtn" type="button">取消</button>
+        <button id="adminUserSaveBtn" class="primary-action" type="button">创建账号</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
