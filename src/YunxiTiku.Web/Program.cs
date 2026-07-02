@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -62,6 +63,20 @@ if (app.Configuration.GetValue<bool>("App:EnableHttpsRedirect"))
 {
     app.UseHttpsRedirection();
 }
+
+app.Use(async (context, next) =>
+{
+    var started = Stopwatch.GetTimestamp();
+    try
+    {
+        await next();
+    }
+    finally
+    {
+        var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {context.Request.Method} {context.Request.Path}{context.Request.QueryString} {context.Response.StatusCode} {elapsed:0.0}ms");
+    }
+});
 
 var publicFiles = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(paths.PublicRoot);
 app.UseDefaultFiles(new DefaultFilesOptions

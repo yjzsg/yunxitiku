@@ -780,6 +780,7 @@ function normalizeStorage(data) {
     notes: data.notes || {},
     corrections: Array.isArray(data.corrections) ? data.corrections : [],
     history: Array.isArray(data.history) ? data.history : [],
+    examHistory: Array.isArray(data.examHistory) ? data.examHistory : [],
     tags,
     tagLabels,
     settings: data.settings || {},
@@ -2811,6 +2812,10 @@ async function moveQuestion(delta) {
 }
 
 async function submitPaper(autoSubmit = false) {
+  if (state.mode === "exam" && state.submitted && state.exam?.result) {
+    toast("已经交卷");
+    return;
+  }
   state.submitted = true;
   let correct = 0;
   let checked = 0;
@@ -2830,9 +2835,11 @@ async function submitPaper(autoSubmit = false) {
     if (!isSubjective(item.detail)) markResult(item.detail);
   }
   const rate = checked ? Math.round((correct / checked) * 100) : 0;
+  const submittedAt = nowText();
   if (state.mode === "exam" && state.exam) {
     state.exam.submittedAt = Date.now();
     state.exam.result = { score, totalScore, correct, checked, rate, subjective };
+    recordExamHistory({ score, totalScore, correct, checked, rate, subjective, autoSubmit, submittedAt });
     stopExamTimer();
   }
   state.storage.history.unshift({
@@ -2845,7 +2852,7 @@ async function submitPaper(autoSubmit = false) {
     correct,
     score,
     totalScore,
-    at: nowText(),
+    at: submittedAt,
   });
   state.storage.history = state.storage.history.slice(0, 200);
   scheduleSave();
@@ -2914,6 +2921,65 @@ function toggleAnswer() {
   renderQuestion();
 }
 
+function recordExamHistory(result) {
+  if (!state.exam) return;
+  state.storage.examHistory ||= [];
+  const submittedAtMs = state.exam.submittedAt || Date.now();
+  const usedSeconds = Math.max(0, Math.round((submittedAtMs - state.exam.startedAt) / 1000));
+  state.storage.examHistory.unshift({
+    id: `${submittedAtMs}-${state.currentCourse?.id || 0}`,
+    name: state.exam.rule?.name || "模拟考场",
+    courseId: state.currentCourse?.id || 0,
+    courseName: state.currentCourse?.name || "",
+    total: state.questions.length,
+    done: result.checked,
+    correct: result.correct,
+    score: result.score,
+    totalScore: result.totalScore,
+    rate: result.rate,
+    subjective: result.subjective,
+    durationMinutes: state.exam.rule?.durationMinutes || 0,
+    usedSeconds,
+    autoSubmit: !!result.autoSubmit,
+    at: result.submittedAt,
+  });
+  state.storage.examHistory = state.storage.examHistory.slice(0, 50);
+}
+
+function renderExamHistory() {
+  const currentCourseId = Number(state.currentCourse?.id || 0);
+  const records = (state.storage.examHistory || [])
+    .filter((item) => !currentCourseId || Number(item.courseId || 0) === currentCourseId)
+    .slice(0, 5);
+  if (!records.length) {
+    return `
+      <div class="exam-history-card">
+        <div class="exam-section-title">模拟记录</div>
+        <span class="muted">暂无模拟考记录</span>
+      </div>
+    `;
+  }
+  return `
+    <div class="exam-history-card">
+      <div class="exam-section-title">模拟记录</div>
+      <div class="exam-history-list">
+        ${records.map((item) => {
+          const used = Number(item.usedSeconds || 0);
+          const minutes = Math.floor(used / 60);
+          const seconds = used % 60;
+          return `
+            <div class="exam-history-row">
+              <b>${formatScore(item.score)} / ${formatScore(item.totalScore)} 分</b>
+              <span>${Number(item.correct || 0)}/${Number(item.done || 0)} 题 · ${Number(item.rate || 0)}%</span>
+              <small>${escapeHtml(item.at || "")} · 用时 ${minutes}:${String(seconds).padStart(2, "0")}${item.autoSubmit ? " · 自动交卷" : ""}</small>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderExamHome() {
   setPanelPage(true);
   stopExamTimer();
@@ -2965,6 +3031,7 @@ function renderExamHome() {
       </div>
       <p>${escapeHtml(rule.autoScoreNote)}。组卷会按章节题量比例抽取，并尽量贴近正式考试结构。</p>
       ${parts.length ? "" : `<p class="exam-warning">当前题库没有可用于组卷的题型，请先切换题库或更新题库。</p>`}
+      ${renderExamHistory()}
       <button class="primary-action" id="startExamBtn" ${parts.length ? "" : "disabled"}>开始组卷</button>
     </div>
   `;
@@ -3302,6 +3369,41 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function isTypingTarget(target) {
+  const tag = target?.tagName;
+  return !!(target?.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT");
+}
+
+function hasOpenModal() {
+  return ["correctionModal", "adminUserModal"].some((id) => {
+    const el = $(id);
+    return el && !el.classList.contains("hidden");
+  });
+}
+
+function handleGlobalShortcuts(event) {
+  if (!state.user || isAdmin() || isTypingTarget(event.target) || hasOpenModal() || event.altKey || event.metaKey) return;
+  if (event.key === "ArrowLeft" && state.questions.length) {
+    event.preventDefault();
+    moveQuestion(-1).catch((err) => toast(err.message));
+    return;
+  }
+  if (event.key === "ArrowRight" && state.questions.length) {
+    event.preventDefault();
+    moveQuestion(1).catch((err) => toast(err.message));
+    return;
+  }
+  if (event.ctrlKey && event.key === "Enter" && state.questions.length) {
+    event.preventDefault();
+    submitPaper().catch((err) => toast(err.message));
+    return;
+  }
+  if (!event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "a" && state.currentIndex >= 0) {
+    event.preventDefault();
+    toggleAnswer();
+  }
+}
+
 ensureMobileControls();
 
 document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
@@ -3410,6 +3512,7 @@ $("zoomInBtn").onclick = () => changeZoom(0.1);
 $("zoomOutBtn").onclick = () => changeZoom(-0.1);
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
 document.addEventListener("fullscreenchange", updateFullscreenState);
+document.addEventListener("keydown", handleGlobalShortcuts);
 document.addEventListener("visibilitychange", () => {
   if (state.mode !== "exam" || !state.exam) return;
   if (document.hidden) stopExamTimer();
