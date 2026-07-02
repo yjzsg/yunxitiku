@@ -13,6 +13,7 @@ ENV App__SqlitePath=/app/data/question-bank.db
 ENV App__DataAssetsRoot=/app/data/assets
 ENV App__UserDataRoot=/app/userdata
 COPY --from=build /app/publish .
+COPY public/ /app/public/
 VOLUME ["/app/data", "/app/userdata"]
 EXPOSE 8787
 ENTRYPOINT ["dotnet", "YunxiTiku.Web.dll"]
