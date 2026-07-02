@@ -832,7 +832,8 @@ async function selectCourse(course, options = {}) {
   state.storage.profile.lastCourseName = course.name;
   state.storage.profile.lastChapterId = 0;
   setText("courseTitle", course.name);
-  setText("courseMeta", `${course.category || ""} ${course.subcategory || ""} · ${course.questionCount}题 · 更新 ${formatRelativeTime(course.changedAt)}`);
+  const courseLabel = [course.category, course.subcategory].filter(Boolean).join(" ");
+  setText("courseMeta", `${courseLabel ? `${courseLabel} · ` : ""}${course.questionCount}题 · 更新 ${formatRelativeTime(course.changedAt)}`);
   renderCourses();
   await loadChapters();
   if (restoreChapterId) {
@@ -1291,34 +1292,8 @@ function renderTagFilterOptions() {
   select.value = previous;
 }
 
-function renderExamReview(q) {
-  let panel = $("examReviewPanel");
-  if (!panel) {
-    panel = document.createElement("div");
-    panel.id = "examReviewPanel";
-    panel.className = "exam-review-panel";
-    $("answerBox").parentNode.insertBefore(panel, $("answerBox"));
-  }
-  const visible = state.submitted || isQuestionVerified(q.id);
-  if (!visible) {
-    panel.classList.add("hidden");
-    panel.innerHTML = "";
-    return;
-  }
-  const mine = state.answers[q.id] || "";
-  const right = q.answer || "";
-  const ok = hasAnswer(q.id) && isAnswerCorrect(q);
-  panel.classList.remove("hidden");
-  panel.innerHTML = `
-    <div class="review-line ${ok ? "correct" : "wrong"}">
-      <span>你的答案</span>
-      <b>${escapeHtml(mine || "未作答")}</b>
-    </div>
-    <div class="review-line correct">
-      <span>正确答案</span>
-      <b>${escapeHtml(right || "需人工核对")}</b>
-    </div>
-  `;
+function renderExamReview() {
+  $("examReviewPanel")?.remove();
 }
 
 function renderWrongFilters() {

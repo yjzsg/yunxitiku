@@ -6006,10 +6006,50 @@ body.panel-page .answer-card-wrap {
     grid-row: 4 !important;
   }
 
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
+body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
     grid-column: 2 !important;
     grid-row: 4 !important;
   }
 }
 
+.course-head {
+  min-height: 0 !important;
+  padding: 9px 14px !important;
+  align-items: center !important;
+}
+
+.course-head > div {
+  min-width: 0;
+}
+
+.course-title {
+  line-height: 1.18 !important;
+}
+
+.course-meta {
+  display: block !important;
+  min-height: 0 !important;
+  margin-top: 2px !important;
+  line-height: 1.22 !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media screen and (max-width: 760px) {
+  .course-head {
+    min-height: 0 !important;
+    padding: 6px 8px !important;
+    gap: 8px !important;
+  }
+
+  .course-title {
+    font-size: 14px !important;
+  }
+
+  .course-meta {
+    display: none !important;
+    margin-top: 0 !important;
+  }
+}
 
