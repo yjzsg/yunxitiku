@@ -781,6 +781,8 @@ function normalizeStorage(data) {
     corrections: Array.isArray(data.corrections) ? data.corrections : [],
     history: Array.isArray(data.history) ? data.history : [],
     examHistory: Array.isArray(data.examHistory) ? data.examHistory : [],
+    dailyReports: Array.isArray(data.dailyReports) ? data.dailyReports : [],
+    confidence: data.confidence && typeof data.confidence === "object" ? data.confidence : {},
     tags,
     tagLabels,
     settings: data.settings || {},
@@ -1194,6 +1196,7 @@ function intersectIdFilters(a, b) {
 }
 
 function getModeQuestionIds(courseStore) {
+  if (state.mode === "smart") return getSmartPracticeIds(courseStore);
   if (state.mode === "wrong") {
     return getWrongRecordsForCurrentCourse(courseStore)
       .filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore))
@@ -1207,6 +1210,29 @@ function getModeQuestionIds(courseStore) {
       .filter(Boolean);
   }
   return null;
+}
+
+function getSmartPracticeIds(courseStore = userCourseStore()) {
+  const ids = [];
+  const pushUnique = (id) => {
+    const n = Number(id);
+    if (n && !ids.includes(n)) ids.push(n);
+  };
+  getWrongRecordsForCurrentCourse(courseStore)
+    .filter(([, item]) => isReviewDue(item) || Number(item.count || 0) >= 2)
+    .slice(0, 20)
+    .forEach(([id]) => pushUnique(id));
+  Object.keys(courseStore.wrong || {}).forEach(pushUnique);
+  Object.keys(courseStore.done || {})
+    .filter((id) => !courseStore.correct?.[id])
+    .forEach(pushUnique);
+  if (ids.length >= 30) return ids.slice(0, 60);
+  const remaining = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  remaining
+    .filter((item) => !courseStore.done?.[item.id])
+    .slice(0, 60 - ids.length)
+    .forEach((item) => pushUnique(item.id));
+  return ids.slice(0, 60);
 }
 
 function findStartIndex(items, subjectId) {
@@ -1324,6 +1350,8 @@ function renderQuestionTags(q) {
   const currentTags = questionTags(q.id);
   const labels = tagLabels();
   const tagSummary = currentTags.length ? currentTags.join("、") : "未添加";
+  const confidence = state.storage.confidence?.[q.id] || "";
+  const wrongReason = state.storage.wrong?.[q.id]?.reason || "";
   panel.innerHTML = `
     <button id="tagPanelToggleBtn" class="tag-panel-toggle" type="button" aria-expanded="false">
       <span>标签</span>
@@ -1342,6 +1370,14 @@ function renderQuestionTags(q) {
       <div class="tag-presets">
         ${DEFAULT_TAG_LABELS.map((label) => `<button type="button" data-add-preset-tag="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}
       </div>
+      <div class="quick-mark-row">
+        <strong>信心</strong>
+        ${["确定", "不确定", "蒙的"].map((label) => `<button type="button" class="quick-mark ${confidence === label ? "active" : ""}" data-confidence="${label}">${label}</button>`).join("")}
+      </div>
+      <div class="quick-mark-row">
+        <strong>错因</strong>
+        ${["概念不清", "计算错误", "审题错误", "记忆错误", "选项陷阱"].map((label) => `<button type="button" class="quick-mark ${wrongReason === label ? "active" : ""}" data-wrong-reason="${label}">${label}</button>`).join("")}
+      </div>
     </div>
   `;
   setMobileTagsOpen(false);
@@ -1352,6 +1388,12 @@ function renderQuestionTags(q) {
   panel.querySelectorAll("[data-add-preset-tag]").forEach((btn) => {
     btn.onclick = () => addQuestionTag(q.id, btn.dataset.addPresetTag);
   });
+  panel.querySelectorAll("[data-confidence]").forEach((btn) => {
+    btn.onclick = () => setQuestionConfidence(q.id, btn.dataset.confidence);
+  });
+  panel.querySelectorAll("[data-wrong-reason]").forEach((btn) => {
+    btn.onclick = () => setQuestionWrongReason(q, btn.dataset.wrongReason);
+  });
   $("addTagBtn").onclick = () => addQuestionTag(q.id, $("tagInput").value);
   $("tagInput").onkeydown = (event) => {
     if (event.key === "Enter") {
@@ -1359,6 +1401,26 @@ function renderQuestionTags(q) {
       addQuestionTag(q.id, $("tagInput").value);
     }
   };
+}
+
+function setQuestionConfidence(questionId, value) {
+  state.storage.confidence ||= {};
+  if (state.storage.confidence[questionId] === value) delete state.storage.confidence[questionId];
+  else state.storage.confidence[questionId] = value;
+  scheduleSave();
+  renderQuestionTags(state.questions[state.currentIndex]?.detail || { id: questionId });
+}
+
+function setQuestionWrongReason(q, value) {
+  if (!q) return;
+  state.storage.wrong ||= {};
+  const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
+  record.reason = record.reason === value ? "" : value;
+  state.storage.wrong[q.id] = record;
+  if (record.reason) userCourseStore().wrong[q.id] = true;
+  scheduleSave();
+  renderQuestionTags(q);
+  renderAnswerCardPage({ updateNav: false });
 }
 
 function addQuestionTag(questionId, rawLabel) {
@@ -1910,18 +1972,131 @@ function renderProgress() {
         <div class="trend-title">近期正确率趋势</div>
         <canvas id="progressTrend" width="680" height="180"></canvas>
       </div>
+      ${renderStudyDashboard(courseStore, stats, analysisItems)}
       ${renderDeepAnalysis(courseStore, analysisItems)}
       ${renderReviewPlanPanel(stats, wrongTotal, analysisItems)}
-      <button class="primary-action" id="progressStartBtn">进入强化练习</button>
+      <div class="practice-quick-actions">
+        <button class="primary-action" id="smartPracticeBtn">智能练习</button>
+        <button class="primary-action secondary" id="dueReviewBtn">今日错题复习</button>
+        <button id="progressStartBtn">进入强化练习</button>
+      </div>
     </div>
   `;
   renderProgressTrend();
   bindDeepAnalysisActions();
   bindReviewPlanActions(stats, wrongTotal, analysisItems.length);
+  bindStudyDashboardActions(courseStore);
   $("progressStartBtn").onclick = async () => {
     state.mode = wrongTotal ? "wrong" : "practice";
     await loadQuestions();
   };
+  $("smartPracticeBtn").onclick = () => startSmartPractice().catch((err) => toast(err.message));
+  $("dueReviewBtn").onclick = () => startDueWrongReview().catch((err) => toast(err.message));
+}
+
+function renderStudyDashboard(courseStore, stats, items) {
+  const records = getWrongRecordsForCurrentCourse(courseStore);
+  const due = records.filter(([, item]) => isReviewDue(item)).length;
+  const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
+  const report = getTodayReport();
+  const reportText = report
+    ? `今日已记录：${report.done} 题 · 正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
+    : buildStudyReportSummary(courseStore, stats, items).summary;
+  return `
+    <div class="study-dashboard">
+      <div class="study-card">
+        <span>今日建议</span>
+        <b>${due ? `复习 ${due} 道错题` : "智能练习 30 题"}</b>
+        <small>${escapeHtml(reportText)}</small>
+      </div>
+      <div class="study-card">
+        <span>薄弱章节</span>
+        <b>${weak[0] ? escapeHtml(weak[0].name) : "暂无明显短板"}</b>
+        <small>${weak.map((item) => `${item.name} ${item.rate}%`).join(" · ") || "继续积累做题数据后会更准"}</small>
+      </div>
+      <div class="study-card">
+        <span>日报</span>
+        <b>${report ? "已生成" : "未生成"}</b>
+        <button id="dailyReportBtn" type="button">${report ? "更新日报" : "生成今日日报"}</button>
+      </div>
+    </div>
+  `;
+}
+
+function bindStudyDashboardActions(courseStore) {
+  const btn = $("dailyReportBtn");
+  if (!btn) return;
+  btn.onclick = () => {
+    const report = buildStudyReportSummary(courseStore, getCourseStats(), state.analysisQuestions.length ? state.analysisQuestions : state.questions);
+    state.storage.dailyReports ||= [];
+    const key = todayKey();
+    state.storage.dailyReports = state.storage.dailyReports.filter((item) => item.key !== key);
+    state.storage.dailyReports.unshift({ key, at: nowText(), ...report });
+    state.storage.dailyReports = state.storage.dailyReports.slice(0, 60);
+    scheduleSave();
+    renderProgress();
+    toast("学习日报已生成");
+  };
+}
+
+function getTodayReport() {
+  const key = todayKey();
+  return (state.storage.dailyReports || []).find((item) => item.key === key);
+}
+
+function buildStudyReportSummary(courseStore, stats, items) {
+  const rate = stats.done ? Math.round(stats.correct / stats.done * 100) : 0;
+  const weak = getWeakChapterRows(courseStore, items)[0];
+  const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
+  const focus = weak ? `优先练 ${weak.name}` : due ? "优先复习到期错题" : "保持当前节奏";
+  return {
+    done: stats.done,
+    correct: stats.correct,
+    wrong: stats.wrong,
+    rate,
+    due,
+    focus,
+    summary: `累计 ${stats.done} 题 · 正确率 ${rate}% · ${focus}`,
+  };
+}
+
+function getWeakChapterRows(courseStore, items) {
+  const answeredIds = new Set(Object.keys(courseStore.done || {}).map(Number));
+  const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
+  const byChapter = new Map();
+  items.forEach((item) => {
+    if (!answeredIds.has(Number(item.id))) return;
+    const path = chapterPathForId(item.chapterId).slice(0, 2);
+    const node = path[1] || path[0] || { id: item.chapterId || 0, name: item.chapterName || "未分章节" };
+    const id = Number(node.id || 0);
+    if (!id) return;
+    const row = byChapter.get(id) || { id, name: node.name || "未分章节", done: 0, correct: 0 };
+    row.done++;
+    if (correctIds.has(Number(item.id))) row.correct++;
+    byChapter.set(id, row);
+  });
+  return [...byChapter.values()]
+    .filter((row) => row.done >= 3)
+    .map((row) => ({ ...row, rate: Math.round(row.correct / row.done * 100) }))
+    .sort((a, b) => a.rate - b.rate || b.done - a.done);
+}
+
+async function startSmartPractice() {
+  if (!state.currentCourse) return;
+  if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  state.mode = "smart";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast("已生成智能练习");
+}
+
+async function startDueWrongReview() {
+  if (!state.currentCourse) return;
+  state.mode = "wrong";
+  state.wrongFilters = { ...(state.wrongFilters || {}), review: "due", status: "active" };
+  setCoursePicker(false);
+  await loadQuestions();
+  toast("已进入今日错题复习");
 }
 
 function renderDeepAnalysis(courseStore, items = state.questions) {
@@ -2343,21 +2518,7 @@ function renderAdminRows(rows, failedCount = 0) {
 function bindAdminBankUpdateButtons() {
   document.querySelectorAll("[data-update-course]").forEach((btn) => {
     btn.onclick = () => {
-      const input = document.querySelector(`[data-update-course-file="${btn.dataset.updateCourse}"]`);
-      if (!input) {
-        toast("没有找到上传控件");
-        return;
-      }
-      input.value = "";
-      input.click();
-    };
-  });
-  document.querySelectorAll("[data-update-course-file]").forEach((input) => {
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      const btn = document.querySelector(`[data-update-course="${input.dataset.updateCourseFile}"]`);
-      updateQuestionBank(Number(input.dataset.updateCourseFile || 0), file, btn).catch((err) => {
+      updateQuestionBank(Number(btn.dataset.updateCourse || 0), btn).catch((err) => {
         toast(err.message);
         renderAdminRows(state.adminRows, state.adminFailedCount);
       });
@@ -2539,7 +2700,7 @@ function getFilteredAdminCourses() {
 function renderAdminBankSummary(visibleCount = getFilteredAdminCourses().length) {
   const courses = state.adminCourses || [];
   const canUpdateCount = courses.filter((course) => !!course.owned && Number(course.questionCount || 0) > 0).length;
-  return `共 ${courses.length} 门 · 可上传更新 ${canUpdateCount} 门 · 当前显示 ${visibleCount} 门`;
+  return `共 ${courses.length} 门 · 可拉取更新 ${canUpdateCount} 门 · 当前显示 ${visibleCount} 门`;
 }
 
 function renderAdminBankRows(visibleCourses) {
@@ -2555,8 +2716,7 @@ function renderAdminBankRows(visibleCourses) {
         <td>${escapeHtml(formatRelativeTime(course.changedAt))}<span>${escapeHtml(course.changedAt || "未记录")}</span></td>
         <td><span class="status-pill ${canUpdate ? "active" : "disabled"}">${escapeHtml(status)}</span></td>
         <td>
-          <input class="course-update-file" data-update-course-file="${course.id}" type="file" accept=".zip">
-          <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? "上传更新" : "不可更新"}</button>
+          <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? "拉取更新" : "不可更新"}</button>
         </td>
       </tr>
     `;
@@ -3239,27 +3399,21 @@ function toast(message) {
   toast.timer = setTimeout(() => $("toast").classList.add("hidden"), 1800);
 }
 
-async function updateQuestionBank(courseId = 0, file = null, btn = null) {
+async function updateQuestionBank(courseId = 0, btn = null) {
   if (state.user.toLowerCase() !== "admin") return;
-  if (!file) {
-    toast("请选择题库 zip 文件");
-    return;
-  }
-  if (!confirm("确定上传并更新该题库吗？系统会先自动备份当前题库。")) return;
+  if (!confirm("确定从服务器拉取并更新该题库吗？更新完成后会重新导出题库数据。")) return;
   const query = new URLSearchParams({ user: state.user });
   if (courseId) query.set("courseId", String(courseId));
-  const form = new FormData();
-  form.append("file", file);
   const oldText = btn?.textContent || "";
   if (btn) {
     btn.disabled = true;
-    btn.textContent = "上传中...";
+    btn.textContent = "更新中...";
   }
-  const result = await api(`/api/admin/update-bank?${query}`, { method: "POST", body: form })
+  const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" })
     .finally(() => {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = oldText || "上传更新";
+        btn.textContent = oldText || "拉取更新";
       }
     });
   if (result.reserved || result.mode === "upload") {
@@ -3398,9 +3552,29 @@ function handleGlobalShortcuts(event) {
     submitPaper().catch((err) => toast(err.message));
     return;
   }
+  if (!event.ctrlKey && event.key === "Enter" && state.verifyMode === "single" && state.currentIndex >= 0) {
+    event.preventDefault();
+    confirmCurrentAnswer();
+    return;
+  }
   if (!event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "a" && state.currentIndex >= 0) {
+    const q = state.questions[state.currentIndex]?.detail;
+    if (q?.options?.some((option) => option.label === "A") && !shouldRevealCurrentAnswer(q)) {
+      event.preventDefault();
+      chooseOption(q, "A");
+      return;
+    }
     event.preventDefault();
     toggleAnswer();
+    return;
+  }
+  if (!event.ctrlKey && !event.shiftKey && /^[b-z]$/i.test(event.key) && state.currentIndex >= 0) {
+    const label = event.key.toUpperCase();
+    const q = state.questions[state.currentIndex]?.detail;
+    if (q?.options?.some((option) => option.label === label) && !shouldRevealCurrentAnswer(q)) {
+      event.preventDefault();
+      chooseOption(q, label);
+    }
   }
 }
 

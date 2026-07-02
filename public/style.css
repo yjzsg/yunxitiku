@@ -1084,6 +1084,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .tag-row,
 .tag-editor,
 .tag-presets,
+.quick-mark-row,
 .plan-form,
 .plan-done,
 .review-line {
@@ -1095,6 +1096,31 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
 .tag-row strong {
   color: var(--text);
+}
+
+.quick-mark-row {
+  margin-top: 10px;
+}
+
+.quick-mark-row strong {
+  color: var(--text);
+}
+
+.quick-mark {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: #475569;
+  background: #f8fafc;
+  font-size: 13px;
+  box-shadow: none;
+}
+
+.quick-mark.active {
+  border-color: #c7d2fe;
+  background: var(--primary-50);
+  color: var(--primary-600);
+  box-shadow: var(--shadow-xs);
 }
 
 .tag-pill {
@@ -1709,6 +1735,55 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
 .analysis-grid span {
   color: var(--muted);
+}
+
+.study-dashboard {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.study-card {
+  display: grid;
+  gap: 7px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow-xs);
+}
+
+.study-card span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.study-card b {
+  color: var(--primary-600);
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.study-card small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.study-card button {
+  justify-self: start;
+  min-height: 32px;
+  border-color: #c7d2fe;
+  background: var(--primary-50);
+  color: var(--primary-600);
+  font-size: 13px;
+}
+
+.practice-quick-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .trend-panel {
@@ -2822,6 +2897,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .exam-config-grid,
   .analysis-grid,
+  .study-dashboard,
   .analysis-detail-grid {
     grid-template-columns: 1fr;
   }
@@ -5920,7 +5996,9 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .tag-row strong,
+  .quick-mark-row strong,
   .tag-pill,
+  .quick-mark,
   .tag-presets button,
   .tag-editor button {
     min-height: 26px;
