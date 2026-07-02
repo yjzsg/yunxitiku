@@ -6062,8 +6062,34 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
   body.mobile-menu-open .main-nav {
     display: grid !important;
     grid-template-columns: minmax(0, 1fr) minmax(82px, 104px) auto !important;
+    grid-auto-rows: 34px !important;
     align-items: stretch !important;
     gap: 6px !important;
+  }
+
+  .main-nav > .nav-item.active,
+  .main-nav > #mobileMenuBtn,
+  #accountLabel,
+  .account-box #logoutBtn {
+    min-height: 34px !important;
+    height: 34px !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    font-size: 12px !important;
+    line-height: 1 !important;
+    border-radius: 12px !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .main-nav > .nav-item.active {
+    flex-direction: row !important;
+    gap: 5px !important;
+  }
+
+  .main-nav > .nav-item.active::before {
+    font-size: 14px !important;
+    line-height: 1 !important;
   }
 
   .main-nav > .account-box,
@@ -6082,21 +6108,17 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
 
   #accountLabel {
     max-width: 112px !important;
-    min-height: 34px !important;
     padding-inline: 8px !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
     white-space: nowrap !important;
     justify-self: auto !important;
-    font-size: 12px !important;
   }
 
   .account-box #logoutBtn {
     min-width: 50px !important;
-    min-height: 34px !important;
     padding-inline: 8px !important;
     justify-self: auto !important;
-    font-size: 12px !important;
   }
 
   .main-nav > .nav-item.active,
