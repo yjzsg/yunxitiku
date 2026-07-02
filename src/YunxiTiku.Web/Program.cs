@@ -362,6 +362,7 @@ app.MapGet("/assets/{**relative}", (string relative) =>
 app.MapFallback(() => Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8"));
 
 app.Run();
+return 0;
 
 internal static class AppHelpers
 {
