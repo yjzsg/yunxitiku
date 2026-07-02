@@ -25,6 +25,7 @@
   mobileActionsOpen: false,
   mobileToolsOpen: false,
   answerCardCollapsed: false,
+  mobileTagsOpen: false,
   wrongFilters: { status: "active", minCount: "1", period: "all" },
   tagFilter: "",
   answerCardPage: 0,
@@ -485,6 +486,16 @@ function setAnswerCardCollapsed(collapsed) {
   if ($("answerCardCollapseBtn")) {
     $("answerCardCollapseBtn").textContent = state.answerCardCollapsed ? "展开答题卡" : "收起答题卡";
     $("answerCardCollapseBtn").setAttribute("aria-expanded", String(!state.answerCardCollapsed));
+  }
+}
+
+function setMobileTagsOpen(open) {
+  state.mobileTagsOpen = !!open;
+  const panel = $("questionTagPanel");
+  if (panel) {
+    panel.classList.toggle("open", state.mobileTagsOpen);
+    const btn = $("tagPanelToggleBtn");
+    if (btn) btn.setAttribute("aria-expanded", String(state.mobileTagsOpen));
   }
 }
 
@@ -1146,20 +1157,29 @@ function renderQuestionTags(q) {
   }
   const currentTags = questionTags(q.id);
   const labels = tagLabels();
+  const tagSummary = currentTags.length ? currentTags.join("、") : "未添加";
   panel.innerHTML = `
-    <div class="tag-row">
-      <strong>标签</strong>
-      ${currentTags.map((label) => `<button type="button" class="tag-pill active" data-remove-tag="${escapeHtml(label)}">${escapeHtml(label)} ×</button>`).join("") || `<span class="muted">未添加标签</span>`}
-    </div>
-    <div class="tag-editor">
-      <input id="tagInput" list="tagLabelList" placeholder="输入标签，如 计算量大">
-      <datalist id="tagLabelList">${labels.map((label) => `<option value="${escapeHtml(label)}"></option>`).join("")}</datalist>
-      <button type="button" id="addTagBtn">添加标签</button>
-    </div>
-    <div class="tag-presets">
-      ${DEFAULT_TAG_LABELS.map((label) => `<button type="button" data-add-preset-tag="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}
+    <button id="tagPanelToggleBtn" class="tag-panel-toggle" type="button" aria-expanded="false">
+      <span>标签</span>
+      <small>${escapeHtml(tagSummary)}</small>
+    </button>
+    <div class="tag-panel-body">
+      <div class="tag-row">
+        <strong>标签</strong>
+        ${currentTags.map((label) => `<button type="button" class="tag-pill active" data-remove-tag="${escapeHtml(label)}">${escapeHtml(label)} ×</button>`).join("") || `<span class="muted">未添加标签</span>`}
+      </div>
+      <div class="tag-editor">
+        <input id="tagInput" list="tagLabelList" placeholder="输入标签，如 计算量大">
+        <datalist id="tagLabelList">${labels.map((label) => `<option value="${escapeHtml(label)}"></option>`).join("")}</datalist>
+        <button type="button" id="addTagBtn">添加标签</button>
+      </div>
+      <div class="tag-presets">
+        ${DEFAULT_TAG_LABELS.map((label) => `<button type="button" data-add-preset-tag="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}
+      </div>
     </div>
   `;
+  setMobileTagsOpen(false);
+  $("tagPanelToggleBtn").onclick = () => setMobileTagsOpen(!state.mobileTagsOpen);
   panel.querySelectorAll("[data-remove-tag]").forEach((btn) => {
     btn.onclick = () => removeQuestionTag(q.id, btn.dataset.removeTag);
   });
