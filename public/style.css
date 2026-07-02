@@ -877,6 +877,8 @@ body.admin-view .mobile-tools-btn {
 
 body[data-mode="progress"] .question-actions,
 body[data-mode="progress"] .answer-card-wrap,
+body.panel-page .question-actions,
+body.panel-page .answer-card-wrap,
 body[data-mode="exam"] .question-pane:has(.exam-home) .question-actions,
 body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   display: none !important;
@@ -5855,6 +5857,158 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     height: 30px;
     padding-inline: 9px;
     font-size: 12px;
+  }
+}
+
+/* Request 2026-07-02 follow-up: stable mobile account bar, desktop side answer panel, hierarchy rows. */
+body.panel-page .question-actions,
+body.panel-page .answer-card-wrap {
+  display: none !important;
+}
+
+.analysis-row.heading {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: var(--primary-600);
+  cursor: default;
+}
+
+.analysis-row.heading span {
+  font-weight: 850;
+}
+
+.analysis-row.heading em,
+.analysis-row.heading b {
+  color: var(--primary-600);
+}
+
+.analysis-row.heading + .analysis-row:not(.heading) {
+  margin-top: -2px;
+}
+
+.exam-chapter-list label.exam-chapter-level-1 {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  font-weight: 800;
+}
+
+.exam-chapter-list label.exam-chapter-level-2 {
+  margin-left: 14px;
+}
+
+@media screen and (min-width: 761px) {
+  #questionBody:not(.exam-case-split) {
+    grid-template-columns: minmax(0, 1fr) minmax(330px, 36%) !important;
+    column-gap: 16px;
+  }
+
+  #questionBody:not(.exam-case-split) .question-side-panel {
+    grid-column: 2 !important;
+    grid-row: 2 / span 5;
+    display: grid;
+    align-content: start;
+    gap: 8px;
+    position: sticky;
+    top: 0;
+    align-self: start;
+  }
+
+  #questionBody:not(.exam-case-split) .question-tag-panel,
+  #questionBody:not(.exam-case-split) .exam-review-panel,
+  #questionBody:not(.exam-case-split) .answer,
+  #questionBody:not(.exam-case-split) .note-editor {
+    grid-column: auto !important;
+    margin-top: 0 !important;
+  }
+
+  #questionBody:not(.exam-case-split) .question-tag-panel {
+    padding: 10px 11px;
+  }
+
+  #questionBody:not(.exam-case-split) .tag-panel-body {
+    gap: 7px;
+  }
+
+  #questionBody:not(.exam-case-split) .tag-row,
+  #questionBody:not(.exam-case-split) .tag-editor,
+  #questionBody:not(.exam-case-split) .tag-presets {
+    gap: 7px;
+  }
+
+  #questionBody:not(.exam-case-split) .answer:not(.hidden) {
+    padding: 11px 12px;
+  }
+
+  #questionBody:not(.exam-case-split) .description {
+    margin-top: 0;
+  }
+
+  .exam-case-split .question-side-panel {
+    grid-column: 2;
+    display: grid;
+    align-content: start;
+    gap: 8px;
+  }
+
+  .exam-case-split .question-side-panel .question-tag-panel,
+  .exam-case-split .question-side-panel .exam-review-panel,
+  .exam-case-split .question-side-panel .answer,
+  .exam-case-split .question-side-panel .note-editor {
+    grid-column: auto;
+    margin-top: 0;
+  }
+}
+
+@media screen and (max-width: 760px) {
+  .main-nav,
+  body.mobile-menu-open .main-nav {
+    align-items: stretch;
+  }
+
+  .main-nav > .account-box,
+  body.mobile-menu-open .main-nav > .account-box {
+    grid-column: 1 / -1 !important;
+    grid-row: 1 !important;
+    order: 0 !important;
+    min-height: 34px;
+  }
+
+  #accountLabel {
+    max-width: calc(100vw - 94px) !important;
+  }
+
+  .main-nav > #mobileMenuBtn,
+  body.mobile-menu-open .main-nav > #mobileMenuBtn {
+    grid-column: 2 !important;
+    grid-row: 2 !important;
+    order: 2 !important;
+  }
+
+  .main-nav > .nav-item.active,
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1) {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+    order: 1 !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2) {
+    grid-column: 1 !important;
+    grid-row: 3 !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3) {
+    grid-column: 2 !important;
+    grid-row: 3 !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4) {
+    grid-column: 1 !important;
+    grid-row: 4 !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
+    grid-column: 2 !important;
+    grid-row: 4 !important;
   }
 }
 

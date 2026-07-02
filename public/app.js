@@ -260,6 +260,12 @@ function selectedChapterIds(chapter = state.currentChapter) {
   return Array.from(ids).filter(Boolean);
 }
 
+function chapterPathForId(chapterId) {
+  const id = Number(chapterId || 0);
+  if (!id || !state.chapterTreeRoots) return [];
+  return findChapterPath(state.chapterTreeRoots, id);
+}
+
 function applyChapterParams(params, chapter = state.currentChapter) {
   const ids = selectedChapterIds(chapter);
   if (!ids.length) return;
@@ -284,16 +290,48 @@ function chapterDepth(chapter) {
 }
 
 function examChapterGroups() {
-  const treeNodes = state.chapterTreeIndex || new Map();
+  const roots = state.chapterTreeRoots?.length ? state.chapterTreeRoots : buildChapterTree(state.chapters);
+  const rows = [];
+  const visit = (nodes, depth = 1) => {
+    nodes.forEach((node) => {
+      const total = chapterTotalCount(node);
+      if (total > 0 && depth <= 2) {
+        rows.push({
+          ...node,
+          questionCount: total,
+          examLevel: depth,
+        });
+      }
+      if (depth < 2) visit(node.children || [], depth + 1);
+    });
+  };
+  visit(roots);
+  if (rows.length) return rows;
   const leaves = state.chapters.filter((chapter) => Number(chapter.questionCount || 0) > 0);
-  const secondLevel = state.chapters.filter((chapter) => {
-    const node = treeNodes.get(Number(chapter.id));
-    return node && node.children?.length && chapterDepth(node) === 2 && chapterTotalCount(node) > 0;
-  });
-  return (secondLevel.length ? secondLevel : leaves).map((chapter) => ({
+  return leaves.map((chapter) => ({
     ...chapter,
     questionCount: chapterQuestionCount(chapter),
+    examLevel: chapterDepth(chapter),
   }));
+}
+
+function normalizeExamChapterIds(ids) {
+  const selected = new Set((ids || []).map(Number).filter(Boolean));
+  if (!selected.size) return [];
+  return Array.from(selected).filter((id) => {
+    const path = chapterPathForId(id);
+    return !path.slice(0, -1).some((node) => selected.has(Number(node.id)));
+  });
+}
+
+function examChaptersFromIds(ids) {
+  return (ids || [])
+    .map((id) => state.chapterTreeIndex?.get(Number(id)) || state.chapters.find((chapter) => Number(chapter.id) === Number(id)))
+    .filter(Boolean)
+    .map((chapter) => ({
+      ...chapter,
+      questionCount: chapterQuestionCount(chapter),
+    }));
 }
 
 function getQuestionScore(q) {
@@ -340,7 +378,7 @@ function getExamConfigFromForm(rule) {
     durationMinutes: duration,
     parts: selectedParts,
     totalScore,
-    selectedChapterIds: checkedChapters,
+    selectedChapterIds: normalizeExamChapterIds(checkedChapters),
   };
 }
 
@@ -968,6 +1006,7 @@ async function loadQuestions() {
     renderAll();
     return;
   }
+  setPanelPage(false);
   if (state.mode === "exam" && state.exam && !state.submitted) {
     renderSearchMatches();
     return;
@@ -1117,10 +1156,32 @@ function renderAll() {
   }
 }
 
+function setPanelPage(active) {
+  document.body.classList.toggle("panel-page", !!active);
+}
+
+function ensureQuestionSidePanel() {
+  const body = $("questionBody");
+  if (!body) return null;
+  let panel = $("questionSidePanel");
+  if (!panel) {
+    panel = document.createElement("aside");
+    panel.id = "questionSidePanel";
+    panel.className = "question-side-panel";
+    body.appendChild(panel);
+  }
+  ["questionTagPanel", "examReviewPanel", "answerBox", "noteEditor"].forEach((id) => {
+    const el = $(id);
+    if (el && el.parentNode !== panel) panel.appendChild(el);
+  });
+  return panel;
+}
+
 function renderQuestion() {
   const item = state.questions[state.currentIndex];
   const q = item.detail;
   const revealAnswer = shouldRevealCurrentAnswer(q);
+  setPanelPage(false);
   $("emptyState").classList.add("hidden");
   $("questionBody").classList.remove("hidden");
   $("questionBody").classList.toggle("exam-case-split", state.mode === "exam" && /案例|问答|主观/.test(`${q.type || ""}${state.currentCourse?.name || ""}`) && !!q.extraQuestion);
@@ -1138,8 +1199,10 @@ function renderQuestion() {
   setText("wrongBtn", state.mode === "wrong" ? "移出错题" : "纠错");
   $("noteEditor").value = getNote(q.id);
   renderOptions(q);
+  ensureQuestionSidePanel();
   renderQuestionTags(q);
   renderExamReview(q);
+  ensureQuestionSidePanel();
   renderExamStatus();
   renderVerifyModeControls();
   renderSearchMatches();
@@ -1731,6 +1794,7 @@ function confirmCurrentAnswer() {
 }
 
 function renderProgress() {
+  setPanelPage(true);
   const courseStore = userCourseStore();
   const stats = getCourseStats();
   const analysisItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
@@ -1778,13 +1842,31 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
   const byChapter = new Map();
   const byType = new Map();
+  const ensureChapterRow = (node, depth) => {
+    const id = Number(node?.id || 0);
+    if (!id) return null;
+    if (!byChapter.has(id)) {
+      byChapter.set(id, {
+        id,
+        name: node.name || "未分章节",
+        total: 0,
+        done: 0,
+        correct: 0,
+        depth,
+      });
+    }
+    return byChapter.get(id);
+  };
   items.forEach((item) => {
-    const chapterKey = item.chapterId || 0;
-    const chapter = byChapter.get(chapterKey) || { id: chapterKey, name: item.chapterName || "未分章节", total: 0, done: 0, correct: 0 };
-    chapter.total++;
-    if (answeredIds.has(Number(item.id))) chapter.done++;
-    if (correctIds.has(Number(item.id))) chapter.correct++;
-    byChapter.set(chapterKey, chapter);
+    const path = chapterPathForId(item.chapterId).slice(0, 2);
+    const targets = path.length ? path : [{ id: item.chapterId || 0, name: item.chapterName || "未分章节" }];
+    targets.forEach((node, index) => {
+      const chapter = ensureChapterRow(node, index + 1);
+      if (!chapter) return;
+      chapter.total++;
+      if (answeredIds.has(Number(item.id))) chapter.done++;
+      if (correctIds.has(Number(item.id))) chapter.correct++;
+    });
 
     const typeKey = item.subjectType ?? item.type ?? "题目";
     const type = byType.get(typeKey) || { id: typeKey, name: item.type || "题目", total: 0, done: 0, correct: 0 };
@@ -1793,7 +1875,14 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
     if (correctIds.has(Number(item.id))) type.correct++;
     byType.set(typeKey, type);
   });
-  const chapterRows = [...byChapter.values()].sort((a, b) => b.total - a.total).slice(0, 12);
+  const chapterRows = [...byChapter.values()]
+    .sort((a, b) => {
+      const aPath = chapterPathForId(a.id);
+      const bPath = chapterPathForId(b.id);
+      const aCode = aPath.map((node) => String(node.code || "").padEnd(8, "0")).join(".");
+      const bCode = bPath.map((node) => String(node.code || "").padEnd(8, "0")).join(".");
+      return aCode.localeCompare(bCode, "zh-CN") || (a.depth || 9) - (b.depth || 9);
+    });
   const typeRows = [...byType.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), "zh-Hans-CN"));
   return `
     <div class="analysis-detail-grid">
@@ -1814,8 +1903,9 @@ function renderAnalysisRows(rows, clickable) {
   return rows.map((row) => {
     const rate = row.done ? Math.round(row.correct / row.done * 100) : 0;
     const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
+    const isHeading = clickable && Number(row.depth || 0) === 1;
     return `
-      <button type="button" class="analysis-row ${level}" ${clickable ? `data-analysis-chapter="${row.id}"` : "disabled"}>
+      <button type="button" class="analysis-row ${level} ${isHeading ? "heading" : ""}" ${clickable && !isHeading ? `data-analysis-chapter="${row.id}"` : "disabled"}>
         <span>${escapeHtml(row.name)}</span>
         <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
         <b>${rate}%</b>
@@ -2688,6 +2778,7 @@ function toggleAnswer() {
 }
 
 function renderExamHome() {
+  setPanelPage(true);
   stopExamTimer();
   state.exam = null;
   state.answerVisible = false;
@@ -2733,7 +2824,7 @@ function renderExamHome() {
         </div>
         <div class="exam-chapter-list">
           ${chapters.map((chapter) => `
-            <label title="${escapeHtml(chapter.name)}">
+            <label class="exam-chapter-level-${Number(chapter.examLevel || chapterDepth(chapter) || 1)}" title="${escapeHtml(chapter.name)}">
               <input type="checkbox" data-exam-chapter value="${chapter.id}" checked>
               <span>${escapeHtml(chapter.name)}</span>
               <small>${Number(chapter.questionCount || 0)}题</small>
@@ -2760,6 +2851,7 @@ function renderExamHome() {
 
 async function startExamPaper() {
   if (!state.currentCourse) return;
+  setPanelPage(false);
   const rule = state.examConfig || getExamRule();
   const parts = normalizeExamParts(rule);
   if (!parts.length) {
@@ -2771,9 +2863,7 @@ async function startExamPaper() {
   const seen = new Set();
   state.questions = [];
   const selectedIds = new Set((rule.selectedChapterIds || []).map(Number));
-  const examChapters = selectedIds.size
-    ? state.chapters.filter((chapter) => selectedIds.has(Number(chapter.id)))
-    : state.chapters;
+  const examChapters = selectedIds.size ? examChaptersFromIds(Array.from(selectedIds)) : examChapterGroups();
   for (const part of parts) {
     const selected = [];
     const allocations = allocateExamCounts(part, examChapters);
@@ -3052,6 +3142,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       return;
     }
     const nextMode = btn.dataset.mode;
+    setPanelPage(nextMode === "exam" || nextMode === "progress");
     if (nextMode === "practice" && state.mode === "practice") {
       setCoursePicker(!state.pickerOpen);
       renderMode();
