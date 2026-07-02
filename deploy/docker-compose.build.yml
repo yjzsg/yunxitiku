@@ -1,14 +1,14 @@
 services:
   yunxi-tiku:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: yunxi-tiku
     ports:
       - "8787:8787"
     volumes:
-      - ./data:/app/data
-      - ./userdata:/app/userdata
+      - ../data:/app/data
+      - ../userdata:/app/userdata
     environment:
       App__SqlitePath: /app/data/question-bank.db
       App__DataAssetsRoot: /app/data/assets

@@ -12,6 +12,20 @@
 - 管理员看板、题库数据上传/下载、用户数据上传/下载。
 - Docker Compose 一键运行。
 
+## 文件分类
+
+```text
+docker-compose.yml        NAS 默认部署文件，优先使用预构建镜像
+Dockerfile                GitHub Actions 构建镜像使用
+public/                   Web 前端页面、样式和交互脚本
+src/YunxiTiku.Web/        .NET 后端接口和数据读写逻辑
+data/                     题库数据库和图片挂载目录，只保留空占位文件
+userdata/                 用户数据挂载目录，只保留空占位文件
+deploy/                   备用部署文件
+docs/                     文件地图、版本记录和维护说明
+.github/workflows/        自动构建 Docker 镜像
+```
+
 ## 数据目录
 
 运行时需要把数据放在仓库根目录的挂载目录中：
@@ -61,7 +75,7 @@ ghcr.io/yjzsg/yunxitiku:latest
 备用的源码构建方式如下，只有在预构建镜像不可用时才需要：
 
 ```sh
-docker compose -f docker-compose.build.yml up -d --build
+docker compose -f deploy/docker-compose.build.yml up -d --build
 ```
 
 浏览器访问：
@@ -112,3 +126,8 @@ http://127.0.0.1:8787/
 - 用户账号与做题数据。
 - 授权文件、令牌、日志、打包文件。
 - 与 Docker 运行无关的本地工具文件。
+
+## 维护文档
+
+- [文件地图](docs/FILE_MAP.md)
+- [版本记录](docs/VERSIONS.md)
