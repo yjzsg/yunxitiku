@@ -6213,3 +6213,15 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
     order: 3 !important;
   }
 }
+
+/* Panel pages such as progress analysis must never leak the last question view. */
+body.panel-page #questionBody,
+body.panel-page #questionSidePanel,
+body.panel-page .question-side-panel,
+body.panel-page .question-actions,
+body.panel-page .answer-card-wrap,
+#questionBody.hidden,
+#questionSidePanel.hidden,
+.question-side-panel.hidden {
+  display: none !important;
+}

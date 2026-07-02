@@ -1075,6 +1075,11 @@ function ensureTagFilterControl() {
 async function loadQuestions() {
   if (!state.currentCourse) return;
   if (state.mode === "progress") {
+    setPanelPage(true);
+    state.questions = [];
+    state.currentIndex = -1;
+    state.answerVisible = false;
+    state.answerCardPage = 0;
     await loadAnalysisQuestions();
     renderAll();
     return;
@@ -1212,13 +1217,13 @@ function renderAll() {
   renderMode();
   renderExamStatus();
   renderWrongFilters();
-  renderAnswerCard();
-  renderSearchMatches();
-  updateStats();
   if (state.mode === "progress") {
     renderProgress();
     return;
   }
+  renderAnswerCard();
+  renderSearchMatches();
+  updateStats();
   if (!state.questions.length) {
     $("questionBody").classList.add("hidden");
     $("emptyState").classList.remove("hidden");
@@ -1230,7 +1235,19 @@ function renderAll() {
 }
 
 function setPanelPage(active) {
-  document.body.classList.toggle("panel-page", !!active);
+  const enabled = !!active;
+  document.body.classList.toggle("panel-page", enabled);
+  const questionBody = $("questionBody");
+  const emptyState = $("emptyState");
+  const sidePanel = $("questionSidePanel");
+  if (enabled) {
+    questionBody?.classList.add("hidden");
+    questionBody?.classList.remove("exam-case-split");
+    emptyState?.classList.remove("hidden");
+    sidePanel?.classList.add("hidden");
+  } else {
+    sidePanel?.classList.remove("hidden");
+  }
 }
 
 function ensureQuestionSidePanel() {
@@ -1247,6 +1264,7 @@ function ensureQuestionSidePanel() {
     const el = $(id);
     if (el && el.parentNode !== panel) panel.appendChild(el);
   });
+  panel.classList.remove("hidden");
   return panel;
 }
 
