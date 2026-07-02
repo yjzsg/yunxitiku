@@ -6061,45 +6061,55 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
   .main-nav,
   body.mobile-menu-open .main-nav {
     display: grid !important;
-    grid-template-columns: minmax(0, 1fr) minmax(88px, 116px) !important;
+    grid-template-columns: minmax(0, 1fr) minmax(82px, 104px) auto !important;
     align-items: stretch !important;
+    gap: 6px !important;
   }
 
   .main-nav > .account-box,
   body.mobile-menu-open .main-nav > .account-box {
-    grid-column: 1 / -1 !important;
+    grid-column: 3 !important;
     grid-row: 1 !important;
-    width: 100% !important;
+    width: auto !important;
     min-width: 0 !important;
-    display: grid !important;
-    grid-template-columns: minmax(0, 1fr) auto !important;
+    display: inline-flex !important;
     align-items: center !important;
-    gap: 8px !important;
+    justify-content: flex-end !important;
+    gap: 5px !important;
     margin-left: 0 !important;
-    order: 0 !important;
+    order: 3 !important;
   }
 
   #accountLabel {
-    width: fit-content !important;
-    max-width: calc(100vw - 96px) !important;
-    justify-self: start !important;
+    max-width: 112px !important;
+    min-height: 34px !important;
+    padding-inline: 8px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    justify-self: auto !important;
+    font-size: 12px !important;
   }
 
   .account-box #logoutBtn {
-    justify-self: end !important;
+    min-width: 50px !important;
+    min-height: 34px !important;
+    padding-inline: 8px !important;
+    justify-self: auto !important;
+    font-size: 12px !important;
   }
 
   .main-nav > .nav-item.active,
   body.mobile-menu-open .main-nav > .nav-item.active {
     grid-column: 1 !important;
-    grid-row: 2 !important;
+    grid-row: 1 !important;
     order: 1 !important;
   }
 
   .main-nav > #mobileMenuBtn,
   body.mobile-menu-open .main-nav > #mobileMenuBtn {
     grid-column: 2 !important;
-    grid-row: 2 !important;
+    grid-row: 1 !important;
     order: 2 !important;
   }
 
@@ -6108,7 +6118,7 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
   body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3):not(.active),
   body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4):not(.active),
   body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5):not(.active) {
-    grid-column: auto !important;
+    grid-column: span 1 !important;
     order: 3 !important;
   }
 }
