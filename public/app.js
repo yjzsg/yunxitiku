@@ -2272,11 +2272,11 @@ function renderAdminDataPanel() {
         <div class="admin-data-path">数据库：${escapeHtml(bank.path || "未配置")}</div>
         <div class="admin-data-path">图片：${escapeHtml(bank.assetsPath || "未配置")}</div>
         <div class="admin-data-actions">
-          <input id="adminBankUploadInput" type="file" accept=".zip,.db,.sqlite,.sqlite3">
+          <input id="adminBankUploadInput" type="file" accept=".zip">
           <button class="primary-action" data-admin-upload="bank" type="button">上传题库</button>
           <button data-admin-download="bank" type="button" ${bank.exists ? "" : "disabled"}>下载题库</button>
         </div>
-        <small>上传 zip 时可包含 question-bank.db 和 assets 目录；上传单独数据库文件时会保留现有图片资源。替换前会自动备份。</small>
+        <small>上传题库包必须是 zip，包内包含 question-bank.db 和 assets 目录；下载时也会打成同样结构。</small>
       </section>
 
       <section class="admin-data-card">
@@ -2295,11 +2295,11 @@ function renderAdminDataPanel() {
         </div>
         <div class="admin-data-path">目录：${escapeHtml(userdata.path || "未配置")}</div>
         <div class="admin-data-actions">
-          <input id="adminUserDataUploadInput" type="file" accept=".zip,.json,.dat">
+          <input id="adminUserDataUploadInput" type="file" accept=".zip">
           <button class="primary-action" data-admin-upload="userdata" type="button">上传用户数据</button>
           <button data-admin-download="userdata" type="button">下载用户数据</button>
         </div>
-        <small>上传 zip 会恢复整套 userdata；上传单个 json 或 accounts.dat 只覆盖对应文件。替换前会自动备份。</small>
+        <small>用户数据只上传/下载 zip 包，包含 accounts.dat 和各账号 json；替换前会自动备份。</small>
       </section>
     </div>
   `;

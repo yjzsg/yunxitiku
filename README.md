@@ -37,7 +37,9 @@ cd yunxitiku
 mkdir -p data/assets userdata
 ```
 
-把你的 `question-bank.db` 和图片资源放入 `data` 目录后启动：
+可以直接启动。首次启动时，程序会在 `data/question-bank.db` 自动创建一个空题库数据库，便于先进入系统和管理员页面。
+
+如果已有题库数据，也可以先把你的 `question-bank.db` 和图片资源放入 `data` 目录后启动：
 
 ```sh
 docker compose up -d --build
@@ -55,15 +57,15 @@ http://NAS_IP:8787/
 http://NAS_IP:8787/api/health
 ```
 
-返回中的 `sqlite` 为 `true` 表示题库数据库已加载。
+返回中的 `sqlite` 为 `true` 表示题库数据库已加载。首次启动创建的是空题库，上传真实题库包后才会显示科目和章节。
 
 ## 管理员数据维护
 
 登录管理员账号后，进入“数据管理”：
 
-- 上传题库：支持上传 `question-bank.db` 或包含数据库与 `assets` 目录的 zip。
+- 上传题库：只支持 zip 包，包内包含 `question-bank.db` 和 `assets/`。
 - 下载题库：导出当前数据库和图片资源 zip。
-- 上传用户数据：支持上传 userdata zip、单个用户 json 或账号配置文件。
+- 上传用户数据：只支持 zip 包，包内包含 `accounts.dat` 和各账号 json。
 - 下载用户数据：导出当前 userdata zip。
 
 上传替换前会自动生成备份。

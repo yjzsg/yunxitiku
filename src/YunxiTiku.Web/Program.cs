@@ -42,6 +42,7 @@ var paths = app.Services.GetRequiredService<AppPaths>();
 Directory.CreateDirectory(paths.UserDataRoot);
 Directory.CreateDirectory(paths.DataAssetsRoot);
 Directory.CreateDirectory(Path.GetDirectoryName(paths.SqlitePath) ?? paths.BaseRoot);
+QuestionBank.EnsureDatabase(paths.SqlitePath);
 
 if (app.Configuration.GetValue<bool>("App:EnableHttpsRedirect"))
 {
@@ -508,6 +509,7 @@ static class AdminDataTransfer
         var tempZip = Path.Combine(Path.GetTempPath(), $"yunxi-bank-{Guid.NewGuid():N}.zip");
         using var zip = ZipFile.Open(tempZip, ZipArchiveMode.Create);
         zip.CreateEntryFromFile(paths.SqlitePath, "question-bank.db", CompressionLevel.Fastest);
+        zip.CreateEntry("assets/");
         if (Directory.Exists(paths.DataAssetsRoot))
         {
             AddDirectoryToZip(zip, paths.DataAssetsRoot, "assets");
@@ -534,22 +536,14 @@ static class AdminDataTransfer
     public static object ImportBank(AppPaths paths, string uploadedFile, string originalName)
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
+        if (ext != ".zip") throw new InvalidOperationException("题库上传仅支持 zip 包，包内需包含 question-bank.db 和 assets 目录");
         var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-bank-{Guid.NewGuid():N}");
-        var sourceDb = uploadedFile;
-        string? sourceAssets = null;
         try
         {
-            if (ext == ".zip")
-            {
-                Directory.CreateDirectory(tempDir);
-                ExtractZipSafe(uploadedFile, tempDir);
-                sourceDb = FindQuestionDb(tempDir) ?? throw new InvalidOperationException("压缩包中没有找到 question-bank.db / .sqlite 题库文件");
-                sourceAssets = FindAssetsDirectory(tempDir, sourceDb);
-            }
-            else if (ext is not ".db" and not ".sqlite" and not ".sqlite3")
-            {
-                throw new InvalidOperationException("题库上传仅支持 .zip、.db、.sqlite、.sqlite3");
-            }
+            Directory.CreateDirectory(tempDir);
+            ExtractZipSafe(uploadedFile, tempDir);
+            var sourceDb = FindQuestionDb(tempDir) ?? throw new InvalidOperationException("压缩包中没有找到 question-bank.db / .sqlite 题库文件");
+            var sourceAssets = FindAssetsDirectory(tempDir, sourceDb) ?? throw new InvalidOperationException("压缩包中没有找到 assets 目录");
 
             ValidateQuestionDb(sourceDb);
             var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
@@ -563,17 +557,12 @@ static class AdminDataTransfer
             }
 
             File.Copy(sourceDb, paths.SqlitePath, true);
-            var assetChanged = false;
-            if (!string.IsNullOrWhiteSpace(sourceAssets) && Directory.Exists(sourceAssets))
-            {
-                ReplaceDirectory(paths.DataAssetsRoot, sourceAssets);
-                assetChanged = true;
-            }
+            ReplaceDirectory(paths.DataAssetsRoot, sourceAssets);
             return new
             {
                 ok = true,
                 type = "bank",
-                message = assetChanged ? "题库和图片资源已上传" : "题库数据库已上传，原图片资源已保留",
+                message = "题库和图片资源已上传",
                 backup = backupDir,
                 status = GetStatus(paths)
             };
@@ -587,23 +576,13 @@ static class AdminDataTransfer
     public static object ImportUserData(AppPaths paths, AuthStore auth, string uploadedFile, string originalName)
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
+        if (ext != ".zip") throw new InvalidOperationException("用户数据上传仅支持 zip 包");
         var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-userdata-{Guid.NewGuid():N}");
         var importDir = Path.Combine(tempDir, "import");
         try
         {
             Directory.CreateDirectory(importDir);
-            if (ext == ".zip")
-            {
-                ExtractZipSafe(uploadedFile, importDir);
-            }
-            else if (ext == ".json" || string.Equals(Path.GetFileName(originalName), "accounts.dat", StringComparison.OrdinalIgnoreCase))
-            {
-                File.Copy(uploadedFile, Path.Combine(importDir, Path.GetFileName(originalName)), true);
-            }
-            else
-            {
-                throw new InvalidOperationException("用户数据上传仅支持 .zip、.json 或 accounts.dat");
-            }
+            ExtractZipSafe(uploadedFile, importDir);
 
             var files = CollectUserDataFiles(importDir).ToList();
             if (files.Count == 0) throw new InvalidOperationException("没有找到可导入的用户数据文件");
@@ -623,14 +602,11 @@ static class AdminDataTransfer
                 }
             }
 
-            if (ext == ".zip")
+            foreach (var old in Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly))
             {
-                foreach (var old in Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly))
-                {
-                    File.Delete(old);
-                }
-                if (File.Exists(paths.AuthDataPath)) File.Delete(paths.AuthDataPath);
+                File.Delete(old);
             }
+            if (File.Exists(paths.AuthDataPath)) File.Delete(paths.AuthDataPath);
 
             foreach (var file in files)
             {
@@ -961,6 +937,77 @@ sealed class QuestionBank
     public QuestionBank(AppPaths paths)
     {
         _paths = paths;
+    }
+
+    public static void EnsureDatabase(string sqlitePath)
+    {
+        if (File.Exists(sqlitePath)) return;
+        Directory.CreateDirectory(Path.GetDirectoryName(sqlitePath) ?? ".");
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sqlitePath }.ToString());
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            create table if not exists course (
+                icourseid integer primary key,
+                ccoursename text,
+                ihadbuy integer default 0,
+                dchangedate text,
+                dchapterchange text,
+                dsubjectchange text,
+                iclassid integer,
+                isubclassid integer,
+                iindex integer default 0,
+                bstopflag integer default 0
+            );
+            create table if not exists courseclass (
+                iclassid integer primary key,
+                ccoursecname text,
+                iindex integer default 0
+            );
+            create table if not exists coursesubclass (
+                isubclassid integer primary key,
+                csubclassname text,
+                iindex integer default 0
+            );
+            create table if not exists coursechapter (
+                ichapterid integer primary key,
+                icourseid integer,
+                cchaptername text,
+                cchaptercode text,
+                igrade integer default 0,
+                itype integer default 0,
+                icount integer default 0,
+                bstopflag integer default 0
+            );
+            create table if not exists coursesubjecttype (
+                isubjecttype integer primary key,
+                csubjectname text
+            );
+            create table if not exists coursesubject (
+                isubjectid integer primary key,
+                icourseid integer,
+                ichapterid integer,
+                isubjecttype integer,
+                iindex integer default 0,
+                ichaptertype integer default 0,
+                ctitle text,
+                cquestion text,
+                canswer text,
+                cdescription text,
+                ianswercount integer default 0,
+                iscore text,
+                dupdatedate text,
+                bstopflag integer default 0
+            );
+            insert or ignore into coursesubjecttype(isubjecttype, csubjectname) values
+                (0, '单选题'),
+                (1, '多选题'),
+                (2, '判断题'),
+                (3, '问答题'),
+                (4, '案例分析'),
+                (6, '不定项选择题');
+        ";
+        cmd.ExecuteNonQuery();
     }
 
     public IEnumerable<object> GetCourses(string search, bool availableOnly)
