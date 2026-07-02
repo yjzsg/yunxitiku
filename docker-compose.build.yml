@@ -1,6 +1,8 @@
 services:
   yunxi-tiku:
-    image: ghcr.io/yjzsg/yunxitiku:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: yunxi-tiku
     ports:
       - "8787:8787"

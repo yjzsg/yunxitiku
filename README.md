@@ -39,10 +39,29 @@ mkdir -p data/assets userdata
 
 可以直接启动。首次启动时，程序会在 `data/question-bank.db` 自动创建一个空题库数据库，便于先进入系统和管理员页面。
 
-如果已有题库数据，也可以先把你的 `question-bank.db` 和图片资源放入 `data` 目录后启动：
+如果已有题库数据，也可以先把你的 `question-bank.db` 和图片资源放入 `data` 目录后启动。
+
+默认使用已经构建好的镜像，不需要在 NAS 上编译：
 
 ```sh
-docker compose up -d --build
+docker compose pull
+docker compose up -d
+```
+
+如果 NAS 的图形界面支持导入 Compose 文件，只需要导入 `docker-compose.yml`，并确认当前目录下有 `data` 和 `userdata` 两个文件夹。
+
+首次发布新版本后，GitHub Actions 会自动构建镜像：
+
+```text
+ghcr.io/yjzsg/yunxitiku:latest
+```
+
+如果拉取镜像提示无权限，请在 GitHub Packages 中把该镜像设为 Public，或在 NAS 上先执行 `docker login ghcr.io`。
+
+备用的源码构建方式如下，只有在预构建镜像不可用时才需要：
+
+```sh
+docker compose -f docker-compose.build.yml up -d --build
 ```
 
 浏览器访问：
