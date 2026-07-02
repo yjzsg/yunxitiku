@@ -2193,9 +2193,21 @@ function renderAdminRows(rows, failedCount = 0) {
 function bindAdminBankUpdateButtons() {
   document.querySelectorAll("[data-update-course]").forEach((btn) => {
     btn.onclick = () => {
-      btn.disabled = true;
-      btn.textContent = "更新中...";
-      updateQuestionBank(Number(btn.dataset.updateCourse || 0)).catch((err) => {
+      const input = document.querySelector(`[data-update-course-file="${btn.dataset.updateCourse}"]`);
+      if (!input) {
+        toast("没有找到上传控件");
+        return;
+      }
+      input.value = "";
+      input.click();
+    };
+  });
+  document.querySelectorAll("[data-update-course-file]").forEach((input) => {
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const btn = document.querySelector(`[data-update-course="${input.dataset.updateCourseFile}"]`);
+      updateQuestionBank(Number(input.dataset.updateCourseFile || 0), file, btn).catch((err) => {
         toast(err.message);
         renderAdminRows(state.adminRows, state.adminFailedCount);
       });
@@ -2377,7 +2389,7 @@ function getFilteredAdminCourses() {
 function renderAdminBankSummary(visibleCount = getFilteredAdminCourses().length) {
   const courses = state.adminCourses || [];
   const canUpdateCount = courses.filter((course) => !!course.owned && Number(course.questionCount || 0) > 0).length;
-  return `共 ${courses.length} 门 · 可更新 ${canUpdateCount} 门 · 当前显示 ${visibleCount} 门`;
+  return `共 ${courses.length} 门 · 可上传更新 ${canUpdateCount} 门 · 当前显示 ${visibleCount} 门`;
 }
 
 function renderAdminBankRows(visibleCourses) {
@@ -2393,7 +2405,8 @@ function renderAdminBankRows(visibleCourses) {
         <td>${escapeHtml(formatRelativeTime(course.changedAt))}<span>${escapeHtml(course.changedAt || "未记录")}</span></td>
         <td><span class="status-pill ${canUpdate ? "active" : "disabled"}">${escapeHtml(status)}</span></td>
         <td>
-          <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? "更新题库" : "不可更新"}</button>
+          <input class="course-update-file" data-update-course-file="${course.id}" type="file" accept=".zip">
+          <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? "上传更新" : "不可更新"}</button>
         </td>
       </tr>
     `;
@@ -2998,11 +3011,29 @@ function toast(message) {
   toast.timer = setTimeout(() => $("toast").classList.add("hidden"), 1800);
 }
 
-async function updateQuestionBank(courseId = 0) {
+async function updateQuestionBank(courseId = 0, file = null, btn = null) {
   if (state.user.toLowerCase() !== "admin") return;
+  if (!file) {
+    toast("请选择题库 zip 文件");
+    return;
+  }
+  if (!confirm("确定上传并更新该题库吗？系统会先自动备份当前题库。")) return;
   const query = new URLSearchParams({ user: state.user });
   if (courseId) query.set("courseId", String(courseId));
-  const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
+  const form = new FormData();
+  form.append("file", file);
+  const oldText = btn?.textContent || "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "上传中...";
+  }
+  const result = await api(`/api/admin/update-bank?${query}`, { method: "POST", body: form })
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || "上传更新";
+      }
+    });
   if (result.reserved || result.mode === "upload") {
     toast(result.message || "当前部署使用上传题库包更新");
     if (isAdmin() && state.adminView === "banks") renderAdminRows(state.adminRows, state.adminFailedCount);
@@ -3016,6 +3047,11 @@ async function updateQuestionBank(courseId = 0) {
       toast("所有题库已是最新");
     }
     state.adminCourses = [];
+    state.adminDataStatus = null;
+    state.courses = [];
+    state.chapters = [];
+    state.types = [];
+    state.questions = [];
     await loadCourses();
     if (isAdmin()) await loadAdminCourses().catch(() => {});
     if (isAdmin() && state.adminView === "banks") renderAdminRows(state.adminRows, state.adminFailedCount);

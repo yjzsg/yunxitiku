@@ -248,24 +248,52 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
     return Results.Json(new { ok = false, error = "unknown action" }, statusCode: 400);
 });
 
-app.MapPost("/api/admin/update-bank", (string? user, int? courseId) =>
+app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, int? courseId) =>
 {
     var admin = CleanUserName(user);
     if (!admin.Equals("admin", StringComparison.OrdinalIgnoreCase))
     {
         return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     }
-    var results = courseId.HasValue && courseId.Value > 0
-        ? new[] { new { courseId = courseId.Value, chapters = 0, subjects = 0, reserved = true, mode = "upload" } }
-        : Array.Empty<object>();
-    return Results.Json(new
+    if (!courseId.HasValue || courseId.Value <= 0)
     {
-        ok = true,
-        reserved = true,
-        mode = "upload",
-        message = "当前部署使用上传题库包更新。请到管理员“数据管理”上传题库 zip，或直接替换挂载目录里的 data/question-bank.db 与 data/assets。",
-        results
-    });
+        return Results.Json(new { ok = false, error = "请选择要更新的题库" }, statusCode: 400);
+    }
+    if (!request.HasFormContentType)
+    {
+        return Results.Json(new
+        {
+            ok = true,
+            reserved = true,
+            mode = "upload",
+            message = "请上传题库 zip。系统会匹配压缩包内相同 ID 的题库，并只更新该题库。"
+        });
+    }
+    var form = await request.ReadFormAsync();
+    var file = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
+    if (file is null || file.Length <= 0)
+    {
+        return Results.Json(new { ok = false, error = "请选择要上传的题库 zip" }, statusCode: 400);
+    }
+    var originalName = Path.GetFileName(file.FileName);
+    var ext = Path.GetExtension(originalName).ToLowerInvariant();
+    var tempFile = Path.Combine(Path.GetTempPath(), $"yunxi-course-upload-{Guid.NewGuid():N}{ext}");
+    try
+    {
+        await using (var output = File.Create(tempFile))
+        {
+            await file.CopyToAsync(output);
+        }
+        return Results.Json(AdminDataTransfer.ImportCourseBank(paths, tempFile, originalName, courseId.Value));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+    }
+    finally
+    {
+        TryDeleteFile(tempFile);
+    }
 });
 
 app.MapGet("/api/admin/data/status", (string? user) =>
@@ -590,6 +618,60 @@ static class AdminDataTransfer
         }
     }
 
+    public static object ImportCourseBank(AppPaths paths, string uploadedFile, string originalName, int courseId)
+    {
+        var ext = Path.GetExtension(originalName).ToLowerInvariant();
+        if (ext != ".zip") throw new InvalidOperationException("题库更新仅支持 zip 包，包内需包含 question-bank.db 和 assets 目录");
+        var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-course-bank-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            ExtractZipSafe(uploadedFile, tempDir);
+            var sourceDb = FindQuestionDb(tempDir) ?? throw new InvalidOperationException("压缩包中没有找到 question-bank.db / .sqlite 题库文件");
+            var sourceAssets = FindAssetsDirectory(tempDir, sourceDb);
+
+            ValidateQuestionDb(sourceDb);
+            var sourceInfo = ReadCourseImportInfo(sourceDb, courseId);
+            if (sourceInfo.Subjects <= 0) throw new InvalidOperationException($"压缩包中题库 ID {courseId} 没有可导入题目");
+
+            var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
+            Directory.CreateDirectory(dataRoot);
+            var backupDir = Path.Combine(dataRoot, "_backups", "course-" + courseId + "-" + Timestamp());
+            Directory.CreateDirectory(backupDir);
+            if (File.Exists(paths.SqlitePath)) File.Copy(paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
+            if (Directory.Exists(paths.DataAssetsRoot))
+            {
+                CopyDirectory(paths.DataAssetsRoot, Path.Combine(backupDir, "assets"));
+            }
+
+            QuestionBank.EnsureDatabase(paths.SqlitePath);
+            var result = MergeCourseIntoBank(paths.SqlitePath, sourceDb, courseId);
+            if (sourceAssets is not null)
+            {
+                Directory.CreateDirectory(paths.DataAssetsRoot);
+                CopyDirectory(sourceAssets, paths.DataAssetsRoot);
+            }
+
+            return new
+            {
+                ok = true,
+                type = "course-bank",
+                courseId,
+                courseName = sourceInfo.Name,
+                chapters = result.Chapters,
+                subjects = result.Subjects,
+                message = $"题库已更新：{sourceInfo.Name}（{result.Chapters} 章，{result.Subjects} 题）",
+                backup = backupDir,
+                results = new[] { new { courseId, chapters = result.Chapters, subjects = result.Subjects } },
+                status = GetStatus(paths)
+            };
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+        }
+    }
+
     public static object ImportUserData(AppPaths paths, AuthStore auth, string uploadedFile, string originalName)
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
@@ -685,6 +767,104 @@ static class AdminDataTransfer
             cmd.ExecuteScalar();
         }
     }
+
+    private static (string Name, int Chapters, int Subjects) ReadCourseImportInfo(string dbPath, int courseId)
+    {
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ToString());
+        conn.Open();
+        var name = Convert.ToString(ExecuteScalar(conn, "select ccoursename from course where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId }), CultureInfo.InvariantCulture) ?? "";
+        if (name.Length == 0) throw new InvalidOperationException($"压缩包中没有找到题库 ID {courseId}");
+        var chapters = Convert.ToInt32(ExecuteScalar(conn, "select count(*) from coursechapter where icourseid=@courseId and coalesce(bstopflag,0)=0", new Dictionary<string, object?> { ["@courseId"] = courseId }), CultureInfo.InvariantCulture);
+        var subjects = Convert.ToInt32(ExecuteScalar(conn, "select count(*) from coursesubject where icourseid=@courseId and coalesce(bstopflag,0)=0", new Dictionary<string, object?> { ["@courseId"] = courseId }), CultureInfo.InvariantCulture);
+        return (name, chapters, subjects);
+    }
+
+    private static (int Chapters, int Subjects) MergeCourseIntoBank(string targetDb, string sourceDb, int courseId)
+    {
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = targetDb }.ToString());
+        conn.Open();
+        using (var attach = conn.CreateCommand())
+        {
+            attach.CommandText = "attach database @source as src";
+            attach.Parameters.AddWithValue("@source", sourceDb);
+            attach.ExecuteNonQuery();
+        }
+        try
+        {
+            using (var transaction = conn.BeginTransaction())
+            {
+                var sourceInfo = ReadCourseImportInfo(sourceDb, courseId);
+                ExecuteNonQuery(conn, transaction, "delete from coursesubject where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId });
+                ExecuteNonQuery(conn, transaction, "delete from coursechapter where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId });
+                ExecuteNonQuery(conn, transaction, "delete from course where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId });
+
+                CopyRows(conn, transaction, "src.courseclass", "courseclass", "iclassid in (select iclassid from src.course where icourseid=@courseId)", courseId);
+                CopyRows(conn, transaction, "src.coursesubclass", "coursesubclass", "isubclassid in (select isubclassid from src.course where icourseid=@courseId)", courseId);
+                CopyRows(conn, transaction, "src.coursesubjecttype", "coursesubjecttype", "1=1", courseId);
+                CopyRows(conn, transaction, "src.course", "course", "icourseid=@courseId", courseId);
+                CopyRows(conn, transaction, "src.coursechapter", "coursechapter", "icourseid=@courseId", courseId);
+                CopyRows(conn, transaction, "src.coursesubject", "coursesubject", "icourseid=@courseId", courseId);
+
+                transaction.Commit();
+                return (sourceInfo.Chapters, sourceInfo.Subjects);
+            }
+        }
+        finally
+        {
+            using var detach = conn.CreateCommand();
+            detach.CommandText = "detach database src";
+            detach.ExecuteNonQuery();
+        }
+    }
+
+    private static void CopyRows(SqliteConnection conn, SqliteTransaction transaction, string sourceTable, string targetTable, string whereSql, int courseId)
+    {
+        var targetColumns = GetTableColumns(conn, transaction, "", targetTable);
+        var sourceColumns = GetTableColumns(conn, transaction, sourceTable.Contains('.') ? sourceTable.Split('.')[0] : "", sourceTable.Contains('.') ? sourceTable.Split('.')[1] : sourceTable);
+        var columns = targetColumns.Intersect(sourceColumns, StringComparer.OrdinalIgnoreCase).ToList();
+        if (columns.Count == 0) throw new InvalidOperationException($"无法导入表 {targetTable}，没有匹配字段");
+        var columnSql = string.Join(", ", columns.Select(QuoteIdent));
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = $"insert or replace into {QuoteIdent(targetTable)} ({columnSql}) select {columnSql} from {sourceTable} where {whereSql}";
+        cmd.Parameters.AddWithValue("@courseId", courseId);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static List<string> GetTableColumns(SqliteConnection conn, SqliteTransaction transaction, string schema, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = string.IsNullOrWhiteSpace(schema)
+            ? $"pragma table_info({QuoteIdent(table)})"
+            : $"pragma {QuoteIdent(schema)}.table_info({QuoteIdent(table)})";
+        using var reader = cmd.ExecuteReader();
+        var result = new List<string>();
+        while (reader.Read())
+        {
+            result.Add(Convert.ToString(reader["name"], CultureInfo.InvariantCulture) ?? "");
+        }
+        return result.Where(item => item.Length > 0).ToList();
+    }
+
+    private static object? ExecuteScalar(SqliteConnection conn, string sql, Dictionary<string, object?> parameters)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var pair in parameters) cmd.Parameters.AddWithValue(pair.Key, pair.Value ?? DBNull.Value);
+        return cmd.ExecuteScalar();
+    }
+
+    private static void ExecuteNonQuery(SqliteConnection conn, SqliteTransaction transaction, string sql, Dictionary<string, object?> parameters)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = sql;
+        foreach (var pair in parameters) cmd.Parameters.AddWithValue(pair.Key, pair.Value ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static string QuoteIdent(string value) => "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
     private static string? FindQuestionDb(string root)
     {
