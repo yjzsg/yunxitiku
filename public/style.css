@@ -6067,7 +6067,7 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
     gap: 6px !important;
   }
 
-  .main-nav > .nav-item.active,
+  .main-nav > .nav-item,
   .main-nav > #mobileMenuBtn,
   #accountLabel,
   .account-box #logoutBtn {
@@ -6082,12 +6082,12 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
     justify-content: center !important;
   }
 
-  .main-nav > .nav-item.active {
+  .main-nav > .nav-item {
     flex-direction: row !important;
     gap: 5px !important;
   }
 
-  .main-nav > .nav-item.active::before {
+  .main-nav > .nav-item::before {
     font-size: 14px !important;
     line-height: 1 !important;
   }
@@ -6141,6 +6141,7 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
   body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4):not(.active),
   body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5):not(.active) {
     grid-column: span 1 !important;
+    grid-row: auto !important;
     order: 3 !important;
   }
 }
