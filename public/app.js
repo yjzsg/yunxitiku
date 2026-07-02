@@ -24,6 +24,7 @@
   mobileMenuOpen: false,
   mobileActionsOpen: false,
   mobileToolsOpen: false,
+  answerCardCollapsed: false,
   wrongFilters: { status: "active", minCount: "1", period: "all" },
   tagFilter: "",
   answerCardPage: 0,
@@ -416,6 +417,17 @@ function ensureMobileControls() {
     const toolbar = document.querySelector(".toolbar");
     toolbar?.appendChild(btn);
   }
+
+  if (!$("answerCardCollapseBtn")) {
+    const btn = document.createElement("button");
+    btn.id = "answerCardCollapseBtn";
+    btn.className = "answer-card-collapse-btn";
+    btn.type = "button";
+    btn.textContent = "收起答题卡";
+    btn.setAttribute("aria-expanded", "true");
+    const footer = document.querySelector(".answer-card-wrap");
+    footer?.insertBefore(btn, footer.firstChild);
+  }
 }
 
 function ensureVerifyModeControl() {
@@ -456,6 +468,15 @@ function setMobileTools(open) {
   }
 }
 
+function setAnswerCardCollapsed(collapsed) {
+  state.answerCardCollapsed = !!collapsed;
+  document.body.classList.toggle("answer-card-collapsed", state.answerCardCollapsed);
+  if ($("answerCardCollapseBtn")) {
+    $("answerCardCollapseBtn").textContent = state.answerCardCollapsed ? "展开答题卡" : "收起答题卡";
+    $("answerCardCollapseBtn").setAttribute("aria-expanded", String(!state.answerCardCollapsed));
+  }
+}
+
 function updateFullscreenState() {
   const btn = $("fullscreenBtn");
   if (!btn) return;
@@ -477,6 +498,7 @@ async function toggleFullscreen() {
 
 async function init() {
   ensureMobileControls();
+  setAnswerCardCollapsed(false);
   updateFullscreenState();
   await loadUsers();
   const sessionUser = localStorage.getItem(SESSION_USER_KEY);
@@ -3025,6 +3047,7 @@ $("confirmPassword").addEventListener("keydown", (e) => {
 $("logoutBtn").onclick = () => logout().catch((err) => toast(err.message));
 $("mobileMenuBtn").onclick = () => setMobileMenu(!state.mobileMenuOpen);
 $("mobileToolsBtn").onclick = () => setMobileTools(!state.mobileToolsOpen);
+$("answerCardCollapseBtn").onclick = () => setAnswerCardCollapsed(!state.answerCardCollapsed);
 $("prevBtn").onclick = () => moveQuestion(-1);
 $("nextBtn").onclick = () => moveQuestion(1);
 $("answerToggleBtn").onclick = toggleAnswer;

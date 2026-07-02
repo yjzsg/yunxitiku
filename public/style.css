@@ -5048,6 +5048,132 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 }
 
+/* Desktop reading density: use width, keep text left, and give the answer card room. */
+@media screen and (min-width: 761px) {
+  #questionBody:not(.exam-case-split) {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    justify-items: stretch;
+    width: 100% !important;
+    margin-inline: 0 !important;
+    max-width: none;
+    text-align: left;
+  }
+
+  .question-head {
+    margin-bottom: 10px;
+  }
+
+  .stem,
+  .extra {
+    width: 100%;
+    max-width: none;
+    text-align: left;
+  }
+
+  .stem {
+    padding: 12px 14px;
+    line-height: 1.62;
+  }
+
+  .extra:not(:empty) {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: rgba(255, 255, 255, 0.78);
+    line-height: 1.58;
+  }
+
+  .options {
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .option {
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 10px;
+    min-height: 48px;
+    padding: 8px 12px;
+    border-radius: 13px;
+  }
+
+  .option b {
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+  }
+
+  .option span {
+    min-height: 28px;
+    line-height: 1.45;
+  }
+
+  .question-tag-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.8fr);
+    align-items: center;
+    gap: 10px 14px;
+    margin-top: 10px;
+    padding: 10px 12px;
+  }
+
+  .question-tag-panel .tag-row,
+  .question-tag-panel .tag-editor,
+  .question-tag-panel .tag-presets {
+    margin: 0;
+  }
+
+  .question-tag-panel .tag-row {
+    grid-column: 1;
+  }
+
+  .question-tag-panel .tag-editor {
+    grid-column: 2;
+    justify-content: flex-end;
+  }
+
+  .question-tag-panel .tag-presets {
+    grid-column: 1 / -1;
+    gap: 7px;
+  }
+
+  .tag-editor input {
+    min-width: 160px;
+    max-width: 220px;
+  }
+
+  .answer:not(.hidden) {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 12px 18px;
+    margin-top: 10px;
+    padding: 12px 14px;
+  }
+
+  .answer > div:first-child {
+    margin: 0;
+    white-space: normal;
+  }
+
+  .description {
+    margin-top: 0;
+    line-height: 1.58;
+  }
+
+  .note-editor,
+  .subjective-input {
+    min-height: 96px;
+    margin-top: 10px;
+  }
+
+  .answer-card-collapse-btn {
+    display: none !important;
+  }
+}
+
 /* Final layout expansion: keep the question area dominant and align compact mobile menus. */
 @media screen and (min-width: 761px) {
   .course-head {
@@ -5065,15 +5191,15 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .answer-card-wrap {
-    max-height: 132px;
+    max-height: 188px;
     min-height: 0;
-    padding: 8px 14px 10px;
+    padding: 10px 14px 12px;
     overflow: hidden;
   }
 
   .stats {
     gap: 10px;
-    margin-bottom: 6px;
+    margin-bottom: 7px;
     font-size: 12px;
   }
 
@@ -5087,7 +5213,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .card-page-content {
-    max-height: 66px;
+    max-height: 116px;
     overflow: auto;
   }
 }
@@ -5288,6 +5414,29 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     max-height: 16dvh;
     min-height: 0;
     padding: 5px 6px 6px;
+  }
+
+  .answer-card-collapse-btn {
+    display: inline-flex;
+    width: 100%;
+    min-height: 28px;
+    margin-bottom: 4px;
+    border-radius: 10px;
+    border-color: #c7d2fe;
+    background: var(--primary-50);
+    color: var(--primary-600);
+    font-size: 11px;
+    font-weight: 800;
+  }
+
+  body.answer-card-collapsed .answer-card-wrap {
+    max-height: none;
+    padding: 5px 6px;
+  }
+
+  body.answer-card-collapsed .answer-card-wrap .stats,
+  body.answer-card-collapsed .answer-card-wrap .answer-card {
+    display: none !important;
   }
 
   .stats {
