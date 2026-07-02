@@ -5470,7 +5470,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .answer-card-wrap {
-    max-height: 16dvh;
+    max-height: 24dvh;
     min-height: 0;
     padding: 5px 6px 6px;
   }
@@ -5516,7 +5516,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .card-page-content {
-    max-height: calc(16dvh - 50px) !important;
+    max-height: calc(24dvh - 50px) !important;
     gap: 4px;
   }
 
