@@ -397,7 +397,6 @@ function selectableExamChapters() {
 function renderExamChapterTree() {
   const roots = (state.chapterTreeRoots?.length ? state.chapterTreeRoots : buildChapterTree(state.chapters))
     .filter((node) => chapterTotalCount(node) > 0);
-  if (!state.examExpandedChapters.size && roots[0]) state.examExpandedChapters.add(Number(roots[0].id));
   if (!state.examSelectedChapters) {
     state.examSelectedChapters = new Set();
     const mark = (node) => {
@@ -2005,7 +2004,6 @@ function renderAnalysisChapterTree(rows) {
   const map = new Map(rows.map((row) => [Number(row.id), row]));
   const roots = (state.chapterTreeRoots?.length ? state.chapterTreeRoots : buildChapterTree(state.chapters))
     .filter((node) => map.has(Number(node.id)));
-  if (!state.analysisExpandedChapters.size && roots[0]) state.analysisExpandedChapters.add(Number(roots[0].id));
   const renderNode = (node, depth) => {
     if (depth > 2) return "";
     const row = map.get(Number(node.id));
