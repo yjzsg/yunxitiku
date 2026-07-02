@@ -1,7 +1,7 @@
 services:
   yunxi-tiku:
     build:
-      context: .
+      context: https://github.com/yjzsg/yunxitiku.git#main
       dockerfile: Dockerfile
     container_name: yunxi-tiku
     ports:
