@@ -1072,6 +1072,8 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .question-tag-panel,
 .exam-review-panel,
 .analysis-table-card,
+.learning-signal-panel,
+.practice-context-panel,
 .review-plan-panel {
   margin-top: 16px;
   border: 1px solid var(--border);
@@ -1784,6 +1786,109 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.practice-context-panel {
+  width: calc(100% - 32px);
+  margin: 12px auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  background: linear-gradient(135deg, rgba(238, 242, 255, 0.94), rgba(255, 255, 255, 0.94));
+}
+
+.practice-context-panel > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.practice-context-panel span {
+  color: var(--primary-600);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.practice-context-panel b {
+  color: var(--text);
+  font-size: 17px;
+}
+
+.practice-context-panel small {
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.practice-context-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.practice-context-actions button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border-color: #c7d2fe;
+  background: #fff;
+  color: var(--primary-600);
+  white-space: nowrap;
+}
+
+.learning-signal-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.signal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.signal-grid > div {
+  display: grid;
+  gap: 8px;
+}
+
+.signal-grid strong {
+  color: #334155;
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.signal-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.signal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-color: #c7d2fe;
+  border-radius: 999px;
+  background: var(--primary-50);
+  color: var(--primary-600);
+  box-shadow: none;
+}
+
+.signal-chip b {
+  min-width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--primary-600);
+  font-size: 12px;
 }
 
 .trend-panel {
@@ -4844,6 +4949,29 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 }
 
 @media screen and (max-width: 760px) {
+  .practice-context-panel {
+    width: calc(100% - 20px);
+    margin-top: 8px;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .practice-context-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .practice-context-actions button {
+    min-width: 0;
+    padding-inline: 8px;
+  }
+
+  .signal-grid {
+    grid-template-columns: 1fr;
+  }
+
   :root {
     --control-h: 36px;
     --space-page: 7px;

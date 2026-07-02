@@ -782,6 +782,7 @@ function normalizeStorage(data) {
     history: Array.isArray(data.history) ? data.history : [],
     examHistory: Array.isArray(data.examHistory) ? data.examHistory : [],
     dailyReports: Array.isArray(data.dailyReports) ? data.dailyReports : [],
+    dailyActivity: data.dailyActivity && typeof data.dailyActivity === "object" ? data.dailyActivity : {},
     confidence: data.confidence && typeof data.confidence === "object" ? data.confidence : {},
     wrongReasons: data.wrongReasons && typeof data.wrongReasons === "object" ? data.wrongReasons : {},
     smartPractice: data.smartPractice && typeof data.smartPractice === "object" ? data.smartPractice : null,
@@ -1248,10 +1249,11 @@ function buildSmartPracticeIds(courseStore = userCourseStore()) {
   return ids.slice(0, 60);
 }
 
-function saveSmartPracticeSession(ids) {
+function saveSmartPracticeSession(ids, sourceTitle = "智能推荐") {
   state.storage.smartPractice = {
     courseId: state.currentCourse?.id || 0,
     courseName: state.currentCourse?.name || "",
+    sourceTitle,
     ids: ids.map(Number).filter(Boolean),
     createdAt: nowText(),
   };
@@ -1278,6 +1280,7 @@ function renderAll() {
   renderMode();
   renderExamStatus();
   renderWrongFilters();
+  renderPracticeContextPanel();
   if (state.mode === "progress") {
     renderProgress();
     return;
@@ -1334,6 +1337,7 @@ function renderQuestion() {
   const q = item.detail;
   const revealAnswer = shouldRevealCurrentAnswer(q);
   setPanelPage(false);
+  renderPracticeContextPanel();
   $("emptyState").classList.add("hidden");
   $("questionBody").classList.remove("hidden");
   $("questionBody").classList.toggle("exam-case-split", state.mode === "exam" && /案例|问答|主观/.test(`${q.type || ""}${state.currentCourse?.name || ""}`) && !!q.extraQuestion);
@@ -1556,6 +1560,36 @@ function renderWrongFilters() {
   $("wrongPeriodFilter").onchange = reload;
 }
 
+function renderPracticeContextPanel() {
+  let panel = $("practiceContextPanel");
+  if (state.mode !== "smart" || isAdmin() || !state.currentCourse) {
+    panel?.remove();
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "practiceContextPanel";
+    panel.className = "practice-context-panel";
+    $("questionView").parentNode.insertBefore(panel, $("questionView"));
+  }
+  const done = state.questions.filter((item) => hasAnswer(item.id)).length;
+  const verified = state.questions.filter((item) => isQuestionVerified(item.id)).length;
+  const smart = state.storage.smartPractice || {};
+  panel.innerHTML = `
+    <div>
+      <span>${escapeHtml(smart.sourceTitle || "智能练习")}</span>
+      <b>${state.questions.length} 题 · 已做 ${done} · 已确认 ${verified}</b>
+      <small>${escapeHtml(smart.courseName || state.currentCourse.name || "")}${smart.createdAt ? ` · 生成于 ${escapeHtml(smart.createdAt)}` : ""}</small>
+    </div>
+    <div class="practice-context-actions">
+      <button type="button" id="regenerateSmartBtn">重新生成</button>
+      <button type="button" id="exitSmartBtn">退出智能练习</button>
+    </div>
+  `;
+  $("regenerateSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
+  $("exitSmartBtn").onclick = () => exitSmartPractice().catch((err) => toast(err.message));
+}
+
 function renderSearchMatches() {
   const panel = $("searchMatchPanel");
   if (!panel) return;
@@ -1661,6 +1695,7 @@ function saveSubjectiveAnswer(q, answer) {
   resetQuestionVerification(q.id);
   if (normalizeAnswer(answer)) courseStore.done[q.id] = true;
   else delete courseStore.done[q.id];
+  if (normalizeAnswer(answer)) recordPracticeActivity(q);
   if (state.submitted && normalizeAnswer(answer) && !isSubjective(q)) markResult(q);
   scheduleSave();
   renderVerifyModeControls();
@@ -1678,7 +1713,9 @@ function chooseOption(q, label) {
   const courseStore = userCourseStore();
   courseStore.answers[q.id] = answer;
   resetQuestionVerification(q.id);
-  courseStore.done[q.id] = true;
+  if (answer) courseStore.done[q.id] = true;
+  else delete courseStore.done[q.id];
+  if (answer) recordPracticeActivity(q);
   if (state.submitted && state.answers[q.id]) markResult(q);
   scheduleSave();
   renderQuestion();
@@ -1720,6 +1757,65 @@ function markResult(q) {
     record.resolvedAt = "";
     state.storage.wrong[q.id] = record;
   }
+}
+
+function recordPracticeActivity(q, options = {}) {
+  if (!q || state.mode === "exam" || isAdmin()) return;
+  const key = todayKey();
+  state.storage.dailyActivity ||= {};
+  const day = state.storage.dailyActivity[key] ||= { courses: {}, total: 0, correct: 0, verified: 0, updatedAt: nowText() };
+  day.courses ||= {};
+  const courseId = String(q.courseId || state.currentCourse?.id || "global");
+  const course = day.courses[courseId] ||= {
+    courseId: Number(q.courseId || state.currentCourse?.id || 0),
+    courseName: state.currentCourse?.name || "",
+    questions: {},
+    total: 0,
+    correct: 0,
+    verified: 0,
+  };
+  course.questions ||= {};
+  const id = String(q.id);
+  const previous = course.questions[id] || {};
+  const answer = currentAnswerSnapshot(q.id);
+  course.questions[id] = {
+    id: q.id,
+    chapterId: q.chapterId,
+    chapterName: q.chapterName,
+    type: q.type,
+    answer,
+    answeredAt: previous.answeredAt || nowText(),
+    verifiedAt: options.verified ? nowText() : previous.verifiedAt || "",
+    correct: options.verified && !isSubjective(q) ? (hasAnswer(q.id) && isAnswerCorrect(q)) : previous.correct,
+    subjective: isSubjective(q),
+  };
+  recomputeDailyActivity(day);
+  trimDailyActivity();
+  day.updatedAt = nowText();
+}
+
+function recomputeDailyActivity(day) {
+  let total = 0;
+  let correct = 0;
+  let verified = 0;
+  Object.values(day.courses || {}).forEach((course) => {
+    const rows = Object.values(course.questions || {});
+    const scoredRows = rows.filter((item) => !item.subjective);
+    course.total = rows.length;
+    course.correct = scoredRows.filter((item) => item.correct === true).length;
+    course.verified = scoredRows.filter((item) => item.verifiedAt).length;
+    total += course.total;
+    correct += course.correct;
+    verified += course.verified;
+  });
+  day.total = total;
+  day.correct = correct;
+  day.verified = verified;
+}
+
+function trimDailyActivity() {
+  const entries = Object.entries(state.storage.dailyActivity || {}).sort((a, b) => b[0].localeCompare(a[0]));
+  state.storage.dailyActivity = Object.fromEntries(entries.slice(0, 90));
 }
 
 function renderAnswerCard() {
@@ -1952,6 +2048,7 @@ function clearVerifiedForCourse() {
 function verifyQuestionResult(q) {
   markQuestionVerified(q);
   if (!isSubjective(q) && hasAnswer(q.id)) markResult(q);
+  recordPracticeActivity(q, { verified: true });
 }
 
 function confirmCurrentAnswer() {
@@ -2003,6 +2100,7 @@ function renderProgress() {
         <canvas id="progressTrend" width="680" height="180"></canvas>
       </div>
       ${renderStudyDashboard(courseStore, stats, analysisItems)}
+      ${renderLearningSignalPanel(courseStore)}
       ${renderDeepAnalysis(courseStore, analysisItems)}
       ${renderReviewPlanPanel(stats, wrongTotal, analysisItems)}
       <div class="practice-quick-actions">
@@ -2022,6 +2120,7 @@ function renderProgress() {
   };
   $("smartPracticeBtn").onclick = () => startSmartPractice().catch((err) => toast(err.message));
   $("dueReviewBtn").onclick = () => startDueWrongReview().catch((err) => toast(err.message));
+  bindLearningSignalActions();
 }
 
 function renderStudyDashboard(courseStore, stats, items) {
@@ -2029,6 +2128,7 @@ function renderStudyDashboard(courseStore, stats, items) {
   const due = records.filter(([, item]) => isReviewDue(item)).length;
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
   const report = getTodayReport();
+  const today = getTodayActivity();
   const reportText = report
     ? `已记录快照：${report.done} 题 · 正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
     : buildStudyReportSummary(courseStore, stats, items).summary;
@@ -2039,7 +2139,12 @@ function renderStudyDashboard(courseStore, stats, items) {
       <div class="study-card">
         <span>今日建议</span>
         <b>${due ? `复习 ${due} 道错题` : "智能练习 30 题"}</b>
-        <small>${escapeHtml(reportText)}</small>
+        <small>${today.total ? `今日已练 ${today.total} 题，确认正确率 ${today.rate}%` : escapeHtml(reportText)}</small>
+      </div>
+      <div class="study-card">
+        <span>今日练习</span>
+        <b>${today.total} 题</b>
+        <small>已确认 ${today.verified} 题 · 答对 ${today.correct} 题 · ${today.rate}%</small>
       </div>
       <div class="study-card">
         <span>薄弱章节</span>
@@ -2120,9 +2225,88 @@ function getWeakChapterRows(courseStore, items) {
     .sort((a, b) => a.rate - b.rate || b.done - a.done);
 }
 
-async function startSmartPractice() {
+function renderLearningSignalPanel(courseStore) {
+  const wrongReasonRows = buildSignalRows(state.storage.wrongReasons || {}, courseStore, "reason");
+  const confidenceRows = buildSignalRows(state.storage.confidence || {}, courseStore, "confidence");
+  if (!wrongReasonRows.length && !confidenceRows.length) {
+    return `
+      <div class="learning-signal-panel">
+        <div class="trend-title">学习信号</div>
+        <div class="muted">在题目右侧标记信心或错因后，这里会汇总成专项练习入口。</div>
+      </div>
+    `;
+  }
+  const renderRows = (rows, type) => rows.length ? rows.map((row) => `
+    <button type="button" class="signal-chip" data-signal-type="${type}" data-signal-label="${escapeHtml(row.label)}">
+      <span>${escapeHtml(row.label)}</span>
+      <b>${row.count}</b>
+    </button>
+  `).join("") : `<span class="muted">暂无数据</span>`;
+  return `
+    <div class="learning-signal-panel">
+      <div class="trend-title">学习信号</div>
+      <div class="signal-grid">
+        <div>
+          <strong>错因分布</strong>
+          <div class="signal-list">${renderRows(wrongReasonRows, "reason")}</div>
+        </div>
+        <div>
+          <strong>信心分布</strong>
+          <div class="signal-list">${renderRows(confidenceRows, "confidence")}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildSignalRows(source, courseStore, type) {
+  const counts = new Map();
+  const validIds = new Set([
+    ...Object.keys(courseStore.done || {}),
+    ...Object.keys(courseStore.wrong || {}),
+    ...Object.keys(courseStore.correct || {}),
+    ...Object.keys(courseStore.answers || {}),
+    ...(state.analysisQuestions.length ? state.analysisQuestions : state.questions).map((item) => item.id),
+  ].map(Number));
+  Object.entries(source || {}).forEach(([id, label]) => {
+    const clean = String(label || "").trim();
+    if (!clean) return;
+    if (validIds.size && !validIds.has(Number(id))) return;
+    const row = counts.get(clean) || { label: clean, count: 0, ids: [] };
+    row.count++;
+    row.ids.push(Number(id));
+    counts.set(clean, row);
+  });
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
+}
+
+function bindLearningSignalActions() {
+  document.querySelectorAll("[data-signal-type][data-signal-label]").forEach((btn) => {
+    btn.onclick = () => startSignalPractice(btn.dataset.signalType, btn.dataset.signalLabel).catch((err) => toast(err.message));
+  });
+}
+
+async function startSignalPractice(type, label) {
+  if (!state.currentCourse || !label) return;
+  const courseStore = userCourseStore();
+  const source = type === "confidence" ? state.storage.confidence : state.storage.wrongReasons;
+  const rows = buildSignalRows(source || {}, courseStore, type);
+  const match = rows.find((row) => row.label === label);
+  if (!match?.ids?.length) {
+    toast("当前科目没有匹配题目");
+    return;
+  }
+  saveSmartPracticeSession(match.ids.slice(0, 80), `${type === "confidence" ? "信心" : "错因"}：${label}`);
+  state.mode = "smart";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast(`已生成「${label}」专项练习`);
+}
+
+async function startSmartPractice(options = {}) {
   if (!state.currentCourse) return;
   if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  if (options.force) state.storage.smartPractice = null;
   const ids = buildSmartPracticeIds(userCourseStore());
   if (!ids.length) {
     toast("暂无可生成的智能练习");
@@ -2133,6 +2317,15 @@ async function startSmartPractice() {
   setCoursePicker(false);
   await loadQuestions();
   toast("已生成智能练习");
+}
+
+async function exitSmartPractice() {
+  if (state.mode !== "smart") return;
+  state.mode = "practice";
+  state.storage.smartPractice = null;
+  scheduleSave();
+  await loadQuestions();
+  toast("已退出智能练习");
 }
 
 async function continueSmartPractice() {
@@ -2384,6 +2577,24 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
 
 function todayKey() {
   return dateKey(new Date());
+}
+
+function getTodayActivity(courseId = state.currentCourse?.id) {
+  const day = state.storage.dailyActivity?.[todayKey()];
+  if (!day) return { total: 0, verified: 0, correct: 0, rate: 0 };
+  if (!courseId) {
+    const rate = day.verified ? Math.round(Number(day.correct || 0) / Number(day.verified || 1) * 100) : 0;
+    return { total: Number(day.total || 0), verified: Number(day.verified || 0), correct: Number(day.correct || 0), rate };
+  }
+  const course = day.courses?.[String(courseId)] || {};
+  const verified = Number(course.verified || 0);
+  const correct = Number(course.correct || 0);
+  return {
+    total: Number(course.total || 0),
+    verified,
+    correct,
+    rate: verified ? Math.round(correct / verified * 100) : 0,
+  };
 }
 
 function dateKey(d) {
@@ -3051,6 +3262,7 @@ async function submitPaper(autoSubmit = false) {
     score += calculateQuestionScore(item.detail);
     if (state.mode !== "exam") markQuestionVerified(item.detail);
     if (!isSubjective(item.detail)) markResult(item.detail);
+    if (state.mode !== "exam") recordPracticeActivity(item.detail, { verified: true });
   }
   const rate = checked ? Math.round((correct / checked) * 100) : 0;
   const submittedAt = nowText();
@@ -3076,6 +3288,7 @@ async function submitPaper(autoSubmit = false) {
   scheduleSave();
   state.answerVisible = true;
   renderQuestion();
+  renderPracticeContextPanel();
   if (state.mode === "exam") {
     toast(`${autoSubmit ? "时间到，已自动交卷" : "已交卷"}：${formatScore(score)}/${formatScore(totalScore)} 分`);
   } else {
