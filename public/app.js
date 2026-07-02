@@ -769,17 +769,6 @@ function setCoursePicker(open) {
   updatePickerHint();
 }
 
-function shouldAutoClosePicker() {
-  return window.matchMedia("(max-width: 760px)").matches;
-}
-
-function closePickerAfterSelection() {
-  if (!isAdmin() && state.mode === "practice" && shouldAutoClosePicker()) {
-    setCoursePicker(false);
-    toast("已进入答题界面");
-  }
-}
-
 function updatePickerHint() {
   const btn = $("pickerDoneBtn");
   if (!btn) return;
@@ -971,7 +960,6 @@ async function selectChapter(chapter) {
   renderChapters();
   await loadTypes();
   await loadQuestions();
-  closePickerAfterSelection();
   updatePickerHint();
   scheduleSave();
 }
