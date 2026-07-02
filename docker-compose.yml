@@ -14,7 +14,7 @@ services:
       App__DataAssetsRoot: /app/data/assets
       App__UserDataRoot: /app/userdata
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/api/health | grep -q '\"sqlite\":true'"]
+      test: ["CMD-SHELL", "DOTNET_CLI_TELEMETRY_OPTOUT=1 dotnet exec /app/YunxiTiku.Web.dll --healthcheck http://127.0.0.1:8787/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3

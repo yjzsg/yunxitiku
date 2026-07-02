@@ -12,6 +12,20 @@ using static AppHelpers;
 
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
+if (args.Length >= 2 && args[0] == "--healthcheck")
+{
+    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+    try
+    {
+        var text = await client.GetStringAsync(args[1]);
+        return text.Contains("\"sqlite\":true", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
+    }
+    catch
+    {
+        return 1;
+    }
+}
+
 var builder = WebApplication.CreateBuilder(args);
 if (string.IsNullOrWhiteSpace(builder.Configuration["urls"])
     && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"))

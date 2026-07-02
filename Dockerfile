@@ -12,9 +12,6 @@ ENV ASPNETCORE_URLS=http://0.0.0.0:8787
 ENV App__SqlitePath=/app/data/question-bank.db
 ENV App__DataAssetsRoot=/app/data/assets
 ENV App__UserDataRoot=/app/userdata
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/publish .
 VOLUME ["/app/data", "/app/userdata"]
 EXPOSE 8787
