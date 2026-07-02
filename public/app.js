@@ -1,5 +1,5 @@
 ﻿const state = {
-  mode: "practice",
+  mode: "training",
   user: "",
   users: [],
   courses: [],
@@ -47,6 +47,8 @@
   examSelectedChapters: null,
   analysisExpandedChapters: new Set(),
   chapterAutoExpanded: false,
+  lastAnimatedQuestionId: 0,
+  lastMarkedQuestionId: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -419,7 +421,7 @@ function renderExamChapterNode(chapter, level) {
   return `
     <div class="exam-chapter-node level-${level}">
       <div class="exam-chapter-row">
-        <button class="exam-chapter-toggle" type="button" data-exam-toggle="${chapter.id}" ${hasChildren ? "" : "disabled"}>${hasChildren ? (expanded ? "−" : "+") : ""}</button>
+        <button class="exam-chapter-toggle ${expanded ? "expanded" : "collapsed"}" type="button" data-exam-toggle="${chapter.id}" ${hasChildren ? "" : "disabled"}>${hasChildren ? (expanded ? "−" : "+") : ""}</button>
         <label title="${escapeHtml(chapter.name)}">
           <input type="checkbox" data-exam-chapter value="${chapter.id}" data-exam-parent="${hasChildren ? "1" : "0"}" ${state.examSelectedChapters.has(Number(chapter.id)) ? "checked" : ""}>
           <span>${escapeHtml(chapter.name)}</span>
@@ -573,6 +575,8 @@ function setMobileMenu(open) {
     $("mobileMenuBtn").textContent = open ? "\u6536\u8d77" : "\u66f4\u591a";
     $("mobileMenuBtn").setAttribute("aria-expanded", String(open));
   }
+  scheduleNavIndicator();
+  setTimeout(updateNavIndicator, 260);
 }
 
 function setMobileActions(open) {
@@ -733,6 +737,7 @@ async function enterApp(user, options = {}) {
   $("adminDashboard").classList.add("hidden");
   $("questionView").classList.remove("hidden");
   state.storage.profile.lastLoginAt = nowText();
+  if (!isAdmin()) state.mode = "training";
   await loadCourses();
   if (isAdmin()) {
     renderAdminDashboard();
@@ -1359,11 +1364,12 @@ function renderQuestion() {
   const item = state.questions[state.currentIndex];
   const q = item.detail;
   const revealAnswer = shouldRevealCurrentAnswer(q);
+  const questionBody = $("questionBody");
   setPanelPage(false);
   renderPracticeContextPanel();
   $("emptyState").classList.add("hidden");
-  $("questionBody").classList.remove("hidden");
-  $("questionBody").classList.toggle("exam-case-split", state.mode === "exam" && /案例|问答|主观/.test(`${q.type || ""}${state.currentCourse?.name || ""}`) && !!q.extraQuestion);
+  questionBody.classList.remove("hidden");
+  questionBody.classList.toggle("exam-case-split", state.mode === "exam" && /案例|问答|主观/.test(`${q.type || ""}${state.currentCourse?.name || ""}`) && !!q.extraQuestion);
   $("questionView").style.setProperty("--zoom", state.zoom);
   setText("questionNo", `第 ${state.currentIndex + 1} / ${state.questions.length} 题`);
   setText("questionType", `${q.type || "题目"}${state.mode === "exam" ? ` · ${getQuestionScore(q)}分` : ""}`);
@@ -1387,6 +1393,16 @@ function renderQuestion() {
   renderSearchMatches();
   renderAnswerCard();
   updateStats();
+  animateQuestionEntry(q.id);
+}
+
+function animateQuestionEntry(questionId) {
+  const body = $("questionBody");
+  if (!body || !questionId || state.lastAnimatedQuestionId === questionId) return;
+  state.lastAnimatedQuestionId = questionId;
+  body.classList.remove("question-enter");
+  void body.offsetWidth;
+  body.classList.add("question-enter");
 }
 
 function renderQuestionTags(q) {
@@ -1398,54 +1414,46 @@ function renderQuestionTags(q) {
     $("answerBox").parentNode.insertBefore(panel, $("answerBox"));
   }
   const currentTags = questionTags(q.id);
-  const labels = tagLabels();
   const tagSummary = currentTags.length ? currentTags.join("、") : "未添加";
   const confidence = state.storage.confidence?.[q.id] || "";
   const wrongReason = questionWrongReason(q.id);
   const favoriteGroup = favoriteGroupOf(q.id);
+  const renderToggleGroup = (items, attr, activeValue = "") => items.map((label) => {
+    const escaped = escapeHtml(label);
+    const isActive = Array.isArray(activeValue) ? activeValue.includes(label) : activeValue === label;
+    return `<button type="button" class="quick-mark ${isActive ? "active" : ""}" ${attr}="${escaped}">${escaped}</button>`;
+  }).join("");
   panel.innerHTML = `
     <button id="tagPanelToggleBtn" class="tag-panel-toggle" type="button" aria-expanded="false">
       <span>标签</span>
       <small>${escapeHtml(tagSummary)}</small>
     </button>
     <div class="tag-panel-body">
-      <div class="tag-row">
+      <div class="tag-section">
         <strong>标签</strong>
-        ${currentTags.map((label) => `<button type="button" class="tag-pill active" data-remove-tag="${escapeHtml(label)}">${escapeHtml(label)} ×</button>`).join("") || `<span class="muted">未添加标签</span>`}
+        <div class="tag-button-grid">
+          ${renderToggleGroup(DEFAULT_TAG_LABELS, "data-toggle-tag", currentTags)}
+          ${currentTags.filter((label) => !DEFAULT_TAG_LABELS.includes(label)).map((label) => `<button type="button" class="quick-mark active" data-toggle-tag="${escapeHtml(label)}">${escapeHtml(label)} ×</button>`).join("")}
+        </div>
       </div>
-      <div class="tag-editor">
-        <input id="tagInput" list="tagLabelList" placeholder="输入标签，如 计算量大">
-        <datalist id="tagLabelList">${labels.map((label) => `<option value="${escapeHtml(label)}"></option>`).join("")}</datalist>
-        <button type="button" id="addTagBtn">添加标签</button>
-      </div>
-      <div class="tag-presets">
-        ${DEFAULT_TAG_LABELS.map((label) => `<button type="button" data-add-preset-tag="${escapeHtml(label)}">${escapeHtml(label)}</button>`).join("")}
-      </div>
-      <div class="quick-mark-row">
+      <div class="tag-section">
         <strong>信心</strong>
-        ${["确定", "不确定", "蒙的"].map((label) => `<button type="button" class="quick-mark ${confidence === label ? "active" : ""}" data-confidence="${label}">${label}</button>`).join("")}
+        <div class="tag-button-grid">${renderToggleGroup(["确定", "不确定", "蒙的"], "data-confidence", confidence)}</div>
       </div>
-      <div class="quick-mark-row">
+      <div class="tag-section">
         <strong>错因</strong>
-        ${["概念不清", "计算错误", "审题错误", "记忆错误", "选项陷阱"].map((label) => `<button type="button" class="quick-mark ${wrongReason === label ? "active" : ""}" data-wrong-reason="${label}">${label}</button>`).join("")}
+        <div class="tag-button-grid">${renderToggleGroup(["概念不清", "计算错误", "审题错误", "记忆错误", "选项陷阱"], "data-wrong-reason", wrongReason)}</div>
       </div>
-      <div class="quick-mark-row">
+      <div class="tag-section">
         <strong>收藏夹</strong>
-        ${FAVORITE_GROUPS.map((label) => `<button type="button" class="quick-mark ${favoriteGroup === label ? "active" : ""}" data-favorite-group="${label}">${label}</button>`).join("")}
-      </div>
-      <div class="quick-mark-row">
-        <strong>笔记</strong>
-        <button type="button" class="quick-mark" id="noteTemplateBtn">套用模板</button>
+        <div class="tag-button-grid">${renderToggleGroup(FAVORITE_GROUPS, "data-favorite-group", favoriteGroup)}</div>
       </div>
     </div>
   `;
   setMobileTagsOpen(false);
   $("tagPanelToggleBtn").onclick = () => setMobileTagsOpen(!state.mobileTagsOpen);
-  panel.querySelectorAll("[data-remove-tag]").forEach((btn) => {
-    btn.onclick = () => removeQuestionTag(q.id, btn.dataset.removeTag);
-  });
-  panel.querySelectorAll("[data-add-preset-tag]").forEach((btn) => {
-    btn.onclick = () => addQuestionTag(q.id, btn.dataset.addPresetTag);
+  panel.querySelectorAll("[data-toggle-tag]").forEach((btn) => {
+    btn.onclick = () => toggleQuestionTag(q.id, btn.dataset.toggleTag);
   });
   panel.querySelectorAll("[data-confidence]").forEach((btn) => {
     btn.onclick = () => setQuestionConfidence(q.id, btn.dataset.confidence);
@@ -1456,14 +1464,6 @@ function renderQuestionTags(q) {
   panel.querySelectorAll("[data-favorite-group]").forEach((btn) => {
     btn.onclick = () => setFavoriteGroup(q, btn.dataset.favoriteGroup);
   });
-  $("noteTemplateBtn").onclick = () => applyNoteTemplate(q.id);
-  $("addTagBtn").onclick = () => addQuestionTag(q.id, $("tagInput").value);
-  $("tagInput").onkeydown = (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      addQuestionTag(q.id, $("tagInput").value);
-    }
-  };
 }
 
 function setQuestionConfidence(questionId, value) {
@@ -1548,6 +1548,13 @@ function addQuestionTag(questionId, rawLabel) {
   scheduleSave();
   renderQuestion();
   renderTagFilterOptions();
+}
+
+function toggleQuestionTag(questionId, rawLabel) {
+  const label = String(rawLabel || "").replace(/\s*×$/, "").trim();
+  if (!label) return;
+  if (questionTags(questionId).includes(label)) removeQuestionTag(questionId, label);
+  else addQuestionTag(questionId, label);
 }
 
 function removeQuestionTag(questionId, label) {
@@ -1769,12 +1776,16 @@ function renderOptions(q) {
 }
 
 function saveSubjectiveAnswer(q, answer) {
+  const previous = state.answers[q.id] || "";
+  const wasFilled = !!normalizeAnswer(previous);
+  const isFilled = !!normalizeAnswer(answer);
   state.answers[q.id] = answer;
   const courseStore = userCourseStore();
   courseStore.answers[q.id] = answer;
   resetQuestionVerification(q.id);
   if (normalizeAnswer(answer)) courseStore.done[q.id] = true;
   else delete courseStore.done[q.id];
+  if (wasFilled !== isFilled) state.lastMarkedQuestionId = q.id;
   if (normalizeAnswer(answer)) recordPracticeActivity(q);
   if (state.submitted && normalizeAnswer(answer) && !isSubjective(q)) markResult(q);
   if (currentVerifyMode() === "instant" && normalizeAnswer(answer)) {
@@ -1788,6 +1799,7 @@ function saveSubjectiveAnswer(q, answer) {
 }
 
 function chooseOption(q, label) {
+  const previous = state.answers[q.id] || "";
   const selected = new Set((state.answers[q.id] || "").split("").filter(Boolean));
   const multi = (q.answer || "").length > 1;
   if (!multi) selected.clear();
@@ -1799,6 +1811,7 @@ function chooseOption(q, label) {
   resetQuestionVerification(q.id);
   if (answer) courseStore.done[q.id] = true;
   else delete courseStore.done[q.id];
+  if (answer !== previous) state.lastMarkedQuestionId = q.id;
   if (answer) recordPracticeActivity(q);
   if (state.submitted && state.answers[q.id]) markResult(q);
   if (answer && currentVerifyMode() === "instant") {
@@ -1998,7 +2011,9 @@ function renderAnswerCardPage(options = {}) {
     const btn = document.createElement("button");
     btn.textContent = index + 1;
     btn.className = "card-cell";
+    btn.dataset.questionId = item.id;
     if (index === state.currentIndex) btn.classList.add("current");
+    if (Number(item.id) === Number(state.lastMarkedQuestionId)) btn.classList.add("just-marked");
     if (matched.has(index)) btn.classList.add("search-match");
     if (hasAnswer(item.id)) btn.classList.add("done");
     if (state.submitted || isQuestionVerified(item.id)) {
@@ -2012,6 +2027,13 @@ function renderAnswerCardPage(options = {}) {
       await loadCurrentQuestion();
     };
     content.appendChild(btn);
+  }
+  if (state.lastMarkedQuestionId) {
+    clearTimeout(renderAnswerCardPage.markTimer);
+    renderAnswerCardPage.markTimer = setTimeout(() => {
+      document.querySelectorAll(".card-cell.just-marked").forEach((el) => el.classList.remove("just-marked"));
+    }, 380);
+    state.lastMarkedQuestionId = 0;
   }
   content.querySelector(".card-cell.current")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
@@ -2030,12 +2052,52 @@ function renderMode() {
     btn.classList.toggle("active", btn.dataset.mode === visualMode);
   });
   document.body.dataset.mode = state.mode;
+  scheduleNavIndicator();
   renderVerifyModeControls();
+}
+
+function ensureNavIndicator() {
+  const nav = document.querySelector(".main-nav");
+  if (!nav) return null;
+  let indicator = nav.querySelector(".nav-indicator");
+  if (!indicator) {
+    indicator = document.createElement("span");
+    indicator.className = "nav-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    nav.appendChild(indicator);
+  }
+  return indicator;
+}
+
+function updateNavIndicator() {
+  const nav = document.querySelector(".main-nav");
+  const indicator = ensureNavIndicator();
+  if (!nav || !indicator || document.body.classList.contains("admin-view")) {
+    indicator?.classList.remove("ready");
+    return;
+  }
+  const active = nav.querySelector(".nav-item.active");
+  if (!active || active.offsetParent === null) {
+    indicator.classList.remove("ready");
+    return;
+  }
+  const navRect = nav.getBoundingClientRect();
+  const activeRect = active.getBoundingClientRect();
+  indicator.style.setProperty("--nav-indicator-x", `${activeRect.left - navRect.left + 10}px`);
+  indicator.style.setProperty("--nav-indicator-y", `${activeRect.top - navRect.top + activeRect.height - 7}px`);
+  indicator.style.setProperty("--nav-indicator-w", `${Math.max(24, activeRect.width - 20)}px`);
+  indicator.classList.add("ready");
+}
+
+function scheduleNavIndicator() {
+  cancelAnimationFrame(scheduleNavIndicator.raf);
+  scheduleNavIndicator.raf = requestAnimationFrame(updateNavIndicator);
 }
 
 function currentVerifyMode() {
   const stored = state.storage.settings?.verifyMode;
-  return ["paper", "single", "instant", "review"].includes(stored) ? stored : "paper";
+  if (stored === "single") return "instant";
+  return ["paper", "instant", "review"].includes(stored) ? stored : "paper";
 }
 
 function isQuestionVerified(questionId) {
@@ -2058,7 +2120,6 @@ function renderVerifyModeControls() {
   const isExam = state.mode === "exam";
   const modeLabels = {
     paper: "统一验证",
-    single: "逐题验证",
     instant: "立即反馈",
     review: "背题模式",
   };
@@ -2070,38 +2131,22 @@ function renderVerifyModeControls() {
     modeBtn.setAttribute("aria-pressed", String(state.verifyMode !== "paper"));
     modeBtn.title = {
       paper: "考试式练习：提交答卷后统一显示对错",
-      single: "逐题验证：每题点击确认答案后立即显示解析",
       instant: "立即反馈：选择答案后立刻显示答案和解析",
       review: "背题模式：先看答案，再做信心、错因和笔记标记",
     }[state.verifyMode] || "";
-  }
-  const confirmBtn = $("confirmAnswerBtn");
-  if (confirmBtn) {
-    const q = state.questions[state.currentIndex]?.detail;
-    const visible = !isExam && state.verifyMode === "single" && !!q && !isAdmin();
-    confirmBtn.classList.toggle("hidden", !visible);
-    if (visible) {
-      const verified = isQuestionVerified(q.id);
-      confirmBtn.textContent = verified ? "已确认" : "确认答案";
-      confirmBtn.disabled = verified && shouldRevealCurrentAnswer(q);
-    } else {
-      confirmBtn.disabled = false;
-    }
   }
   const submitBtn = $("submitBtn");
   if (submitBtn) {
     submitBtn.textContent = state.mode === "exam" ? "提交答卷" : "提交答卷";
     submitBtn.title = state.mode === "exam"
       ? "交卷并计算模拟考试成绩"
-      : state.verifyMode === "single"
-        ? "统一验证本次练习中的所有题目"
-        : "统一验证本次练习中的所有题目";
+      : "统一验证本次练习中的所有题目";
   }
 }
 
 function toggleVerifyMode() {
   state.storage.settings ||= {};
-  const modes = ["paper", "single", "instant", "review"];
+  const modes = ["paper", "instant", "review"];
   const current = currentVerifyMode();
   const next = modes[(Math.max(0, modes.indexOf(current)) + 1) % modes.length];
   state.storage.settings.verifyMode = next;
@@ -2109,7 +2154,7 @@ function toggleVerifyMode() {
   scheduleSave();
   if (state.questions[state.currentIndex]?.detail) renderQuestion();
   else renderVerifyModeControls();
-  toast(`已切换为${{ paper: "统一验证", single: "逐题验证", instant: "立即反馈", review: "背题模式" }[next]}`);
+  toast(`已切换为${{ paper: "统一验证", instant: "立即反馈", review: "背题模式" }[next]}`);
 }
 
 function changeZoom(delta) {
@@ -2199,7 +2244,6 @@ function renderProgress() {
         <div class="trend-title">近期正确率趋势</div>
         <canvas id="progressTrend" width="680" height="180"></canvas>
       </div>
-      ${renderStudyDashboard(courseStore, stats, analysisItems)}
       ${renderLearningSignalPanel(courseStore)}
       ${renderDeepAnalysis(courseStore, analysisItems)}
       ${renderReviewPlanPanel(stats, wrongTotal, analysisItems)}
@@ -2208,7 +2252,6 @@ function renderProgress() {
   renderProgressTrend();
   bindDeepAnalysisActions();
   bindReviewPlanActions(stats, wrongTotal, analysisItems.length);
-  bindStudyDashboardActions(courseStore);
   bindLearningSignalActions();
 }
 
@@ -2250,7 +2293,7 @@ function renderTraining() {
       </div>
       <div class="training-tools">
         <button type="button" id="trainingContinueSmartBtn" ${canContinueSmart ? "" : "disabled"}>继续上次：${canContinueSmart ? escapeHtml(smart.sourceTitle || "智能训练") : "暂无题单"}</button>
-        <button type="button" id="trainingWrongBtn">进入错题强化</button>
+        <button type="button" id="trainingWrongBtn">查看错题本</button>
         <button type="button" id="trainingPracticeBtn">返回考试题库</button>
       </div>
       ${renderStudyDashboard(courseStore, stats, items)}
@@ -2795,7 +2838,7 @@ function renderAnalysisChapterTree(rows) {
     return `
       <div class="analysis-tree-node level-${depth}">
         <div class="analysis-tree-row">
-          <button type="button" class="analysis-toggle" data-analysis-toggle="${node.id}" ${children.length ? "" : "disabled"}>${children.length ? (expanded ? "−" : "+") : ""}</button>
+          <button type="button" class="analysis-toggle ${expanded ? "expanded" : "collapsed"}" data-analysis-toggle="${node.id}" ${children.length ? "" : "disabled"}>${children.length ? (expanded ? "−" : "+") : ""}</button>
           <button type="button" class="analysis-row ${level} ${depth === 1 ? "heading" : ""}" ${depth === 1 ? "disabled" : `data-analysis-chapter="${row.id}"`}>
             <span>${escapeHtml(row.name)}</span>
             <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
@@ -4012,10 +4055,22 @@ function escapeRegExp(value) {
 }
 
 function toast(message) {
+  const el = $("toast");
+  if (!el) return;
   setText("toast", message);
-  $("toast").classList.remove("hidden");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => $("toast").classList.add("hidden"), 1800);
+  clearTimeout(toast.hideTimer);
+  const wasHidden = el.classList.contains("hidden");
+  el.classList.remove("hidden");
+  if (wasHidden) {
+    el.classList.remove("show");
+    void el.offsetWidth;
+  }
+  el.classList.add("show");
+  toast.timer = setTimeout(() => {
+    el.classList.remove("show");
+    toast.hideTimer = setTimeout(() => el.classList.add("hidden"), 260);
+  }, 1800);
 }
 
 async function updateQuestionBank(courseId = 0, btn = null) {
@@ -4174,11 +4229,6 @@ function handleGlobalShortcuts(event) {
     submitPaper().catch((err) => toast(err.message));
     return;
   }
-  if (!event.ctrlKey && event.key === "Enter" && state.verifyMode === "single" && state.currentIndex >= 0) {
-    event.preventDefault();
-    confirmCurrentAnswer();
-    return;
-  }
   if (!event.ctrlKey && !event.shiftKey && event.code === "Space" && state.currentIndex >= 0) {
     event.preventDefault();
     toggleFavorite();
@@ -4295,6 +4345,9 @@ $("pickerDoneBtn").onclick = () => {
   }
   setCoursePicker(false);
 };
+$("questionView").addEventListener("click", () => {
+  if (!isAdmin() && state.mode === "practice" && state.pickerOpen) setCoursePicker(false);
+}, true);
 $("prevBtn").onclick = () => moveQuestion(-1);
 $("nextBtn").onclick = () => moveQuestion(1);
 $("answerToggleBtn").onclick = toggleAnswer;
@@ -4303,7 +4356,6 @@ $("submitBtn").onclick = () => submitPaper().catch((err) => toast(err.message));
 $("resetBtn").onclick = resetPractice;
 $("favoriteBtn").onclick = toggleFavorite;
 $("mobileActionsBtn").onclick = () => setMobileActions(!state.mobileActionsOpen);
-$("confirmAnswerBtn").onclick = confirmCurrentAnswer;
 $("noteBtn").onclick = () => $("noteEditor").classList.toggle("hidden");
 $("noteEditor").addEventListener("input", debounce(saveNote, 300));
 $("wrongBtn").onclick = () => handleWrongAction().catch((err) => toast(err.message));
@@ -4331,6 +4383,7 @@ $("zoomOutBtn").onclick = () => changeZoom(-0.1);
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
 document.addEventListener("fullscreenchange", updateFullscreenState);
 document.addEventListener("keydown", handleGlobalShortcuts);
+window.addEventListener("resize", debounce(scheduleNavIndicator, 120));
 document.addEventListener("visibilitychange", () => {
   if (state.mode !== "exam" || !state.exam) return;
   if (document.hidden) stopExamTimer();
