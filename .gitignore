@@ -4,6 +4,9 @@ data/**
 !data/.gitkeep
 userdata/**
 !userdata/.gitkeep
+src/data/**
+src/userdata/**
+src/YunxiTiku.Web/public/**
 *.db
 *.sqlite
 *.sqlite3

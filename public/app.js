@@ -1094,6 +1094,16 @@ function ensureTagFilterControl() {
 
 async function loadQuestions() {
   if (!state.currentCourse) return;
+  if (state.mode === "training") {
+    setPanelPage(true);
+    state.questions = [];
+    state.currentIndex = -1;
+    state.answerVisible = false;
+    state.answerCardPage = 0;
+    await loadAnalysisQuestions();
+    renderAll();
+    return;
+  }
   if (state.mode === "progress") {
     setPanelPage(true);
     state.questions = [];
@@ -1290,6 +1300,10 @@ function renderAll() {
   renderExamStatus();
   renderWrongFilters();
   renderPracticeContextPanel();
+  if (state.mode === "training") {
+    renderTraining();
+    return;
+  }
   if (state.mode === "progress") {
     renderProgress();
     return;
@@ -2189,28 +2203,116 @@ function renderProgress() {
       ${renderLearningSignalPanel(courseStore)}
       ${renderDeepAnalysis(courseStore, analysisItems)}
       ${renderReviewPlanPanel(stats, wrongTotal, analysisItems)}
-      <div class="practice-quick-actions">
-        <button class="primary-action" id="smartPracticeBtn">智能练习</button>
-        <button class="primary-action secondary" id="dueReviewBtn">今日错题复习</button>
-        <button class="primary-action secondary" id="similarWrongBtn">相似错题重练</button>
-        <button class="primary-action secondary" id="sprintPracticeBtn">考前冲刺</button>
-        <button id="progressStartBtn">进入强化练习</button>
-      </div>
     </div>
   `;
   renderProgressTrend();
   bindDeepAnalysisActions();
   bindReviewPlanActions(stats, wrongTotal, analysisItems.length);
   bindStudyDashboardActions(courseStore);
-  $("progressStartBtn").onclick = async () => {
-    state.mode = wrongTotal ? "wrong" : "practice";
+  bindLearningSignalActions();
+}
+
+function renderTraining() {
+  setPanelPage(true);
+  const courseStore = userCourseStore();
+  const stats = getCourseStats();
+  const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const today = getTodayActivity();
+  const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
+  const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
+  const smart = state.storage.smartPractice;
+  const canContinueSmart = smart && Number(smart.courseId || 0) === Number(state.currentCourse?.id || 0) && Array.isArray(smart.ids) && smart.ids.length;
+  const smartPreview = previewPracticePlan("smart", courseStore);
+  const similarPreview = previewPracticePlan("similar", courseStore);
+  const sprintPreview = previewPracticePlan("sprint", courseStore);
+  $("questionBody").classList.add("hidden");
+  $("emptyState").classList.remove("hidden");
+  $("emptyState").innerHTML = `
+    <div class="training-panel">
+      <div class="training-hero">
+        <div>
+          <strong>智能训练</strong>
+          <p>${escapeHtml(state.currentCourse?.name || "当前科目")} · 今日已练 ${today.total} 题 · 确认正确率 ${today.rate}%</p>
+        </div>
+        <button class="primary-action" id="trainingSmartBtn" type="button">开始今日强化</button>
+      </div>
+      <div class="training-summary-grid">
+        <div><b>${due}</b><span>到期错题</span></div>
+        <div><b>${weak[0] ? weak[0].rate : 0}%</b><span>${weak[0] ? escapeHtml(weak[0].name) : "薄弱章节"}</span></div>
+        <div><b>${Math.max(0, items.length - stats.done)}</b><span>未做题</span></div>
+        <div><b>${canContinueSmart ? smart.ids.length : 0}</b><span>可继续题单</span></div>
+      </div>
+      <div class="training-card-grid">
+        ${renderTrainingCard("smart", "今日强化", "错题、薄弱章节和未做题自动混合，适合每天打开就练。", smartPreview, "开始训练")}
+        ${renderTrainingCard("due", "今日错题复习", "按记忆周期推送今天该复习的错题，避免错题堆积。", `${due} 道到期`, "开始复习")}
+        ${renderTrainingCard("similar", "相似错题重练", "围绕反复错的章节、题型和关键词抽同类题。", similarPreview, "开始重练")}
+        ${renderTrainingCard("sprint", "考前冲刺", "近 7 天错题、反复错、薄弱章节、未做题组合。", sprintPreview, "开始冲刺")}
+      </div>
+      <div class="training-tools">
+        <button type="button" id="trainingContinueSmartBtn" ${canContinueSmart ? "" : "disabled"}>继续上次：${canContinueSmart ? escapeHtml(smart.sourceTitle || "智能训练") : "暂无题单"}</button>
+        <button type="button" id="trainingWrongBtn">进入错题强化</button>
+        <button type="button" id="trainingPracticeBtn">返回考试题库</button>
+      </div>
+      ${renderStudyDashboard(courseStore, stats, items)}
+      ${renderLearningSignalPanel(courseStore)}
+    </div>
+  `;
+  bindTrainingActions();
+  bindStudyDashboardActions(courseStore);
+  bindLearningSignalActions();
+}
+
+function renderTrainingCard(type, title, desc, meta, action) {
+  return `
+    <section class="training-card">
+      <div>
+        <span>${escapeHtml(title)}</span>
+        <p>${escapeHtml(desc)}</p>
+      </div>
+      <strong>${escapeHtml(meta || "自动生成")}</strong>
+      <button type="button" data-training-action="${type}">${escapeHtml(action)}</button>
+    </section>
+  `;
+}
+
+function previewPracticePlan(type, courseStore) {
+  if (type === "smart") {
+    const ids = buildSmartPracticeIdsPreview(courseStore);
+    return `${ids.length} 题 · 错题优先`;
+  }
+  if (type === "similar") {
+    return `${buildSimilarWrongIds(courseStore).length} 题 · 同章同型`;
+  }
+  if (type === "sprint") {
+    return `${buildSprintPracticeIds(courseStore).length} 题 · 冲刺组合`;
+  }
+  return "";
+}
+
+function buildSmartPracticeIdsPreview(courseStore) {
+  return buildSmartPracticeIds(courseStore);
+}
+
+function bindTrainingActions() {
+  $("trainingSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
+  $("trainingContinueSmartBtn").onclick = () => continueSmartPractice().catch((err) => toast(err.message));
+  $("trainingWrongBtn").onclick = async () => {
+    state.mode = "wrong";
     await loadQuestions();
   };
-  $("smartPracticeBtn").onclick = () => startSmartPractice().catch((err) => toast(err.message));
-  $("dueReviewBtn").onclick = () => startDueWrongReview().catch((err) => toast(err.message));
-  $("similarWrongBtn").onclick = () => startSimilarWrongPractice().catch((err) => toast(err.message));
-  $("sprintPracticeBtn").onclick = () => startSprintPractice().catch((err) => toast(err.message));
-  bindLearningSignalActions();
+  $("trainingPracticeBtn").onclick = async () => {
+    state.mode = "practice";
+    await loadQuestions();
+  };
+  document.querySelectorAll("[data-training-action]").forEach((btn) => {
+    btn.onclick = () => {
+      const action = btn.dataset.trainingAction;
+      if (action === "smart") startSmartPractice({ force: true }).catch((err) => toast(err.message));
+      if (action === "due") startDueWrongReview().catch((err) => toast(err.message));
+      if (action === "similar") startSimilarWrongPractice().catch((err) => toast(err.message));
+      if (action === "sprint") startSprintPractice().catch((err) => toast(err.message));
+    };
+  });
 }
 
 function renderStudyDashboard(courseStore, stats, items) {
@@ -4130,7 +4232,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       return;
     }
     const nextMode = btn.dataset.mode;
-    setPanelPage(nextMode === "exam" || nextMode === "progress");
+    setPanelPage(nextMode === "exam" || nextMode === "progress" || nextMode === "training");
     if (nextMode === "practice" && state.mode === "practice") {
       setCoursePicker(!state.pickerOpen);
       renderMode();
@@ -4155,10 +4257,12 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       renderExamHome();
       return;
     }
-    if (state.mode === "progress") {
+    if (state.mode === "progress" || state.mode === "training") {
       $("questionBody").classList.add("hidden");
       $("emptyState").classList.remove("hidden");
-      $("emptyState").innerHTML = `<strong>正在生成进度分析</strong><span>正在读取当前科目的章节、题型和做题记录。</span>`;
+      $("emptyState").innerHTML = state.mode === "training"
+        ? `<strong>正在生成智能训练</strong><span>正在读取错题、薄弱章节和今日练习建议。</span>`
+        : `<strong>正在生成进度分析</strong><span>正在读取当前科目的章节、题型和做题记录。</span>`;
     }
     await loadQuestions();
   };
