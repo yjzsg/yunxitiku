@@ -43,6 +43,9 @@
   examConfig: null,
   correctionQuestion: null,
   expandedChapters: new Set(),
+  examExpandedChapters: new Set(),
+  examSelectedChapters: null,
+  analysisExpandedChapters: new Set(),
   chapterAutoExpanded: false,
 };
 
@@ -384,6 +387,72 @@ function getExamConfigFromForm(rule) {
 
 function selectableExamChapters() {
   return examChapterGroups();
+}
+
+function renderExamChapterTree() {
+  const roots = (state.chapterTreeRoots?.length ? state.chapterTreeRoots : buildChapterTree(state.chapters))
+    .filter((node) => chapterTotalCount(node) > 0);
+  if (!state.examExpandedChapters.size && roots[0]) state.examExpandedChapters.add(Number(roots[0].id));
+  if (!state.examSelectedChapters) {
+    state.examSelectedChapters = new Set();
+    const mark = (node) => {
+      if (chapterTotalCount(node) > 0) state.examSelectedChapters.add(Number(node.id));
+      (node.children || []).forEach(mark);
+    };
+    roots.forEach(mark);
+  }
+  if (!roots.length) return `<span class="muted">当前科目暂无可选择章节，将按全部题库组卷。</span>`;
+  return roots.map((node) => renderExamChapterNode(node, 1)).join("");
+}
+
+function renderExamChapterNode(chapter, level) {
+  const total = chapterTotalCount(chapter);
+  if (total <= 0 || level > 2) return "";
+  const hasChildren = (chapter.children || []).some((child) => chapterTotalCount(child) > 0);
+  const expanded = state.examExpandedChapters.has(Number(chapter.id));
+  return `
+    <div class="exam-chapter-node level-${level}">
+      <div class="exam-chapter-row">
+        <button class="exam-chapter-toggle" type="button" data-exam-toggle="${chapter.id}" ${hasChildren ? "" : "disabled"}>${hasChildren ? (expanded ? "−" : "+") : ""}</button>
+        <label title="${escapeHtml(chapter.name)}">
+          <input type="checkbox" data-exam-chapter value="${chapter.id}" data-exam-parent="${hasChildren ? "1" : "0"}" ${state.examSelectedChapters.has(Number(chapter.id)) ? "checked" : ""}>
+          <span>${escapeHtml(chapter.name)}</span>
+          <small>${total}题</small>
+        </label>
+      </div>
+      ${hasChildren && expanded ? `<div class="exam-chapter-children">${chapter.children.map((child) => renderExamChapterNode(child, level + 1)).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function bindExamChapterTree() {
+  document.querySelectorAll("[data-exam-toggle]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = Number(btn.dataset.examToggle || 0);
+      if (!id) return;
+      if (state.examExpandedChapters.has(id)) state.examExpandedChapters.delete(id);
+      else state.examExpandedChapters.add(id);
+      const host = document.querySelector(".exam-chapter-list");
+      if (host) host.innerHTML = renderExamChapterTree();
+      bindExamChapterTree();
+    };
+  });
+  document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
+    input.onchange = () => {
+      const id = Number(input.value || 0);
+      const node = state.chapterTreeIndex?.get(id);
+      state.examSelectedChapters ||= new Set();
+      if (input.checked) state.examSelectedChapters.add(id);
+      else state.examSelectedChapters.delete(id);
+      if (!node) return;
+      childChapterIds(node).forEach((childId) => {
+        if (input.checked) state.examSelectedChapters.add(childId);
+        else state.examSelectedChapters.delete(childId);
+        const child = document.querySelector(`[data-exam-chapter][value="${childId}"]`);
+        if (child) child.checked = input.checked;
+      });
+    };
+  });
 }
 
 function wrongRecordMatchesFilter(id, item, courseStore) {
@@ -809,6 +878,9 @@ async function selectCourse(course, options = {}) {
   if (state.currentCourse?.id !== course.id) {
     state.analysisQuestions = [];
     state.analysisCourseId = 0;
+    state.examExpandedChapters = new Set();
+    state.examSelectedChapters = null;
+    state.analysisExpandedChapters = new Set();
   }
   const restoreChapterId = options.restoreChapter ? Number(state.storage.profile.lastChapterId || 0) : 0;
   state.currentCourse = course;
@@ -911,6 +983,18 @@ function findChapterPath(nodes, id, path = []) {
 
 function chapterTotalCount(chapter) {
   return Number(chapter.questionCount || 0) + chapter.children.reduce((sum, child) => sum + chapterTotalCount(child), 0);
+}
+
+function childChapterIds(chapter) {
+  const ids = [];
+  const visit = (node) => {
+    (node.children || []).forEach((child) => {
+      ids.push(Number(child.id));
+      visit(child);
+    });
+  };
+  visit(chapter);
+  return ids.filter(Boolean);
 }
 
 function renderChapterNodes(nodes, container) {
@@ -1863,12 +1947,12 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
 
 function renderAnalysisRows(rows, clickable) {
   if (!rows.length) return `<div class="muted">暂无统计数据</div>`;
+  if (clickable) return renderAnalysisChapterTree(rows);
   return rows.map((row) => {
     const rate = row.done ? Math.round(row.correct / row.done * 100) : 0;
     const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
-    const isHeading = clickable && Number(row.depth || 0) === 1;
     return `
-      <button type="button" class="analysis-row ${level} ${isHeading ? "heading" : ""}" ${clickable && !isHeading ? `data-analysis-chapter="${row.id}"` : "disabled"}>
+      <button type="button" class="analysis-row ${level}" disabled>
         <span>${escapeHtml(row.name)}</span>
         <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
         <b>${rate}%</b>
@@ -1877,7 +1961,46 @@ function renderAnalysisRows(rows, clickable) {
   }).join("");
 }
 
+function renderAnalysisChapterTree(rows) {
+  const map = new Map(rows.map((row) => [Number(row.id), row]));
+  const roots = (state.chapterTreeRoots?.length ? state.chapterTreeRoots : buildChapterTree(state.chapters))
+    .filter((node) => map.has(Number(node.id)));
+  if (!state.analysisExpandedChapters.size && roots[0]) state.analysisExpandedChapters.add(Number(roots[0].id));
+  const renderNode = (node, depth) => {
+    if (depth > 2) return "";
+    const row = map.get(Number(node.id));
+    if (!row) return "";
+    const children = (node.children || []).filter((child) => map.has(Number(child.id)));
+    const expanded = state.analysisExpandedChapters.has(Number(node.id));
+    const rate = row.done ? Math.round(row.correct / row.done * 100) : 0;
+    const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
+    return `
+      <div class="analysis-tree-node level-${depth}">
+        <div class="analysis-tree-row">
+          <button type="button" class="analysis-toggle" data-analysis-toggle="${node.id}" ${children.length ? "" : "disabled"}>${children.length ? (expanded ? "−" : "+") : ""}</button>
+          <button type="button" class="analysis-row ${level} ${depth === 1 ? "heading" : ""}" ${depth === 1 ? "disabled" : `data-analysis-chapter="${row.id}"`}>
+            <span>${escapeHtml(row.name)}</span>
+            <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
+            <b>${rate}%</b>
+          </button>
+        </div>
+        ${children.length && expanded ? `<div class="analysis-tree-children">${children.map((child) => renderNode(child, depth + 1)).join("")}</div>` : ""}
+      </div>
+    `;
+  };
+  return roots.map((node) => renderNode(node, 1)).join("") || `<div class="muted">暂无统计数据</div>`;
+}
+
 function bindDeepAnalysisActions() {
+  document.querySelectorAll("[data-analysis-toggle]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = Number(btn.dataset.analysisToggle || 0);
+      if (!id) return;
+      if (state.analysisExpandedChapters.has(id)) state.analysisExpandedChapters.delete(id);
+      else state.analysisExpandedChapters.add(id);
+      renderProgress();
+    };
+  });
   document.querySelectorAll("[data-analysis-chapter]").forEach((btn) => {
     btn.onclick = async () => {
       const chapterId = Number(btn.dataset.analysisChapter || 0);
@@ -2761,7 +2884,7 @@ function renderExamHome() {
   setText("answerToggleBtn", "显示答案");
   const rule = getExamRule();
   const parts = normalizeExamParts(rule);
-  const chapters = selectableExamChapters();
+  state.examSelectedChapters = null;
   $("questionBody").classList.add("hidden");
   $("emptyState").classList.remove("hidden");
   $("emptyState").innerHTML = `
@@ -2799,13 +2922,7 @@ function renderExamHome() {
           <button type="button" id="examSelectNoChapters">清空</button>
         </div>
         <div class="exam-chapter-list">
-          ${chapters.map((chapter) => `
-            <label class="exam-chapter-level-${Number(chapter.examLevel || chapterDepth(chapter) || 1)}" title="${escapeHtml(chapter.name)}">
-              <input type="checkbox" data-exam-chapter value="${chapter.id}" checked>
-              <span>${escapeHtml(chapter.name)}</span>
-              <small>${Number(chapter.questionCount || 0)}题</small>
-            </label>
-          `).join("") || `<span class="muted">当前科目暂无可选择章节，将按全部题库组卷。</span>`}
+          ${renderExamChapterTree()}
         </div>
       </div>
       <p>${escapeHtml(rule.autoScoreNote)}。组卷会按章节题量比例抽取，并尽量贴近正式考试结构。</p>
@@ -2813,8 +2930,18 @@ function renderExamHome() {
       <button class="primary-action" id="startExamBtn" ${parts.length ? "" : "disabled"}>开始组卷</button>
     </div>
   `;
-  $("examSelectAllChapters").onclick = () => document.querySelectorAll("[data-exam-chapter]").forEach((input) => input.checked = true);
-  $("examSelectNoChapters").onclick = () => document.querySelectorAll("[data-exam-chapter]").forEach((input) => input.checked = false);
+  $("examSelectAllChapters").onclick = () => {
+    state.examSelectedChapters ||= new Set();
+    document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
+      input.checked = true;
+      state.examSelectedChapters.add(Number(input.value || 0));
+    });
+  };
+  $("examSelectNoChapters").onclick = () => {
+    state.examSelectedChapters.clear();
+    document.querySelectorAll("[data-exam-chapter]").forEach((input) => input.checked = false);
+  };
+  bindExamChapterTree();
   $("startExamBtn").onclick = () => {
     if (!parts.length) {
       toast("当前题库没有可用于组卷的题型");

@@ -1518,11 +1518,49 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 }
 
 .exam-chapter-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  display: block;
   gap: 8px;
   max-height: 240px;
   overflow: auto;
+}
+
+.exam-chapter-node,
+.analysis-tree-node {
+  display: grid;
+  gap: 6px;
+}
+
+.exam-chapter-row,
+.analysis-tree-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.exam-chapter-children,
+.analysis-tree-children {
+  display: grid;
+  gap: 0;
+  margin-left: 38px;
+}
+
+.exam-chapter-toggle,
+.analysis-toggle {
+  min-width: 28px;
+  width: 28px;
+  min-height: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 9px;
+  color: var(--primary-600);
+  background: var(--primary-50);
+}
+
+.exam-chapter-toggle:disabled,
+.analysis-toggle:disabled {
+  visibility: hidden;
 }
 
 .exam-chapter-list label {
@@ -1536,6 +1574,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   border-radius: 12px;
   background: #f8fafc;
   transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.exam-chapter-node.level-1 > .exam-chapter-row > label {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  font-weight: 800;
 }
 
 .exam-chapter-list label:hover {
@@ -5866,6 +5910,18 @@ body.panel-page .answer-card-wrap {
   display: none !important;
 }
 
+body.panel-page #questionBody {
+  display: none !important;
+}
+
+body.panel-page #emptyState {
+  min-height: 100%;
+}
+
+body.panel-page .question-view {
+  overflow: auto;
+}
+
 .analysis-row.heading {
   border-color: #c7d2fe;
   background: #eef2ff;
@@ -5884,6 +5940,18 @@ body.panel-page .answer-card-wrap {
 
 .analysis-row.heading + .analysis-row:not(.heading) {
   margin-top: -2px;
+}
+
+.analysis-tree-row {
+  grid-template-columns: 30px minmax(0, 1fr);
+}
+
+.analysis-tree-row .analysis-row {
+  margin-top: 0;
+}
+
+.analysis-tree-children {
+  margin-left: 38px;
 }
 
 .exam-chapter-list label.exam-chapter-level-1 {
