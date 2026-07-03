@@ -4533,7 +4533,9 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .search-panel,
   .course-pane,
   .answer-card-wrap,
-  .question-actions {
+  .question-actions,
+  #questionTagPanel,
+  .question-tag-panel {
     display: none !important;
   }
 
@@ -7016,6 +7018,11 @@ body:not(.admin-view).picker-open .question-pane {
 
 @media print {
   .nav-indicator {
+    display: none !important;
+  }
+
+  #questionTagPanel,
+  .question-tag-panel {
     display: none !important;
   }
 

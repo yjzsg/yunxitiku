@@ -103,7 +103,7 @@ function addLazyLoading(html) {
 }
 
 function isSubjective(q) {
-  return Number(q?.subjectType || 0) >= 3 || !(q?.options || []).length;
+  return !(q?.options || []).length;
 }
 
 function normalizeAnswer(value) {
@@ -350,7 +350,7 @@ function getQuestionScore(q) {
   if (state.exam?.scoreMap?.[q.id] != null) return Number(state.exam.scoreMap[q.id]);
   if (Number(q.subjectType) === 1) return 2;
   if (Number(q.subjectType) === 6) return 1.5;
-  if (Number(q.subjectType) >= 3) return 0;
+  if (isSubjective(q)) return 0;
   return 1;
 }
 
@@ -3892,6 +3892,10 @@ async function startExamPaper() {
     toast("当前题库缺少可用于组卷的题型");
     return;
   }
+  state.storage.settings ||= {};
+  state.storage.settings.verifyMode = "paper";
+  state.verifyMode = "paper";
+  scheduleSave();
   $("emptyState").innerHTML = `<strong>正在组卷...</strong><span>按章节比例抽取试题。</span>`;
   const scoreMap = {};
   const seen = new Set();
