@@ -1790,6 +1790,7 @@ function openPrintDialog() {
   $("printScopeHint").textContent = `${printScopeLabel()}。请选择打印当前题，或打印当前章节/筛选后的全部题目。`;
   setText("printAllTitle", state.currentChapter ? "所选章节全部" : "当前题单全部");
   setText("printAllDesc", state.currentChapter ? "打印所选章节及子章节的全部题" : "打印当前科目/筛选结果中的所有题");
+  $("printAnswerCheck").checked = state.answerVisible || state.submitted || currentVerifyMode() === "review";
   $("printModal").classList.remove("hidden");
 }
 
@@ -1811,7 +1812,7 @@ async function printQuestions(scope) {
     toast("没有可打印的题目");
     return;
   }
-  renderPrintView(details, label);
+  renderPrintView(details, label, $("printAnswerCheck")?.checked);
 }
 
 async function loadPrintQuestionDetails(items) {
@@ -1829,15 +1830,15 @@ async function loadPrintQuestionDetails(items) {
   return result.filter(Boolean);
 }
 
-function renderPrintView(questions, scopeLabel) {
-  const reveal = state.answerVisible || state.submitted || currentVerifyMode() === "review";
+function renderPrintView(questions, scopeLabel, includeAnswers = false) {
   $("printView").innerHTML = `
     <div class="print-document">
       <header class="print-document-head">
         <strong>云习题库</strong>
         <span>${escapeHtml(scopeLabel)} · ${escapeHtml(state.currentCourse?.name || "")}</span>
       </header>
-      ${questions.map((q, index) => renderPrintQuestion(q, index + 1, questions.length, reveal || isQuestionVerified(q.id))).join("")}
+      ${questions.map((q, index) => renderPrintQuestion(q, index + 1, questions.length)).join("")}
+      ${includeAnswers ? renderPrintAnswerSection(questions) : ""}
     </div>
   `;
   $("printView").classList.remove("hidden");
@@ -1849,18 +1850,12 @@ function renderPrintView(questions, scopeLabel) {
   });
 }
 
-function renderPrintQuestion(q, index, total, revealAnswer) {
+function renderPrintQuestion(q, index, total) {
   const options = isSubjective(q)
     ? `<div class="print-subjective-lines"><span></span><span></span><span></span></div>`
     : `<div class="print-options">${(q.options || []).map((option) => `
         <div class="print-option"><b>${escapeHtml(option.label)}</b><span>${escapeHtml(option.text)}</span></div>
       `).join("")}</div>`;
-  const answer = revealAnswer
-    ? `<div class="print-answer">
-        <div><b>正确答案：</b>${escapeHtml(q.answer || "")}</div>
-        ${q.description ? `<div class="print-description"><b>试题解析：</b>${addLazyLoading(q.description)}</div>` : ""}
-      </div>`
-    : "";
   return `
     <article class="print-question">
       <div class="print-question-head">
@@ -1871,8 +1866,25 @@ function renderPrintQuestion(q, index, total, revealAnswer) {
       <div class="print-stem">${addLazyLoading(q.stem)}</div>
       ${q.extraQuestion ? `<div class="print-extra">${addLazyLoading(q.extraQuestion)}</div>` : ""}
       ${options}
-      ${answer}
     </article>
+  `;
+}
+
+function renderPrintAnswerSection(questions) {
+  return `
+    <section class="print-answer-section">
+      <h2>答案与解析</h2>
+      ${questions.map((q, index) => `
+        <article class="print-answer-item">
+          <div class="print-answer-title">
+            <b>第 ${index + 1} 题</b>
+            <span>${escapeHtml(q.type || "题目")}</span>
+            <em>正确答案：${escapeHtml(q.answer || "见解析")}</em>
+          </div>
+          ${q.description ? `<div class="print-description"><b>试题解析：</b>${addLazyLoading(q.description)}</div>` : ""}
+        </article>
+      `).join("")}
+    </section>
   `;
 }
 

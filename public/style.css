@@ -2745,6 +2745,25 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 12px;
 }
 
+.print-answer-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #334155;
+  font-weight: 750;
+}
+
+.print-answer-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
 .print-choice-grid button {
   min-height: 112px;
   display: grid;
@@ -4698,6 +4717,41 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     margin-top: 10px;
     padding-top: 8px;
     border-top: 1px dashed #cbd5e1;
+  }
+
+  .print-answer-section {
+    break-before: page;
+    page-break-before: always;
+    margin-top: 20px;
+  }
+
+  .print-answer-section h2 {
+    margin: 0 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #111827;
+    font-size: 18pt;
+  }
+
+  .print-answer-item {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #d1d5db;
+  }
+
+  .print-answer-title {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+
+  .print-answer-title em {
+    color: #111827;
+    font-style: normal;
+    font-weight: 700;
   }
 
   .print-subjective-lines {
