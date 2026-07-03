@@ -1846,6 +1846,7 @@ function renderPrintView(questions, scopeLabel, includeAnswers = false) {
   state.printAfterRender = true;
   requestAnimationFrame(() => {
     if (!state.printAfterRender) return;
+    hideToast();
     window.print();
   });
 }
@@ -4199,6 +4200,15 @@ function toast(message) {
     el.classList.remove("show");
     toast.hideTimer = setTimeout(() => el.classList.add("hidden"), 260);
   }, 1800);
+}
+
+function hideToast() {
+  const el = $("toast");
+  if (!el) return;
+  clearTimeout(toast.timer);
+  clearTimeout(toast.hideTimer);
+  el.classList.remove("show");
+  el.classList.add("hidden");
 }
 
 async function updateQuestionBank(courseId = 0, btn = null) {

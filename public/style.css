@@ -4604,6 +4604,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .answer-card-wrap,
   .question-actions,
   .modal-backdrop,
+  .toast,
   #questionTagPanel,
   .question-tag-panel {
     display: none !important;
