@@ -197,6 +197,29 @@
       </div>
     </div>
   </div>
+  <div id="printModal" class="modal-backdrop hidden">
+    <div class="modal-panel print-modal">
+      <div class="modal-head">
+        <strong>打印范围</strong>
+        <button id="printCloseBtn" type="button">关闭</button>
+      </div>
+      <p id="printScopeHint">请选择要打印的题目范围。</p>
+      <div class="print-choice-grid">
+        <button id="printCurrentBtn" type="button">
+          <b>当前题</b>
+          <span>只打印正在查看的这一题</span>
+        </button>
+        <button id="printAllBtn" type="button">
+          <b id="printAllTitle">当前题单全部</b>
+          <span id="printAllDesc">打印当前章节/筛选结果中的所有题</span>
+        </button>
+      </div>
+      <div class="modal-actions">
+        <button id="printCancelBtn" type="button">取消</button>
+      </div>
+    </div>
+  </div>
+  <section id="printView" class="print-view hidden"></section>
   <div id="toast" class="toast hidden"></div>
   <script src="/app.js"></script>
 </body>

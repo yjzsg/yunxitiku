@@ -47,6 +47,7 @@
   examSelectedChapters: null,
   analysisExpandedChapters: new Set(),
   chapterAutoExpanded: false,
+  printAfterRender: false,
   lastAnimatedQuestionId: 0,
   lastMarkedQuestionId: 0,
 };
@@ -1773,6 +1774,113 @@ function renderOptions(q) {
     el.onclick = () => chooseOption(q, option.label);
     $("options").appendChild(el);
   }
+}
+
+function printScopeLabel() {
+  if (state.currentChapter) return `当前章节：${state.currentChapter.name} · ${state.questions.length} 题`;
+  if (state.currentCourse) return `当前题单：${state.currentCourse.name} · ${state.questions.length} 题`;
+  return `当前题单 · ${state.questions.length} 题`;
+}
+
+function openPrintDialog() {
+  if (!state.questions.length || state.currentIndex < 0) {
+    toast("当前没有可打印的题目");
+    return;
+  }
+  $("printScopeHint").textContent = `${printScopeLabel()}。请选择打印当前题，或打印当前章节/筛选后的全部题目。`;
+  setText("printAllTitle", state.currentChapter ? "所选章节全部" : "当前题单全部");
+  setText("printAllDesc", state.currentChapter ? "打印所选章节及子章节的全部题" : "打印当前科目/筛选结果中的所有题");
+  $("printModal").classList.remove("hidden");
+}
+
+function closePrintDialog() {
+  $("printModal").classList.add("hidden");
+}
+
+async function printQuestions(scope) {
+  if (!state.questions.length || state.currentIndex < 0) {
+    toast("当前没有可打印的题目");
+    return;
+  }
+  closePrintDialog();
+  const items = scope === "all" ? state.questions : [state.questions[state.currentIndex]];
+  const label = scope === "all" ? printScopeLabel() : `当前题：第 ${state.currentIndex + 1} 题`;
+  toast(scope === "all" ? `正在准备打印 ${items.length} 题` : "正在准备打印当前题");
+  const details = await loadPrintQuestionDetails(items);
+  if (!details.length) {
+    toast("没有可打印的题目");
+    return;
+  }
+  renderPrintView(details, label);
+}
+
+async function loadPrintQuestionDetails(items) {
+  const result = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(8, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      const item = items[index];
+      item.detail = item.detail || await api(`/api/question?id=${item.id}`);
+      result[index] = item.detail;
+    }
+  });
+  await Promise.all(workers);
+  return result.filter(Boolean);
+}
+
+function renderPrintView(questions, scopeLabel) {
+  const reveal = state.answerVisible || state.submitted || currentVerifyMode() === "review";
+  $("printView").innerHTML = `
+    <div class="print-document">
+      <header class="print-document-head">
+        <strong>云习题库</strong>
+        <span>${escapeHtml(scopeLabel)} · ${escapeHtml(state.currentCourse?.name || "")}</span>
+      </header>
+      ${questions.map((q, index) => renderPrintQuestion(q, index + 1, questions.length, reveal || isQuestionVerified(q.id))).join("")}
+    </div>
+  `;
+  $("printView").classList.remove("hidden");
+  document.body.classList.add("print-mode");
+  state.printAfterRender = true;
+  requestAnimationFrame(() => {
+    if (!state.printAfterRender) return;
+    window.print();
+  });
+}
+
+function renderPrintQuestion(q, index, total, revealAnswer) {
+  const options = isSubjective(q)
+    ? `<div class="print-subjective-lines"><span></span><span></span><span></span></div>`
+    : `<div class="print-options">${(q.options || []).map((option) => `
+        <div class="print-option"><b>${escapeHtml(option.label)}</b><span>${escapeHtml(option.text)}</span></div>
+      `).join("")}</div>`;
+  const answer = revealAnswer
+    ? `<div class="print-answer">
+        <div><b>正确答案：</b>${escapeHtml(q.answer || "")}</div>
+        ${q.description ? `<div class="print-description"><b>试题解析：</b>${addLazyLoading(q.description)}</div>` : ""}
+      </div>`
+    : "";
+  return `
+    <article class="print-question">
+      <div class="print-question-head">
+        <b>第 ${index} / ${total} 题</b>
+        <span>${escapeHtml(q.type || "题目")}</span>
+        <em>${escapeHtml(q.chapterName || "")}</em>
+      </div>
+      <div class="print-stem">${addLazyLoading(q.stem)}</div>
+      ${q.extraQuestion ? `<div class="print-extra">${addLazyLoading(q.extraQuestion)}</div>` : ""}
+      ${options}
+      ${answer}
+    </article>
+  `;
+}
+
+function cleanupPrintView() {
+  state.printAfterRender = false;
+  document.body.classList.remove("print-mode");
+  $("printView")?.classList.add("hidden");
+  if ($("printView")) $("printView").innerHTML = "";
 }
 
 function saveSubjectiveAnswer(q, answer) {
@@ -4385,7 +4493,15 @@ $("adminUserModal").addEventListener("click", (event) => {
 if ($("coursePickerBtn")) $("coursePickerBtn").onclick = () => setCoursePicker(!state.pickerOpen);
 $("searchToggleBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
 $("filterBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
-$("printBtn").onclick = () => window.print();
+$("printBtn").onclick = openPrintDialog;
+$("printCloseBtn").onclick = closePrintDialog;
+$("printCancelBtn").onclick = closePrintDialog;
+$("printCurrentBtn").onclick = () => printQuestions("current").catch((err) => toast(err.message));
+$("printAllBtn").onclick = () => printQuestions("all").catch((err) => toast(err.message));
+$("printModal").addEventListener("click", (event) => {
+  if (event.target === $("printModal")) closePrintDialog();
+});
+window.addEventListener("afterprint", cleanupPrintView);
 $("zoomInBtn").onclick = () => changeZoom(0.1);
 $("zoomOutBtn").onclick = () => changeZoom(-0.1);
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
