@@ -2279,6 +2279,7 @@ function renderTraining() {
         </div>
         <button class="primary-action" id="trainingSmartBtn" type="button">开始今日强化</button>
       </div>
+      ${renderStudyDashboard(courseStore, stats, items)}
       <div class="training-summary-grid">
         <div><b>${due}</b><span>到期错题</span></div>
         <div><b>${weak[0] ? weak[0].rate : 0}%</b><span>${weak[0] ? escapeHtml(weak[0].name) : "薄弱章节"}</span></div>
@@ -2296,13 +2297,14 @@ function renderTraining() {
         <button type="button" id="trainingWrongBtn">查看错题本</button>
         <button type="button" id="trainingPracticeBtn">返回考试题库</button>
       </div>
-      ${renderStudyDashboard(courseStore, stats, items)}
       ${renderLearningSignalPanel(courseStore)}
+      ${renderReviewPlanPanel(stats, Object.keys(courseStore.wrong || {}).length, items)}
     </div>
   `;
   bindTrainingActions();
   bindStudyDashboardActions(courseStore);
   bindLearningSignalActions();
+  bindReviewPlanActions(stats, Object.keys(courseStore.wrong || {}).length, items.length);
 }
 
 function renderTrainingCard(type, title, desc, meta, action) {
@@ -2412,7 +2414,8 @@ function bindStudyDashboardActions(courseStore) {
     state.storage.dailyReports.unshift({ key, at: nowText(), ...report });
     state.storage.dailyReports = state.storage.dailyReports.slice(0, 60);
     scheduleSave();
-    renderProgress();
+    if (state.mode === "training") renderTraining();
+    else renderProgress();
     toast("学习日报已更新");
   };
   const smartBtn = $("continueSmartBtn");
@@ -2948,7 +2951,8 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
         },
       };
       scheduleSave();
-      renderProgress();
+      if (state.mode === "training") renderTraining();
+      else renderProgress();
       toast("复习计划已生成");
     };
   }
