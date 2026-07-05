@@ -792,6 +792,7 @@ function normalizeStorage(data) {
     corrections: Array.isArray(data.corrections) ? data.corrections : [],
     history: Array.isArray(data.history) ? data.history : [],
     examHistory: Array.isArray(data.examHistory) ? data.examHistory : [],
+    examDraft: data.examDraft && typeof data.examDraft === "object" ? data.examDraft : null,
     dailyReports: Array.isArray(data.dailyReports) ? data.dailyReports : [],
     dailyActivity: data.dailyActivity && typeof data.dailyActivity === "object" ? data.dailyActivity : {},
     confidence: data.confidence && typeof data.confidence === "object" ? data.confidence : {},
@@ -1312,7 +1313,8 @@ async function loadCurrentQuestion() {
   const item = state.questions[state.currentIndex];
   if (!item) return;
   item.detail = item.detail || await api(`/api/question?id=${item.id}`);
-  userCourseStore().lastSubjectId = item.id;
+  if (state.mode === "exam") saveExamDraft();
+  else userCourseStore().lastSubjectId = item.id;
   scheduleSave();
   state.answerVisible = state.submitted || isQuestionVerified(item.id);
   renderQuestion();
@@ -1920,6 +1922,7 @@ function saveSubjectiveAnswer(q, answer) {
   state.answers[q.id] = answer;
   if (state.mode === "exam") {
     if (wasFilled !== isFilled) state.lastMarkedQuestionId = q.id;
+    saveExamDraft();
     renderVerifyModeControls();
     renderAnswerCardPage({ updateNav: false });
     updateStats();
@@ -1953,6 +1956,7 @@ function chooseOption(q, label) {
   state.answers[q.id] = answer;
   if (state.mode === "exam") {
     if (answer !== previous) state.lastMarkedQuestionId = q.id;
+    saveExamDraft();
     renderQuestion();
     return;
   }
@@ -3841,17 +3845,39 @@ async function submitPaper(autoSubmit = false) {
   let score = 0;
   let totalScore = 0;
   let subjective = 0;
+  const examDetails = [];
   for (const item of state.questions) {
     item.detail = item.detail || await api(`/api/question?id=${item.id}`);
     const itemScore = getQuestionScore(item.detail);
+    const itemSubjective = isSubjective(item.detail);
+    const answered = hasAnswer(item.id);
+    const itemCorrect = answered && !itemSubjective && isAnswerCorrect(item.detail);
+    const earnedScore = answered ? calculateQuestionScore(item.detail) : 0;
     totalScore += itemScore;
-    if (isSubjective(item.detail)) subjective++;
-    if (!hasAnswer(item.id)) continue;
+    if (itemSubjective) subjective++;
+    if (state.mode === "exam") {
+      examDetails.push({
+        id: item.detail.id,
+        no: examDetails.length + 1,
+        chapterId: item.detail.chapterId,
+        chapterName: item.detail.chapterName || "",
+        type: item.detail.type || "题目",
+        title: stripText(item.detail.stem || item.detail.title || "").slice(0, 120),
+        answer: normalizeAnswer(state.answers[item.detail.id]),
+        correctAnswer: normalizeAnswer(item.detail.answer),
+        answered,
+        correct: itemCorrect,
+        subjective: itemSubjective,
+        score: earnedScore,
+        maxScore: itemScore,
+      });
+    }
+    if (!answered) continue;
     checked++;
-    if (isAnswerCorrect(item.detail)) correct++;
-    score += calculateQuestionScore(item.detail);
+    if (itemCorrect) correct++;
+    score += earnedScore;
     if (state.mode !== "exam") markQuestionVerified(item.detail);
-    if (!isSubjective(item.detail)) markResult(item.detail);
+    if (!itemSubjective) markResult(item.detail);
     if (state.mode !== "exam") recordPracticeActivity(item.detail, { verified: true });
   }
   const rate = checked ? Math.round((correct / checked) * 100) : 0;
@@ -3859,7 +3885,8 @@ async function submitPaper(autoSubmit = false) {
   if (state.mode === "exam" && state.exam) {
     state.exam.submittedAt = Date.now();
     state.exam.result = { score, totalScore, correct, checked, rate, subjective };
-    recordExamHistory({ score, totalScore, correct, checked, rate, subjective, autoSubmit, submittedAt });
+    recordExamHistory({ score, totalScore, correct, checked, rate, subjective, autoSubmit, submittedAt }, examDetails);
+    clearExamDraft();
     stopExamTimer();
   }
   state.storage.history.unshift({
@@ -3889,13 +3916,23 @@ async function submitPaper(autoSubmit = false) {
 function resetPractice() {
   stopExamTimer();
   const resettingExam = state.mode === "exam";
-  if (resettingExam) state.exam = null;
+  if (resettingExam) {
+    clearExamDraft();
+    state.exam = null;
+  }
   state.answers = {};
   state.submitted = false;
   state.answerVisible = false;
   if (state.currentCourse && !resettingExam) userCourseStore().answers = {};
   if (!resettingExam) clearVerifiedForCourse();
   scheduleSave();
+  if (resettingExam) {
+    state.questions = [];
+    state.currentIndex = -1;
+    renderExamHome();
+    toast("已放弃本次模拟考");
+    return;
+  }
   if (!state.questions.length) {
     if (state.mode === "exam") renderExamHome();
     else renderAll();
@@ -3937,7 +3974,147 @@ function toggleAnswer() {
   renderQuestion();
 }
 
-function recordExamHistory(result) {
+function examDraftForCurrentCourse() {
+  const draft = state.storage.examDraft;
+  if (!state.currentCourse) return null;
+  if (!draft || typeof draft !== "object") return null;
+  if (!Array.isArray(draft.questionIds) || !draft.questionIds.length) return null;
+  if (Number(draft.courseId || 0) !== Number(state.currentCourse.id || 0)) return null;
+  return draft;
+}
+
+function examDraftAnswerCount(draft = examDraftForCurrentCourse()) {
+  if (!draft?.answers) return 0;
+  return Object.values(draft.answers).filter((answer) => normalizeAnswer(answer).length > 0).length;
+}
+
+function saveExamDraft() {
+  if (state.mode !== "exam" || !state.exam || state.submitted || !state.currentCourse || !state.questions.length) return;
+  state.storage.examDraft = {
+    id: state.exam.draftId || `${state.exam.startedAt}-${state.currentCourse.id}`,
+    courseId: state.currentCourse.id,
+    courseName: state.currentCourse.name || "",
+    rule: state.exam.rule,
+    scoreMap: state.exam.scoreMap || {},
+    questionIds: state.questions.map((item) => Number(item.id)).filter(Boolean),
+    answers: { ...state.answers },
+    currentIndex: Math.max(0, state.currentIndex),
+    answerCardPage: Math.max(0, state.answerCardPage),
+    startedAt: Number(state.exam.startedAt || Date.now()),
+    endsAt: Number(state.exam.endsAt || Date.now()),
+    savedAt: Date.now(),
+    savedAtText: nowText(),
+  };
+  state.exam.draftId = state.storage.examDraft.id;
+  scheduleSave();
+}
+
+function clearExamDraft() {
+  if (!state.storage.examDraft) return;
+  state.storage.examDraft = null;
+  scheduleSave();
+}
+
+function renderExamDraftCard(draft = examDraftForCurrentCourse()) {
+  if (!draft) return "";
+  const leftMs = Number(draft.endsAt || 0) - Date.now();
+  const expired = leftMs <= 0;
+  const answered = examDraftAnswerCount(draft);
+  const total = draft.questionIds?.length || 0;
+  return `
+    <div class="exam-draft-card">
+      <div>
+        <strong>未完成考试</strong>
+        <span>${escapeHtml(draft.rule?.name || "模拟卷")} · 已答 ${answered}/${total} 题 · ${expired ? "已到交卷时间" : `剩余 ${formatSeconds(leftMs / 1000)}`}</span>
+        <small>${escapeHtml(draft.courseName || state.currentCourse?.name || "")} · 保存于 ${escapeHtml(draft.savedAtText || "")}</small>
+      </div>
+      <div class="exam-draft-actions">
+        <button id="resumeExamDraftBtn" class="primary-action" type="button">继续考试</button>
+        <button id="abandonExamDraftBtn" type="button">放弃草稿</button>
+      </div>
+    </div>
+  `;
+}
+
+function bindExamDraftActions() {
+  const resumeBtn = $("resumeExamDraftBtn");
+  if (resumeBtn) resumeBtn.onclick = () => resumeExamDraft().catch((err) => toast(err.message));
+  const abandonBtn = $("abandonExamDraftBtn");
+  if (abandonBtn) abandonBtn.onclick = () => abandonExamDraft();
+}
+
+async function resumeExamDraft() {
+  const draft = examDraftForCurrentCourse();
+  if (!draft) {
+    toast("没有可继续的模拟考试");
+    renderExamHome();
+    return;
+  }
+  const ids = draft.questionIds.map(Number).filter(Boolean);
+  if (!ids.length) {
+    clearExamDraft();
+    toast("考试草稿已失效");
+    renderExamHome();
+    return;
+  }
+  setPanelPage(false);
+  stopExamTimer();
+  state.mode = "exam";
+  state.questions = [];
+  state.answers = { ...(draft.answers || {}) };
+  state.submitted = false;
+  state.answerVisible = false;
+  state.answerCardPage = Number(draft.answerCardPage || 0);
+  const params = new URLSearchParams({
+    courseId: String(draft.courseId || state.currentCourse.id),
+    ids: ids.join(","),
+    limit: String(ids.length),
+  });
+  const items = await api(`/api/questions?${params}`);
+  state.questions = orderItemsByIds(items, ids);
+  if (!state.questions.length) {
+    clearExamDraft();
+    throw new Error("考试草稿中的题目已不存在");
+  }
+  state.currentIndex = Math.min(Math.max(0, Number(draft.currentIndex || 0)), state.questions.length - 1);
+  state.exam = {
+    rule: draft.rule || getExamRule(),
+    scoreMap: draft.scoreMap || {},
+    startedAt: Number(draft.startedAt || Date.now()),
+    endsAt: Number(draft.endsAt || Date.now()),
+    submittedAt: null,
+    result: null,
+    draftId: draft.id || `${Date.now()}-${draft.courseId || 0}`,
+  };
+  startExamTimer();
+  renderAll();
+  await loadCurrentQuestion();
+  if (Date.now() >= state.exam.endsAt) {
+    await submitPaper(true);
+  } else {
+    toast("已恢复未完成考试");
+  }
+}
+
+function abandonExamDraft() {
+  const draft = examDraftForCurrentCourse();
+  if (!draft) return;
+  if (!confirm("确定放弃这份未完成考试吗？草稿答案会被删除。")) return;
+  clearExamDraft();
+  if (state.mode === "exam") {
+    stopExamTimer();
+    state.exam = null;
+    state.questions = [];
+    state.answers = {};
+    state.currentIndex = -1;
+    state.submitted = false;
+    state.answerVisible = false;
+    renderExamHome();
+  }
+  toast("已放弃未完成考试");
+}
+
+function recordExamHistory(result, details = []) {
   if (!state.exam) return;
   state.storage.examHistory ||= [];
   const submittedAtMs = state.exam.submittedAt || Date.now();
@@ -3958,6 +4135,9 @@ function recordExamHistory(result) {
     usedSeconds,
     autoSubmit: !!result.autoSubmit,
     at: result.submittedAt,
+    questionIds: state.questions.map((item) => Number(item.id)).filter(Boolean),
+    answers: { ...state.answers },
+    details: details.slice(0, 200),
   });
   state.storage.examHistory = state.storage.examHistory.slice(0, 50);
 }
@@ -3988,11 +4168,35 @@ function renderExamHistory() {
               <b>${formatScore(item.score)} / ${formatScore(item.totalScore)} 分</b>
               <span>${Number(item.correct || 0)}/${Number(item.done || 0)} 题 · ${Number(item.rate || 0)}%</span>
               <small>${escapeHtml(item.at || "")} · 用时 ${minutes}:${String(seconds).padStart(2, "0")}${item.autoSubmit ? " · 自动交卷" : ""}</small>
+              ${renderExamHistoryDetails(item)}
             </div>
           `;
         }).join("")}
       </div>
     </div>
+  `;
+}
+
+function renderExamHistoryDetails(item) {
+  const details = Array.isArray(item.details) ? item.details : [];
+  if (!details.length) return `<small>此记录暂无逐题明细</small>`;
+  const wrongRows = details.filter((row) => row.answered && !row.subjective && !row.correct);
+  const subjectiveRows = details.filter((row) => row.subjective);
+  const rows = wrongRows.length ? wrongRows : details.slice(0, 12);
+  return `
+    <details class="exam-history-detail">
+      <summary>查看明细：${wrongRows.length ? `错题 ${wrongRows.length} 道` : "本卷前 12 题"}${subjectiveRows.length ? ` · 主观题 ${subjectiveRows.length} 道` : ""}</summary>
+      <div class="exam-history-detail-list">
+        ${rows.map((row) => `
+          <div class="exam-history-detail-row ${row.correct ? "correct" : row.subjective ? "subjective" : "wrong"}">
+            <b>${Number(row.no || 0) || ""}</b>
+            <span>${escapeHtml(row.type || "题目")} · ${escapeHtml(row.chapterName || "")}</span>
+            <em>答：${escapeHtml(row.answer || "未答")} / 正：${escapeHtml(row.correctAnswer || "见解析")} · ${formatScore(row.score)}/${formatScore(row.maxScore)}分</em>
+            <small>${escapeHtml(row.title || "")}</small>
+          </div>
+        `).join("")}
+      </div>
+    </details>
   `;
 }
 
@@ -4011,6 +4215,7 @@ function renderExamHome() {
     <div class="exam-home">
       <strong>${escapeHtml(rule.name)}</strong>
       <p>${escapeHtml(state.currentCourse?.name || "当前科目")} · ${rule.durationMinutes} 分钟 · 满分 ${rule.totalScore} 分</p>
+      ${renderExamDraftCard()}
       <div class="exam-config-grid">
         <label>
           <span>试卷名称</span>
@@ -4051,6 +4256,7 @@ function renderExamHome() {
       <button class="primary-action" id="startExamBtn" ${parts.length ? "" : "disabled"}>开始组卷</button>
     </div>
   `;
+  bindExamDraftActions();
   $("examSelectAllChapters").onclick = () => {
     state.examSelectedChapters ||= new Set();
     document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
@@ -4082,6 +4288,12 @@ async function startExamPaper() {
     toast("当前题库缺少可用于组卷的题型");
     return;
   }
+  const existingDraft = examDraftForCurrentCourse();
+  if (existingDraft && !confirm("当前有未完成的模拟考试，开始新组卷会覆盖旧草稿，确定继续吗？")) {
+    renderExamHome();
+    return;
+  }
+  if (existingDraft) clearExamDraft();
   state.storage.settings ||= {};
   state.storage.settings.verifyMode = "paper";
   state.verifyMode = "paper";
@@ -4138,6 +4350,7 @@ async function startExamPaper() {
     submittedAt: null,
     result: null,
   };
+  saveExamDraft();
   startExamTimer();
   renderAll();
   await loadCurrentQuestion();
@@ -4240,6 +4453,16 @@ function formatRelativeTime(value) {
 function formatScore(value) {
   const n = Number(value || 0);
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function formatSeconds(value) {
+  const total = Math.max(0, Math.floor(Number(value || 0)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function isCourseStale(value) {
@@ -4550,6 +4773,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       renderMode();
       return;
     }
+    if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
     if (state.mode === "exam" && nextMode !== "exam") stopExamTimer();
     state.mode = nextMode;
     if (state.mode === "practice") setCoursePicker(true);
@@ -4560,6 +4784,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       return;
     }
     if (state.mode === "exam") {
+      if (state.exam && !state.submitted) saveExamDraft();
       state.questions = [];
       state.currentIndex = -1;
       state.submitted = false;
@@ -4658,7 +4883,10 @@ document.addEventListener("keydown", handleGlobalShortcuts);
 window.addEventListener("resize", debounce(scheduleNavIndicator, 120));
 document.addEventListener("visibilitychange", () => {
   if (state.mode !== "exam" || !state.exam) return;
-  if (document.hidden) stopExamTimer();
+  if (document.hidden) {
+    saveExamDraft();
+    stopExamTimer();
+  }
   else {
     startExamTimer();
     syncExamTimer();
@@ -4673,6 +4901,7 @@ $("orderSelect").addEventListener("change", loadQuestions);
 $("limitSelect").addEventListener("change", loadQuestions);
 
 window.addEventListener("beforeunload", () => {
+  if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
   if (state.user && state.saveTimer) navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}`, JSON.stringify(state.storage));
 });
 
