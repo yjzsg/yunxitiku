@@ -9,6 +9,7 @@
   questions: [],
   analysisQuestions: [],
   analysisCourseId: 0,
+  analysisLoadingCourseId: 0,
   currentCourse: null,
   currentChapter: null,
   currentIndex: -1,
@@ -40,6 +41,20 @@
   adminBankUpdateMode: "",
   adminBankUpdateModePromise: null,
   adminDataStatus: null,
+  adminBankManagerCourseId: 0,
+  adminBankManagerReport: null,
+  adminBankManagerBusy: "",
+  adminEditorCourseId: 0,
+  adminEditorChapterId: 0,
+  adminEditorChapters: [],
+  adminEditorChaptersCourseId: 0,
+  adminEditorQuery: "",
+  adminEditorCorrectionOnly: false,
+  adminEditorResults: [],
+  adminEditorSelectedId: 0,
+  adminEditorDetail: null,
+  adminEditorBusy: "",
+  adminEditorAutoLoadKey: "",
   exam: null,
   examTimer: null,
   examConfig: null,
@@ -1118,7 +1133,7 @@ async function loadQuestions() {
     state.currentIndex = -1;
     state.answerVisible = false;
     state.answerCardPage = 0;
-    await loadAnalysisQuestions();
+    ensureAnalysisQuestionsInBackground();
     renderAll();
     return;
   }
@@ -1218,6 +1233,25 @@ async function loadAnalysisQuestions() {
   });
   state.analysisQuestions = await api(`/api/questions?${params}`);
   state.analysisCourseId = Number(state.currentCourse.id);
+}
+
+function ensureAnalysisQuestionsInBackground() {
+  if (!state.currentCourse) return;
+  const courseId = Number(state.currentCourse.id);
+  if (state.analysisCourseId === courseId && state.analysisQuestions.length) return;
+  if (state.analysisLoadingCourseId === courseId) return;
+  state.analysisLoadingCourseId = courseId;
+  loadAnalysisQuestions()
+    .then(() => {
+      if (state.mode === "training" && Number(state.currentCourse?.id || 0) === courseId) renderAll();
+    })
+    .catch((err) => {
+      console.warn("analysis preload failed", err);
+      if (state.mode === "training") toast("题库分析数据加载失败：" + err.message);
+    })
+    .finally(() => {
+      if (state.analysisLoadingCourseId === courseId) state.analysisLoadingCourseId = 0;
+    });
 }
 
 function getTagFilterIds() {
@@ -1365,6 +1399,17 @@ function syncTrainingSessionStats(session = activeTrainingSession()) {
   if (done >= ids.length && ids.length) {
     session.status = "completed";
     session.completedAt ||= nowText();
+    if (session.type === "plan" && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0)) {
+      state.storage.plan ||= { dailyLog: {} };
+      state.storage.plan.dailyLog ||= {};
+      const key = session.planKey || dateKey(parseDate(session.createdAt) || new Date());
+      state.storage.plan.dailyLog[key] ||= {
+        newDone: Number(session.taskCounts?.new || 0),
+        reviewDone: Number(session.taskCounts?.review || 0) + Number(session.taskCounts?.carryover || 0),
+        weakDone: Number(session.taskCounts?.weak || 0),
+        at: session.completedAt,
+      };
+    }
   } else if (session.status === "completed" && done < ids.length) {
     session.status = "active";
     session.completedAt = "";
@@ -2500,9 +2545,10 @@ function renderProgress() {
   $("emptyState").innerHTML = `
     <div class="analysis-panel">
       <div>
-        <strong>我的进度分析</strong>
-        <p>${escapeHtml(state.currentCourse?.name || "当前科目")} · 账号 ${escapeHtml(state.user)}</p>
+        <strong>学习看板</strong>
+        <p>${escapeHtml(state.currentCourse?.name || "当前科目")} · 当前进度、学习情况与自我提升记录</p>
       </div>
+      ${renderStudyDashboard(courseStore, stats, analysisItems)}
       <div class="analysis-grid">
         <div><b>${stats.done}</b><span>已做试题</span></div>
         <div><b>${rate}%</b><span>正确率</span></div>
@@ -2515,12 +2561,15 @@ function renderProgress() {
         <div class="trend-title">近期正确率趋势</div>
         <canvas id="progressTrend" width="680" height="180"></canvas>
       </div>
+      ${renderTrainingHistoryPanel(courseStore)}
       ${renderLearningSignalPanel(courseStore)}
       ${renderDeepAnalysis(courseStore, analysisItems)}
       ${renderReviewPlanPanel(stats, wrongTotal, analysisItems)}
     </div>
   `;
   renderProgressTrend();
+  bindStudyDashboardActions(courseStore);
+  bindTrainingHistoryActions();
   bindDeepAnalysisActions();
   bindReviewPlanActions(stats, wrongTotal, analysisItems.length);
   bindLearningSignalActions();
@@ -2536,9 +2585,27 @@ function renderTraining() {
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
   const smart = state.storage.smartPractice;
   const canContinueSmart = smart && Number(smart.courseId || 0) === Number(state.currentCourse?.id || 0) && Array.isArray(smart.ids) && smart.ids.length;
-  const smartPreview = previewPracticePlan("smart", courseStore);
-  const similarPreview = previewPracticePlan("similar", courseStore);
-  const sprintPreview = previewPracticePlan("sprint", courseStore);
+  const analysisReady = state.analysisCourseId === Number(state.currentCourse?.id || 0) && state.analysisQuestions.length;
+  const previewContext = { items, stats, due, weak, analysisReady };
+  const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
+  const similarPreview = previewPracticePlan("similar", courseStore, previewContext);
+  const sprintPreview = previewPracticePlan("sprint", courseStore, previewContext);
+  const hasReviewPlan = !!activeReviewPlan().examDate;
+  const planOverview = hasReviewPlan
+    ? buildReviewPlanOverview(stats, Object.keys(courseStore.wrong || {}).length, items)
+    : { hasPlan: false, task: { ids: [], counts: {} }, days: 0, debt: 0, todayCompleted: false, todaySession: null };
+  const mainAdvice = due
+    ? `优先复习 ${due} 道到期错题`
+    : weak[0]
+      ? `优先强化 ${weak[0].name}`
+      : today.total
+        ? "继续做一组今日强化"
+        : "建议从今日强化开始";
+  const adviceDetail = due
+    ? "这些题已经到复习周期，先处理能减少反复遗忘。"
+    : weak[0]
+      ? `当前薄弱章节正确率 ${weak[0].rate}%，系统会优先混入相关错题和未做题。`
+      : "系统会按错题、薄弱章节和未做题自动生成练习。";
   $("questionBody").classList.add("hidden");
   $("emptyState").classList.remove("hidden");
   $("emptyState").innerHTML = `
@@ -2550,12 +2617,26 @@ function renderTraining() {
         </div>
         <button class="primary-action" id="trainingSmartBtn" type="button">开始今日强化</button>
       </div>
-      ${renderStudyDashboard(courseStore, stats, items)}
+      <div class="training-advice">
+        <span>今日建议</span>
+        <b>${escapeHtml(mainAdvice)}</b>
+        <small>${escapeHtml(adviceDetail)}</small>
+      </div>
+      ${planOverview.hasPlan ? `
+        <div class="training-plan-card">
+          <div>
+            <span>今日计划</span>
+            <b>${planOverview.task.ids.length} 题 · 距离考试 ${planOverview.days} 天</b>
+            <small>复习 ${planOverview.task.counts.review || 0} · 强化 ${planOverview.task.counts.weak || 0} · 新题 ${planOverview.task.counts.new || 0} · 欠账 ${planOverview.debt}</small>
+          </div>
+          <button id="trainingPlanBtn" type="button" ${planOverview.task.ids.length && !planOverview.todayCompleted ? "" : "disabled"}>${planOverview.todaySession && !planOverview.todayCompleted ? "继续今日计划" : planOverview.todayCompleted ? "今日计划已完成" : "开始今日计划"}</button>
+        </div>
+      ` : ""}
       <div class="training-summary-grid">
         <div><b>${due}</b><span>到期错题</span></div>
-        <div><b>${weak[0] ? weak[0].rate : 0}%</b><span>${weak[0] ? escapeHtml(weak[0].name) : "薄弱章节"}</span></div>
+        <div><b>${today.total}</b><span>今日已练</span></div>
+        <div><b>${weak[0] ? weak[0].rate : 0}%</b><span>${weak[0] ? escapeHtml(weak[0].name) : "暂无薄弱章节"}</span></div>
         <div><b>${Math.max(0, items.length - stats.done)}</b><span>未做题</span></div>
-        <div><b>${canContinueSmart ? smart.ids.length : 0}</b><span>可继续题单</span></div>
       </div>
       <div class="training-card-grid">
         ${renderTrainingCard("smart", "今日强化", "错题、薄弱章节和未做题自动混合，适合每天打开就练。", smartPreview, "开始训练")}
@@ -2565,19 +2646,13 @@ function renderTraining() {
       </div>
       <div class="training-tools">
         <button type="button" id="trainingContinueSmartBtn" ${canContinueSmart ? "" : "disabled"}>继续上次：${canContinueSmart ? escapeHtml(smart.sourceTitle || "智能训练") : "暂无题单"}</button>
+        <button type="button" id="trainingDashboardBtn">查看学习看板</button>
         <button type="button" id="trainingWrongBtn">查看错题本</button>
         <button type="button" id="trainingPracticeBtn">返回考试题库</button>
       </div>
-      ${renderTrainingHistoryPanel(courseStore)}
-      ${renderLearningSignalPanel(courseStore)}
-      ${renderReviewPlanPanel(stats, Object.keys(courseStore.wrong || {}).length, items)}
     </div>
   `;
   bindTrainingActions();
-  bindStudyDashboardActions(courseStore);
-  bindTrainingHistoryActions();
-  bindLearningSignalActions();
-  bindReviewPlanActions(stats, Object.keys(courseStore.wrong || {}).length, items.length);
 }
 
 function renderTrainingCard(type, title, desc, meta, action) {
@@ -2593,27 +2668,41 @@ function renderTrainingCard(type, title, desc, meta, action) {
   `;
 }
 
-function previewPracticePlan(type, courseStore) {
+function previewPracticePlan(type, courseStore, context = {}) {
+  const items = context.items || (state.analysisQuestions.length ? state.analysisQuestions : state.questions);
+  const loading = !context.analysisReady && state.analysisLoadingCourseId === Number(state.currentCourse?.id || 0);
+  const doneCount = Object.keys(courseStore.done || {}).length;
+  const wrongRecords = getWrongRecordsForCurrentCourse(courseStore);
+  const dueCount = Number(context.due || 0);
+  const weakCount = Array.isArray(context.weak) ? context.weak.length : 0;
+  const undoneCount = items.length ? Math.max(0, items.length - doneCount) : 0;
+  if (loading && !items.length) return "正在计算";
   if (type === "smart") {
-    const ids = buildSmartPracticeIdsPreview(courseStore);
-    return `${ids.length} 题 · 错题优先`;
+    const estimate = Math.min(60, Math.max(0, dueCount + wrongRecords.length + weakCount * 8 + Math.min(undoneCount, 20)));
+    return estimate ? `${estimate} 题 · 错题优先` : "自动生成 · 错题优先";
   }
   if (type === "similar") {
-    return `${buildSimilarWrongIds(courseStore).length} 题 · 同章同型`;
+    const repeated = wrongRecords.filter(([, item]) => Number(item.count || 0) >= 2).length;
+    const estimate = Math.min(80, repeated ? repeated * 6 : wrongRecords.length * 4);
+    return `${estimate || 0} 题 · 同章同型`;
   }
   if (type === "sprint") {
-    return `${buildSprintPracticeIds(courseStore).length} 题 · 冲刺组合`;
+    const estimate = Math.min(100, dueCount + wrongRecords.length + weakCount * 10 + Math.min(undoneCount, 40));
+    return estimate ? `${estimate} 题 · 冲刺组合` : "自动生成 · 冲刺组合";
   }
   return "";
-}
-
-function buildSmartPracticeIdsPreview(courseStore) {
-  return buildSmartPracticeIds(courseStore);
 }
 
 function bindTrainingActions() {
   $("trainingSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
   $("trainingContinueSmartBtn").onclick = () => continueSmartPractice().catch((err) => toast(err.message));
+  if ($("trainingPlanBtn")) $("trainingPlanBtn").onclick = () => startTodayReviewPlan().catch((err) => toast(err.message));
+  $("trainingDashboardBtn").onclick = async () => {
+    state.mode = "progress";
+    setCoursePicker(false);
+    renderMode();
+    await loadQuestions();
+  };
   $("trainingWrongBtn").onclick = async () => {
     clearActiveTrainingSession();
     state.mode = "wrong";
@@ -2650,7 +2739,7 @@ function renderStudyDashboard(courseStore, stats, items) {
     <div class="study-dashboard">
       <div class="study-card">
         <span>今日建议</span>
-        <b>${due ? `复习 ${due} 道错题` : "智能练习 30 题"}</b>
+        <b>${due ? `复习 ${due} 道错题` : "智能训练一组"}</b>
         <small>${today.total ? `今日已练 ${today.total} 题，确认正确率 ${today.rate}%` : escapeHtml(reportText)}</small>
       </div>
       <div class="study-card">
@@ -2813,7 +2902,7 @@ function buildDailyReport(courseStore, stats, items) {
     ? `明天优先练「${weak.name}」+ 到期错题 ${due} 道`
     : due
       ? `明天优先复习到期错题 ${due} 道`
-      : "明天可继续智能练习 30 题";
+      : "明天可继续智能训练";
   return {
     ...base,
     todayTotal: today.total,
@@ -3091,18 +3180,26 @@ function buildSimilarWrongIds(courseStore = userCourseStore()) {
   wrongRecords.forEach(([id, record]) => {
     pushUnique(id);
     const keywords = extractKeywords(record.title || "");
-    allItems
-      .filter((item) => {
-        const sameChapter = Number(item.chapterId || 0) === Number(record.chapterId || 0) || item.chapterName === record.chapterName;
-        const sameType = !record.type || item.type === record.type;
-        const text = stripText(item.title || item.stem || item.detail?.stem || "");
-        const keywordHit = keywords.length && keywords.some((word) => text.includes(word));
-        return Number(item.id) !== Number(id) && (sameChapter || keywordHit) && sameType;
-      })
-      .slice(0, 6)
-      .forEach((item) => pushUnique(item.id));
+    let added = 0;
+    for (const item of allItems) {
+      if (added >= 6) break;
+      if (Number(item.id) === Number(id)) continue;
+      const sameChapter = Number(item.chapterId || 0) === Number(record.chapterId || 0) || item.chapterName === record.chapterName;
+      const sameType = !record.type || item.type === record.type;
+      const text = sameChapter ? "" : fastPlainQuestionText(item);
+      const keywordHit = keywords.length && keywords.some((word) => text.includes(word));
+      if ((sameChapter || keywordHit) && sameType) {
+        pushUnique(item.id);
+        added++;
+      }
+    }
   });
   return ids;
+}
+
+function fastPlainQuestionText(item) {
+  const raw = String(item.title || item.stem || item.detail?.stem || "");
+  return raw.includes("<") ? stripText(raw) : raw;
 }
 
 function extractKeywords(text) {
@@ -3301,30 +3398,219 @@ function bindDeepAnalysisActions() {
   });
 }
 
+function activeReviewPlan() {
+  const plan = state.storage.plan && typeof state.storage.plan === "object" ? state.storage.plan : {};
+  const courseId = Number(state.currentCourse?.id || 0);
+  if (courseId && plan.courseId && Number(plan.courseId) !== courseId) return {};
+  return plan;
+}
+
+function daysUntilExam(examDate) {
+  const date = parseDate(examDate);
+  if (!date) return 0;
+  date.setHours(0, 0, 0, 0);
+  return Math.max(1, Math.ceil((date.getTime() - startOfToday().getTime()) / 86400000));
+}
+
+function recentDailyAverage(courseId = state.currentCourse?.id, days = 7) {
+  const id = String(courseId || "global");
+  let total = 0;
+  for (let i = 1; i <= days; i++) {
+    const key = dateKey(addDays(startOfToday(), -i));
+    total += Number(state.storage.dailyActivity?.[key]?.courses?.[id]?.total || 0);
+  }
+  return Math.round(total / days);
+}
+
+function reviewPlanSessionForToday(plan = activeReviewPlan()) {
+  const key = todayKey();
+  const id = plan.todaySessionId || "";
+  const sessions = state.storage.trainingSessions || [];
+  const matched = sessions.find((session) => session.id === id);
+  if (matched && (matched.planKey === key || dateKey(parseDate(matched.createdAt) || new Date()) === key)) return matched;
+  return sessions.find((session) =>
+    session.type === "plan"
+    && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0)
+    && (session.planKey === key || dateKey(parseDate(session.createdAt) || new Date()) === key)
+  ) || null;
+}
+
+function buildReviewPlanPools(courseStore, items) {
+  const allItems = items.length ? items : state.questions;
+  const allIds = allItems.map((item) => Number(item.id)).filter(Boolean);
+  const itemById = new Map(allItems.map((item) => [Number(item.id), item]));
+  const wrongRecords = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => !item.resolved);
+  const dueIds = wrongRecords.filter(([, item]) => isReviewDue(item)).map(([id]) => Number(id)).filter(Boolean);
+  const repeatedIds = wrongRecords.filter(([, item]) => Number(item.count || 0) >= 2).map(([id]) => Number(id)).filter(Boolean);
+  const weakChapterIds = new Set(getWeakChapterRows(courseStore, allItems).slice(0, 6).map((row) => Number(row.id)));
+  const isWeakItem = (item) => chapterPathForId(item.chapterId).slice(0, 2).some((node) => weakChapterIds.has(Number(node.id)));
+  const weakProblemIds = [];
+  const weakUndoneIds = [];
+  const undoneIds = [];
+  allItems.forEach((item) => {
+    const id = Number(item.id);
+    if (!id) return;
+    const done = !!courseStore.done?.[id];
+    const weak = isWeakItem(item);
+    if (!done) {
+      undoneIds.push(id);
+      if (weak) weakUndoneIds.push(id);
+    } else if (weak && (courseStore.wrong?.[id] || !courseStore.correct?.[id])) {
+      weakProblemIds.push(id);
+    }
+  });
+  const carryoverIds = getReviewPlanCarryoverIds(courseStore);
+  return {
+    allIds,
+    itemById,
+    dueIds,
+    repeatedIds,
+    weakProblemIds,
+    weakUndoneIds,
+    undoneIds,
+    carryoverIds,
+  };
+}
+
+function getReviewPlanCarryoverIds(courseStore) {
+  const done = new Set(Object.keys(courseStore.done || {}).map(Number));
+  const ids = new Set((activeReviewPlan().carryoverIds || []).map(Number).filter(Boolean));
+  const today = todayKey();
+  (state.storage.trainingSessions || []).forEach((session) => {
+    if (session.type !== "plan" || Number(session.courseId || 0) !== Number(state.currentCourse?.id || 0)) return;
+    syncTrainingSessionStats(session);
+    const key = session.planKey || dateKey(parseDate(session.createdAt) || new Date());
+    if (key >= today || session.status === "completed") return;
+    normalizeSessionIds(session.ids).forEach((id) => {
+      if (!done.has(Number(id))) ids.add(Number(id));
+    });
+  });
+  return [...ids].filter((id) => !done.has(Number(id)));
+}
+
+function suggestDailyTarget(stats, items, pools, days) {
+  const remainingNew = Math.max(0, (items.length || 0) - Number(stats.done || 0));
+  const baseNew = days ? Math.ceil(remainingNew / days) : remainingNew;
+  const wrongPressure = Math.ceil(pools.dueIds.length * 0.8) + Math.ceil(pools.repeatedIds.length * 0.25);
+  const historyAverage = recentDailyAverage();
+  const raw = historyAverage
+    ? Math.ceil((baseNew + wrongPressure) * 0.68 + Math.max(historyAverage, baseNew) * 0.32)
+    : baseNew + wrongPressure;
+  if (remainingNew + pools.dueIds.length + pools.repeatedIds.length <= 0) return 0;
+  if (days && days <= 7 && raw > 120) return raw;
+  return Math.max(15, Math.min(120, raw));
+}
+
+function buildTodayReviewPlanTask(pools, target) {
+  const effectiveTarget = Math.max(0, Number(target || 0));
+  const cap = Math.max(effectiveTarget, Math.ceil(effectiveTarget * 1.3));
+  const ids = [];
+  const counts = { review: 0, weak: 0, new: 0, carryover: 0 };
+  const seen = new Set();
+  const isWeakId = (id) => {
+    const item = pools.itemById.get(Number(id));
+    if (!item) return false;
+    return pools.weakProblemIds.includes(Number(id)) || pools.weakUndoneIds.includes(Number(id));
+  };
+  const push = (list, type, options = {}) => {
+    for (const raw of list || []) {
+      const id = Number(raw);
+      if (!id || seen.has(id)) continue;
+      if (!options.allowOverCap && cap && ids.length >= cap) break;
+      seen.add(id);
+      ids.push(id);
+      counts[type] = Number(counts[type] || 0) + 1;
+    }
+  };
+  const importantCarryover = pools.carryoverIds.filter((id) => pools.dueIds.includes(id) || pools.repeatedIds.includes(id) || isWeakId(id));
+  const ordinaryCarryover = pools.carryoverIds.filter((id) => !importantCarryover.includes(id));
+  push(importantCarryover, "carryover");
+  push(pools.dueIds, "review", { allowOverCap: pools.dueIds.length > cap });
+  push(pools.repeatedIds, "review");
+  push(pools.weakProblemIds, "weak");
+  push(pools.weakUndoneIds, "weak");
+  push(ordinaryCarryover, "new");
+  push(pools.undoneIds, "new");
+  return { ids, counts, cap };
+}
+
+function buildReviewPlanOverview(stats, wrongTotal, items = state.questions) {
+  const courseStore = userCourseStore();
+  const plan = activeReviewPlan();
+  const hasPlan = !!plan.examDate;
+  const days = hasPlan ? daysUntilExam(plan.examDate) : 0;
+  const pools = buildReviewPlanPools(courseStore, items);
+  const suggestedTarget = suggestDailyTarget(stats, items, pools, days || 30);
+  const manualTarget = Number(plan.dailyTarget || 0);
+  const effectiveTarget = plan.dailyTargetManual && manualTarget ? manualTarget : suggestedTarget;
+  const todaySession = reviewPlanSessionForToday(plan);
+  if (todaySession) syncTrainingSessionStats(todaySession);
+  const generatedTask = buildTodayReviewPlanTask(pools, effectiveTarget);
+  const task = todaySession?.ids?.length
+    ? { ids: normalizeSessionIds(todaySession.ids), counts: todaySession.taskCounts || generatedTask.counts, cap: generatedTask.cap }
+    : generatedTask;
+  const completionRate = items.length ? Math.round(Number(stats.done || 0) / items.length * 100) : 0;
+  return {
+    plan,
+    hasPlan,
+    days,
+    pools,
+    suggestedTarget,
+    effectiveTarget,
+    manualTarget,
+    historyAverage: recentDailyAverage(),
+    debt: pools.carryoverIds.length,
+    task,
+    todaySession,
+    todayCompleted: todaySession?.status === "completed",
+    completionRate,
+    pressureHigh: suggestedTarget > 120 || task.ids.length > Math.max(effectiveTarget, Math.ceil(effectiveTarget * 1.3)),
+    wrongTotal,
+  };
+}
+
 function renderReviewPlanPanel(stats, wrongTotal, items = state.questions) {
-  const plan = state.storage.plan || {};
-  const today = new Date();
-  const days = plan.examDate ? Math.max(1, Math.ceil((parseDate(plan.examDate)?.getTime() - today.getTime()) / 86400000)) : 0;
-  const remainingNew = Math.max(0, items.length - stats.done);
-  const dailyNew = days ? Math.ceil(remainingNew / days) : 0;
-  const dueReviews = getWrongRecordsForCurrentCourse(userCourseStore()).filter(([, item]) => isReviewDue(item)).length;
-  const calendarDays = buildPlanCalendar(plan, dailyNew, dueReviews);
+  const overview = buildReviewPlanOverview(stats, wrongTotal, items);
+  const plan = overview.plan;
+  const calendarDays = buildPlanCalendar(overview);
+  const targetValue = plan.dailyTargetManual && plan.dailyTarget ? plan.dailyTarget : overview.suggestedTarget || "";
+  const taskCount = overview.task.ids.length;
   return `
     <div class="review-plan-panel">
       <div class="trend-title">复习计划</div>
       <div class="plan-form">
-        <input id="examDateInput" type="date" value="${escapeHtml(plan.examDate || "")}">
-        <button id="savePlanBtn" type="button">生成计划</button>
+        <label>
+          <span>考试日期</span>
+          <input id="examDateInput" type="date" value="${escapeHtml(plan.examDate || "")}">
+        </label>
+        <label>
+          <span>每日目标</span>
+          <input id="dailyTargetInput" type="number" min="1" step="1" value="${escapeHtml(targetValue)}" data-suggested-target="${overview.suggestedTarget}">
+        </label>
+        <button id="savePlanBtn" type="button">保存计划</button>
+        <button id="startTodayPlanBtn" type="button" ${overview.hasPlan && taskCount && !overview.todayCompleted ? "" : "disabled"}>${overview.todaySession && !overview.todayCompleted ? "继续今日计划" : overview.todayCompleted ? "今日计划已完成" : "开始今日计划"}</button>
       </div>
       <div class="plan-summary">
-        ${plan.examDate ? `距离考试 ${days} 天 · 每日新题约 ${dailyNew} 题 · 今日到期复习 ${dueReviews} 题` : "选择考试日期后生成每日任务"}
+        ${overview.hasPlan
+          ? `距离考试 ${overview.days} 天 · 系统建议 ${overview.suggestedTarget} 题/天 · 当前目标 ${overview.effectiveTarget} 题/天 · 欠账 ${overview.debt} 题 · 完成率 ${overview.completionRate}%${overview.pressureHigh ? " · 压力较高" : ""}`
+          : `设置考试日期后生成动态计划 · 当前系统建议 ${overview.suggestedTarget || 0} 题/天`}
       </div>
+      ${overview.hasPlan ? `
+        <div class="plan-today-card">
+          <div>
+            <span>今日任务</span>
+            <b>${taskCount} 题</b>
+            <small>复习 ${overview.task.counts.review || 0} · 强化 ${overview.task.counts.weak || 0} · 新题 ${overview.task.counts.new || 0} · 结转 ${overview.task.counts.carryover || 0}</small>
+          </div>
+          <em>${overview.todayCompleted ? "已完成" : overview.todaySession ? "进行中" : "待开始"}</em>
+        </div>
+      ` : ""}
       <div class="plan-calendar">
         ${calendarDays.map((day) => `
           <label class="plan-day ${day.done ? "done" : ""}">
-            <input type="checkbox" data-plan-day="${day.key}" data-new-task="${day.newTask}" data-review-task="${day.reviewTask}" ${day.done ? "checked" : ""}>
+            <input type="checkbox" data-plan-day="${day.key}" data-new-task="${day.newTask}" data-review-task="${day.reviewTask}" data-weak-task="${day.weakTask}" ${day.done ? "checked" : ""}>
             <span>${day.label}</span>
-            <em>新题 ${day.newTask} · 复习 ${day.reviewTask}</em>
+            <em>总 ${day.totalTask} · 新题 ${day.newTask} · 复习 ${day.reviewTask} · 强化 ${day.weakTask}</em>
           </label>
         `).join("")}
       </div>
@@ -3332,19 +3618,31 @@ function renderReviewPlanPanel(stats, wrongTotal, items = state.questions) {
   `;
 }
 
-function buildPlanCalendar(plan, dailyNew, dueReviews) {
+function buildPlanCalendar(overview) {
   const result = [];
+  const plan = overview.plan || {};
   const log = plan.dailyLog || {};
   const today = startOfToday();
+  const futureDays = Math.max(1, (overview.days || 1) - 1);
+  const todayNewLike = Number(overview.task.counts.new || 0) + Number(overview.task.counts.weak || 0);
+  const remainingAfterToday = Math.max(0, overview.pools.undoneIds.length - todayNewLike);
+  const futureNew = overview.hasPlan ? Math.min(overview.effectiveTarget || 0, Math.ceil(remainingAfterToday / futureDays)) : 0;
   for (let i = 0; i < 14; i++) {
     const date = addDays(today, i);
     const key = dateKey(date);
+    const inPlanWindow = !overview.hasPlan || i < Math.max(overview.days, 1);
+    const reviewTask = i === 0 ? Number(overview.task.counts.review || 0) + Number(overview.task.counts.carryover || 0) : 0;
+    const weakTask = i === 0 ? Number(overview.task.counts.weak || 0) : Math.ceil(futureNew * 0.25);
+    const newTask = i === 0 ? Number(overview.task.counts.new || 0) : Math.max(0, futureNew - weakTask);
+    const totalTask = inPlanWindow ? reviewTask + weakTask + newTask : 0;
     result.push({
       key,
       label: i === 0 ? "今天" : `${date.getMonth() + 1}/${date.getDate()}`,
-      newTask: dailyNew || 0,
-      reviewTask: i === 0 ? dueReviews : 0,
-      done: !!log[key],
+      newTask: totalTask ? newTask : 0,
+      reviewTask: totalTask ? reviewTask : 0,
+      weakTask: totalTask ? weakTask : 0,
+      totalTask,
+      done: !!log[key] || (i === 0 && overview.todayCompleted),
     });
   }
   return result;
@@ -3359,10 +3657,24 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
         toast("请选择考试日期");
         return;
       }
+      const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+      const pools = buildReviewPlanPools(userCourseStore(), items);
+      const suggestedTarget = suggestDailyTarget(stats, items, pools, daysUntilExam(examDate) || 30);
+      const targetInput = $("dailyTargetInput");
+      const previousSuggestedTarget = Number(targetInput?.dataset.suggestedTarget || 0);
+      const typedTarget = Math.round(Number(targetInput?.value || 0));
+      const userChangedTarget = typedTarget > 0 && typedTarget !== previousSuggestedTarget;
+      const dailyTarget = Math.max(1, userChangedTarget ? typedTarget : suggestedTarget);
+      const overview = buildReviewPlanOverview(stats, wrongTotal, items);
       state.storage.plan = {
         ...(state.storage.plan || {}),
         examDate,
         courseId: state.currentCourse?.id,
+        dailyTarget,
+        dailyTargetManual: userChangedTarget && dailyTarget !== suggestedTarget,
+        lastSuggestedTarget: suggestedTarget,
+        lastRebalancedAt: nowText(),
+        carryoverIds: overview.pools.carryoverIds,
         createdAt: state.storage.plan?.createdAt || nowText(),
         dailyLog: state.storage.plan?.dailyLog || {},
         snapshot: {
@@ -3373,11 +3685,12 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
         },
       };
       scheduleSave();
-      if (state.mode === "training") renderTraining();
-      else renderProgress();
-      toast("复习计划已生成");
+      renderProgress();
+      toast("复习计划已保存");
     };
   }
+  const startBtn = $("startTodayPlanBtn");
+  if (startBtn) startBtn.onclick = () => startTodayReviewPlan().catch((err) => toast(err.message));
   document.querySelectorAll("[data-plan-day]").forEach((checkbox) => {
     checkbox.onchange = () => {
       state.storage.plan ||= { dailyLog: {} };
@@ -3387,6 +3700,7 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
         state.storage.plan.dailyLog[key] = {
           newDone: Number(checkbox.dataset.newTask || 0),
           reviewDone: Number(checkbox.dataset.reviewTask || 0),
+          weakDone: Number(checkbox.dataset.weakTask || 0),
           at: nowText(),
         };
       } else {
@@ -3396,6 +3710,44 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
       checkbox.closest(".plan-day")?.classList.toggle("done", checkbox.checked);
     };
   });
+}
+
+async function startTodayReviewPlan() {
+  if (!state.currentCourse) return;
+  if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  const stats = getCourseStats();
+  const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const overview = buildReviewPlanOverview(stats, Object.keys(userCourseStore().wrong || {}).length, items);
+  if (!overview.hasPlan) {
+    toast("请先在学习看板设置考试日期");
+    return;
+  }
+  if (overview.todaySession && overview.todaySession.status !== "completed") {
+    await continueTrainingSession(overview.todaySession.id);
+    return;
+  }
+  const ids = normalizeSessionIds(overview.task.ids);
+  if (!ids.length) {
+    toast("今日计划暂无题目");
+    return;
+  }
+  resetGeneratedPracticeFilters();
+  const session = saveSmartPracticeSession(ids, "今日计划", { type: "plan" });
+  session.planKey = todayKey();
+  session.taskCounts = overview.task.counts;
+  state.storage.plan = {
+    ...(state.storage.plan || {}),
+    courseId: state.currentCourse.id,
+    todaySessionId: session.id,
+    lastSuggestedTarget: overview.suggestedTarget,
+    lastRebalancedAt: nowText(),
+    carryoverIds: overview.pools.carryoverIds,
+  };
+  scheduleSave();
+  state.mode = "smart";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast("已生成今日计划");
 }
 
 function todayKey() {
@@ -3579,10 +3931,12 @@ function renderAdminRows(rows, failedCount = 0) {
       <button class="admin-view-btn ${state.adminView === "courses" ? "active" : ""}" data-admin-view="courses" type="button">按课程视图</button>
       <button class="admin-view-btn ${state.adminView === "corrections" ? "active" : ""}" data-admin-view="corrections" type="button">纠错反馈</button>
       <button class="admin-view-btn ${state.adminView === "banks" ? "active" : ""}" data-admin-view="banks" type="button">题库更新</button>
+      <button class="admin-view-btn ${state.adminView === "bankManager" ? "active" : ""}" data-admin-view="bankManager" type="button">题库管理器</button>
+      <button class="admin-view-btn ${state.adminView === "bankEditor" ? "active" : ""}" data-admin-view="bankEditor" type="button">题库编辑</button>
       <button class="admin-view-btn ${state.adminView === "data" ? "active" : ""}" data-admin-view="data" type="button">数据管理</button>
       ${failedCount ? `<span class="admin-warning">${failedCount} 个用户数据加载失败，已跳过</span>` : ""}
     </div>
-    ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
+    ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "bankManager" ? renderAdminBankManagerPanel() : state.adminView === "bankEditor" ? renderAdminBankEditorPanel() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
   `;
   $("adminAddUserBtn").onclick = openAdminUserDialog;
   document.querySelectorAll("[data-admin-view]").forEach((btn) => {
@@ -3598,6 +3952,8 @@ function renderAdminRows(rows, failedCount = 0) {
     };
   }
   bindAdminBankUpdateButtons();
+  bindAdminBankManagerActions();
+  bindAdminBankEditorActions();
   document.querySelectorAll("[data-admin-action]").forEach((btn) => {
     btn.onclick = () => adminUserAction(btn.dataset.user, btn.dataset.adminAction).catch((err) => toast(err.message));
   });
@@ -3625,10 +3981,11 @@ async function ensureAdminBankUpdateMode() {
   const sample = (state.adminCourses || []).find((course) => !!course.owned && Number(course.questionCount || 0) > 0);
   if (!sample) return "";
   state.adminBankUpdateModePromise = (async () => {
-    const query = new URLSearchParams({ user: state.user, courseId: String(sample.id), dryRun: "1" });
+    const query = new URLSearchParams({ user: state.user, courseId: String(sample.id), dryRun: "true" });
     const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
     state.adminBankUpdateMode = result.reserved || result.mode === "upload" ? "upload" : "pull";
-    refreshAdminBankTable();
+    if (state.adminView === "bankManager") renderAdminRows(state.adminRows, state.adminFailedCount);
+    else refreshAdminBankTable();
     return state.adminBankUpdateMode;
   })();
   try {
@@ -3751,6 +4108,7 @@ function renderAdminCorrectionTable(rows) {
               <td class="correction-note">${escapeHtml(item.note || "")}</td>
               <td>${escapeHtml(item.at || "未记录")}</td>
               <td class="admin-actions">
+                <button data-bank-editor-open="${escapeHtml(item.questionId || "")}" data-editor-course="${escapeHtml(item.courseId || "")}">编辑题库</button>
                 <button data-correction-action="${item.status === "resolved" ? "reopen" : "resolve"}" data-user="${escapeHtml(item.user)}" data-correction-id="${escapeHtml(item.id)}">${item.status === "resolved" ? "转待处理" : "标记处理"}</button>
                 <button class="danger" data-correction-action="delete" data-user="${escapeHtml(item.user)}" data-correction-id="${escapeHtml(item.id)}">删除</button>
               </td>
@@ -3844,6 +4202,601 @@ function refreshAdminBankTable() {
   if (summary) summary.textContent = renderAdminBankSummary(visibleCourses.length);
   if (rows) rows.innerHTML = renderAdminBankRows(visibleCourses);
   bindAdminBankUpdateButtons();
+}
+
+function renderAdminBankManagerPanel() {
+  if (!state.adminBankUpdateMode) {
+    ensureAdminBankUpdateMode().catch((err) => toast(err.message));
+    return `
+      <div class="admin-data-card bank-manager-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>题库管理器</b>
+            <span>正在识别当前部署的题库更新方式...</span>
+          </div>
+          <span class="status-pill disabled">检测中</span>
+        </div>
+      </div>
+    `;
+  }
+  if (state.adminBankUpdateMode === "upload") {
+    return `
+      <div class="admin-data-card bank-manager-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>Docker 版题库更新</b>
+            <span>Docker 只接收已经在本地服务器版校验过的题库包。</span>
+          </div>
+          <span class="status-pill disabled">上传版</span>
+        </div>
+        <div class="admin-empty bank-manager-empty">
+          请先在 Windows 本地服务器版使用题库管理器拉取/上传到临时区，完成对比校验并导出 Docker 包；确认无 ID 大幅变动、答案异常和图片缺失后，再回到 Docker 的“题库更新”或“数据管理”上传。
+        </div>
+        <div class="admin-data-actions">
+          <button class="primary-action" data-admin-jump-view="banks" type="button">去题库更新</button>
+          <button data-admin-jump-view="data" type="button">去数据管理</button>
+        </div>
+      </div>
+    `;
+  }
+
+  const courses = getBankManagerCourses();
+  if (!courses.length) {
+    return `<div class="admin-empty">暂无可管理题库，请先确认服务器版已加载课程数据。</div>`;
+  }
+  const selected = getBankManagerCourse(courses);
+  const report = Number(state.adminBankManagerReport?.courseId || 0) === Number(selected.id)
+    ? state.adminBankManagerReport
+    : null;
+  const busy = state.adminBankManagerBusy;
+  return `
+    <div class="bank-manager-panel">
+      <section class="admin-data-card bank-manager-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>题库管理器</b>
+            <span>先拉取或上传到临时区，对比校验通过后再发布正式题库，并导出 Docker 包。</span>
+          </div>
+          <span class="status-pill active">服务器版</span>
+        </div>
+        <div class="bank-manager-picker">
+          <label>
+            <span>选择题库</span>
+            <select id="bankManagerCourseSelect">
+              ${courses.map((course) => `<option value="${course.id}" ${Number(course.id) === Number(selected.id) ? "selected" : ""}>${escapeHtml(course.name)} · ID ${course.id} · ${Number(course.questionCount || 0)}题</option>`).join("")}
+            </select>
+          </label>
+          <div class="bank-manager-course-meta">
+            <b>${escapeHtml(selected.name || "")}</b>
+            <span>${escapeHtml(selected.category || "未分类")} ${selected.subcategory ? "· " + escapeHtml(selected.subcategory) : ""}</span>
+            <span>本地题量 ${Number(selected.questionCount || 0)} 题 · 更新 ${escapeHtml(formatRelativeTime(selected.changedAt))}</span>
+          </div>
+        </div>
+        <div class="admin-data-actions bank-manager-actions">
+          <button class="primary-action" data-bank-manager-action="pull" type="button" ${busy ? "disabled" : ""}>${busy === "pull" ? "拉取中..." : "拉取到临时区"}</button>
+          <button data-bank-manager-action="upload" type="button" ${busy ? "disabled" : ""}>${busy === "upload" ? "上传中..." : "上传到临时区"}</button>
+          <button data-bank-manager-action="report" type="button" ${busy ? "disabled" : ""}>${busy === "report" ? "生成中..." : "生成/刷新报告"}</button>
+          <button class="primary-action secondary" data-bank-manager-action="publish" type="button" ${busy || !report?.stagingExists ? "disabled" : ""}>发布正式题库</button>
+          <button class="danger" data-bank-manager-action="force" type="button" ${busy || !report?.stagingExists ? "disabled" : ""}>强制发布</button>
+          <button data-bank-manager-action="export" type="button" ${busy || !report?.stagingExists ? "disabled" : ""}>导出 Docker 包</button>
+        </div>
+        <small>临时区不会影响当前正式题库；发布前会自动备份正式数据库和图片。若报告提示 ID 大幅变动，错题、收藏、笔记、训练计划可能无法准确映射。</small>
+      </section>
+      ${renderBankManagerReport(report)}
+    </div>
+  `;
+}
+
+function getBankManagerCourses() {
+  const courses = state.adminCourses || [];
+  const preferred = courses.filter((course) => !!course.owned || Number(course.questionCount || 0) > 0);
+  return (preferred.length ? preferred : courses).slice().sort((a, b) => {
+    const localDiff = Number(b.questionCount || 0) - Number(a.questionCount || 0);
+    if (localDiff !== 0) return localDiff;
+    return Number(a.id || 0) - Number(b.id || 0);
+  });
+}
+
+function getBankManagerCourse(courses = getBankManagerCourses()) {
+  const current = courses.find((course) => Number(course.id) === Number(state.adminBankManagerCourseId));
+  const selected = current || courses[0] || {};
+  state.adminBankManagerCourseId = Number(selected.id || 0);
+  return selected;
+}
+
+function renderBankManagerReport(report) {
+  if (!report) {
+    return `
+      <section class="admin-data-card bank-manager-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>校验报告</b>
+            <span>点击“拉取到临时区”“上传到临时区”或“生成/刷新报告”后显示。</span>
+          </div>
+          <span class="status-pill disabled">暂无报告</span>
+        </div>
+      </section>
+    `;
+  }
+  if (report.ok === false) {
+    return `<section class="admin-data-card bank-manager-card"><div class="admin-empty">报告生成失败：${escapeHtml(report.error || "未知错误")}</div></section>`;
+  }
+  const summary = report.summary || {};
+  const warnings = Array.isArray(report.warnings) ? report.warnings : [];
+  const samples = report.samples || {};
+  const risk = report.riskLevel || "none";
+  return `
+    <section class="admin-data-card bank-manager-card">
+      <div class="admin-data-card-head">
+        <div>
+          <b>校验报告</b>
+          <span>${escapeHtml(report.generatedAt || "")}</span>
+        </div>
+        <span class="risk-pill risk-${escapeHtml(risk)}">${escapeHtml(report.riskText || risk)}</span>
+      </div>
+      <div class="admin-data-metrics bank-manager-metrics">
+        <div><b>${Number(summary.currentSubjects || 0)}</b><span>当前题量</span></div>
+        <div><b>${Number(summary.stagingSubjects || 0)}</b><span>临时题量</span></div>
+        <div><b>${Number(summary.added || 0)}</b><span>新增</span></div>
+        <div><b>${Number(summary.deleted || 0)}</b><span>删除</span></div>
+        <div><b>${Number(summary.modified || 0)}</b><span>内容变化</span></div>
+        <div><b>${Number(summary.answerChanged || 0)}</b><span>答案变化</span></div>
+        <div><b>${Number(summary.possibleIdChanged || 0)}</b><span>疑似ID变动</span></div>
+        <div><b>${Number(summary.missingAssets || 0)}</b><span>缺图</span></div>
+      </div>
+      <div class="bank-manager-report-grid">
+        <div>
+          <b>ID / 题量波动</b>
+          <span>ID 疑似变动 ${Number(summary.idChangePercent || 0).toFixed(1)}% · 新旧题量波动 ${Number(summary.churnPercent || 0).toFixed(1)}%</span>
+        </div>
+        <div>
+          <b>章节变化</b>
+          <span>当前 ${Number(summary.currentChapters || 0)} 章 · 临时 ${Number(summary.stagingChapters || 0)} 章</span>
+        </div>
+      </div>
+      ${warnings.length ? `<div class="bank-manager-warnings">${warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>` : `<div class="bank-manager-ok">未发现阻塞问题。仍建议抽查答案变化和图片显示后再发布。</div>`}
+      ${renderBankManagerSamples(samples)}
+    </section>
+  `;
+}
+
+function renderBankManagerSamples(samples) {
+  const rows = [
+    ["新增样例", samples.added],
+    ["删除样例", samples.deleted],
+    ["修改样例", samples.modified],
+  ].map(([label, values]) => {
+    const list = Array.isArray(values) ? values : [];
+    return `<div><b>${label}</b><span>${list.length ? list.map((id) => `#${escapeHtml(String(id))}`).join("、") : "无"}</span></div>`;
+  }).join("");
+  return `<div class="bank-manager-samples">${rows}</div>`;
+}
+
+function bindAdminBankManagerActions() {
+  document.querySelectorAll("[data-admin-jump-view]").forEach((btn) => {
+    btn.onclick = () => {
+      state.adminView = btn.dataset.adminJumpView || "banks";
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+    };
+  });
+  const select = $("bankManagerCourseSelect");
+  if (select) {
+    select.onchange = () => {
+      state.adminBankManagerCourseId = Number(select.value || 0);
+      state.adminBankManagerReport = null;
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+    };
+  }
+  document.querySelectorAll("[data-bank-manager-action]").forEach((btn) => {
+    btn.onclick = () => runBankManagerAction(btn.dataset.bankManagerAction, btn).catch((err) => {
+      state.adminBankManagerBusy = "";
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+      toast(err.message);
+    });
+  });
+}
+
+async function runBankManagerAction(action, btn = null) {
+  const courseId = Number(state.adminBankManagerCourseId || getBankManagerCourse().id || 0);
+  if (!courseId) {
+    toast("请选择题库");
+    return;
+  }
+  if (action === "export") {
+    window.location.href = `/api/admin/bank-manager/export?user=${encodeURIComponent(state.user)}&courseId=${courseId}`;
+    return;
+  }
+  if (action === "upload") {
+    await uploadBankManagerStaging(courseId);
+    return;
+  }
+  if (action === "pull" && !confirm("确定拉取该题库到临时区吗？这不会影响当前正式题库。")) return;
+  if (action === "publish" && !confirm("确定发布临时题库到正式题库吗？发布前会自动备份当前题库。")) return;
+  if (action === "force" && !confirm("风险报告可能提示 ID 大幅变动。确定强制发布吗？错题、收藏、笔记和训练计划可能受影响。")) return;
+
+  state.adminBankManagerBusy = action || "report";
+  renderAdminRows(state.adminRows, state.adminFailedCount);
+  try {
+    let result;
+    if (action === "pull") {
+      result = await api(`/api/admin/bank-manager/pull-staging?user=${encodeURIComponent(state.user)}&courseId=${courseId}`, { method: "POST" });
+    } else if (action === "publish" || action === "force") {
+      result = await api(`/api/admin/bank-manager/publish?user=${encodeURIComponent(state.user)}&courseId=${courseId}&force=${action === "force" ? "true" : "false"}`, { method: "POST" });
+    } else {
+      result = await api(`/api/admin/bank-manager/report?user=${encodeURIComponent(state.user)}&courseId=${courseId}`);
+    }
+    state.adminBankManagerReport = result.report || result;
+    toast(result.message || "题库管理器操作完成");
+    if (action === "publish" || action === "force") {
+      state.adminCourses = [];
+      state.courses = [];
+      state.chapters = [];
+      state.types = [];
+      state.questions = [];
+      await loadCourses();
+      await loadAdminCourses().catch(() => {});
+    }
+  } finally {
+    state.adminBankManagerBusy = "";
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
+}
+
+async function uploadBankManagerStaging(courseId) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".zip";
+  input.className = "hidden";
+  document.body.appendChild(input);
+  try {
+    const file = await new Promise((resolve) => {
+      input.onchange = () => resolve(input.files?.[0] || null);
+      input.click();
+    });
+    if (!file) return;
+    if (!confirm("确定上传该题库包到临时区吗？上传后只生成校验报告，不会立即发布正式题库。")) return;
+    state.adminBankManagerBusy = "upload";
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+    const form = new FormData();
+    form.append("file", file);
+    const result = await api(`/api/admin/bank-manager/upload-staging?user=${encodeURIComponent(state.user)}&courseId=${courseId}`, {
+      method: "POST",
+      body: form,
+    });
+    state.adminBankManagerReport = result.report || result;
+    toast(result.message || "题库包已上传到临时区");
+  } finally {
+    input.remove();
+    state.adminBankManagerBusy = "";
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
+}
+
+function renderAdminBankEditorPanel() {
+  const courses = getBankEditorCourses();
+  if (!courses.length) return `<div class="admin-empty">暂无可编辑题库，请先加载题库数据。</div>`;
+  const selected = getBankEditorCourse(courses);
+  ensureAdminEditorChapters(selected.id).catch((err) => toast(err.message));
+  const chapters = state.adminEditorChaptersCourseId === Number(selected.id) ? state.adminEditorChapters : [];
+  const correctionIds = getEditorCorrectionIds(Number(selected.id));
+  return `
+    <div class="bank-editor-panel">
+      <section class="admin-data-card bank-editor-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>题库编辑</b>
+            <span>用于修正当前题库的章节标题、题目、答案和解析；保存前会自动备份数据库。</span>
+          </div>
+          <span class="status-pill active">管理员</span>
+        </div>
+        <div class="bank-editor-filters">
+          <label>
+            <span>题库</span>
+            <select id="bankEditorCourseSelect">
+              ${courses.map((course) => `<option value="${course.id}" ${Number(course.id) === Number(selected.id) ? "selected" : ""}>${escapeHtml(course.name)} · ${Number(course.questionCount || 0)}题</option>`).join("")}
+            </select>
+          </label>
+          <label>
+            <span>章节</span>
+            <select id="bankEditorChapterSelect">
+              <option value="0">全部章节</option>
+              ${chapters.map((chapter) => `<option value="${chapter.id}" ${Number(chapter.id) === Number(state.adminEditorChapterId) ? "selected" : ""}>${"&nbsp;".repeat(Math.max(0, Number(chapter.grade || 0)) * 2)}${escapeHtml(chapter.name)} · ${Number(chapter.questionCount || 0)}题</option>`).join("")}
+            </select>
+          </label>
+          <label>
+            <span>关键词 / 题号</span>
+            <input id="bankEditorSearch" value="${escapeHtml(state.adminEditorQuery || "")}" placeholder="搜索题干、答案、解析或题号">
+          </label>
+          <button class="primary-action" id="bankEditorSearchBtn" type="button">${state.adminEditorBusy === "search" ? "搜索中..." : "搜索"}</button>
+          <label class="bank-editor-check">
+            <input id="bankEditorCorrectionOnly" type="checkbox" ${state.adminEditorCorrectionOnly ? "checked" : ""}>
+            <span>只看纠错反馈 ${correctionIds.length ? `(${correctionIds.length})` : ""}</span>
+          </label>
+        </div>
+      </section>
+      <div class="bank-editor-layout">
+        <section class="admin-data-card bank-editor-list-card">
+          <div class="admin-data-card-head">
+            <div>
+              <b>题目列表</b>
+              <span>${state.adminEditorResults.length ? `当前显示 ${state.adminEditorResults.length} 道` : "请选择条件后搜索"}</span>
+            </div>
+          </div>
+          <div class="bank-editor-list">
+            ${renderBankEditorResults()}
+          </div>
+        </section>
+        <section class="admin-data-card bank-editor-detail-card">
+          ${renderBankEditorDetail()}
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function getBankEditorCourses() {
+  return (state.adminCourses || [])
+    .filter((course) => Number(course.questionCount || 0) > 0)
+    .slice()
+    .sort((a, b) => Number(b.owned || 0) - Number(a.owned || 0) || Number(a.id || 0) - Number(b.id || 0));
+}
+
+function getBankEditorCourse(courses = getBankEditorCourses()) {
+  const current = courses.find((course) => Number(course.id) === Number(state.adminEditorCourseId));
+  const fallback = current || courses.find((course) => Number(course.id) === Number(state.currentCourse?.id || 0)) || courses[0] || {};
+  state.adminEditorCourseId = Number(fallback.id || 0);
+  return fallback;
+}
+
+async function ensureAdminEditorChapters(courseId) {
+  courseId = Number(courseId || 0);
+  if (!courseId || state.adminEditorChaptersCourseId === courseId) return;
+  state.adminEditorChaptersCourseId = courseId;
+  state.adminEditorChapters = [];
+  const chapters = await api(`/api/chapters?courseId=${courseId}`);
+  state.adminEditorChapters = Array.isArray(chapters) ? chapters : [];
+  if (state.adminView === "bankEditor") renderAdminRows(state.adminRows, state.adminFailedCount);
+}
+
+function renderBankEditorResults() {
+  if (state.adminEditorBusy === "search") return `<div class="admin-empty">正在搜索题目...</div>`;
+  if (!state.adminEditorResults.length) return `<div class="admin-empty">暂无题目。可选择章节、输入关键词，或勾选“只看纠错反馈”。</div>`;
+  const correctionIds = new Set(getEditorCorrectionIds(Number(state.adminEditorCourseId)));
+  return state.adminEditorResults.map((item) => `
+    <button class="bank-editor-result ${Number(item.id) === Number(state.adminEditorSelectedId) ? "active" : ""}" data-bank-editor-open="${item.id}" data-editor-course="${item.courseId}" type="button">
+      <b>#${item.id} ${escapeHtml(item.type || "题目")}</b>
+      <span>${escapeHtml(item.chapterName || "")}${correctionIds.has(Number(item.id)) ? " · 有纠错反馈" : ""}</span>
+      <small>${escapeHtml((item.title || "").slice(0, 180))}</small>
+    </button>
+  `).join("");
+}
+
+function renderBankEditorDetail() {
+  const detail = state.adminEditorDetail;
+  if (state.adminEditorBusy === "detail") return `<div class="admin-empty">正在打开题目...</div>`;
+  if (!detail) {
+    return `
+      <div class="admin-data-card-head">
+        <div>
+          <b>编辑区</b>
+          <span>从左侧选择一道题，或在纠错反馈中点击“编辑题库”。</span>
+        </div>
+      </div>
+      <div class="admin-empty">尚未选择题目</div>
+    `;
+  }
+  const path = Array.isArray(detail.chapterPath) ? detail.chapterPath : [];
+  return `
+    <div class="admin-data-card-head">
+      <div>
+        <b>#${detail.id} ${escapeHtml(detail.type || "题目")}</b>
+        <span>${escapeHtml(detail.courseName || "")} · ${escapeHtml(detail.updatedAt || "未记录")}</span>
+      </div>
+      <button class="primary-action" id="bankEditorSaveBtn" type="button">${state.adminEditorBusy === "save" ? "保存中..." : "保存修改"}</button>
+    </div>
+    <div class="bank-editor-form">
+      <div class="bank-editor-chapter-fields">
+        ${path.map((chapter, index) => `
+          <label>
+            <span>${["一级标题", "二级标题", "三级标题", "四级标题"][index] || `第 ${index + 1} 级标题`} · ID ${chapter.id}</span>
+            <input data-editor-chapter-id="${chapter.id}" value="${escapeHtml(chapter.name || "")}">
+          </label>
+        `).join("") || `<div class="admin-empty">未找到章节路径</div>`}
+      </div>
+      <label>
+        <span>题目 / 选项</span>
+        <textarea id="bankEditorTitleInput" rows="8">${escapeHtml(detail.title || "")}</textarea>
+      </label>
+      <label>
+        <span>附加题干 / 案例材料</span>
+        <textarea id="bankEditorQuestionInput" rows="5">${escapeHtml(detail.question || "")}</textarea>
+      </label>
+      <label>
+        <span>答案</span>
+        <textarea id="bankEditorAnswerInput" rows="3">${escapeHtml(detail.answer || "")}</textarea>
+      </label>
+      <label>
+        <span>解析</span>
+        <textarea id="bankEditorDescriptionInput" rows="6">${escapeHtml(detail.description || "")}</textarea>
+      </label>
+    </div>
+  `;
+}
+
+function bindAdminBankEditorActions() {
+  document.querySelectorAll("[data-bank-editor-open]").forEach((btn) => {
+    btn.onclick = () => openBankEditorQuestion(Number(btn.dataset.bankEditorOpen || 0), Number(btn.dataset.editorCourse || 0)).catch((err) => toast(err.message));
+  });
+  const courseSelect = $("bankEditorCourseSelect");
+  if (courseSelect) {
+    courseSelect.onchange = () => {
+      state.adminEditorCourseId = Number(courseSelect.value || 0);
+      state.adminEditorChapterId = 0;
+      state.adminEditorResults = [];
+      state.adminEditorSelectedId = 0;
+      state.adminEditorDetail = null;
+      state.adminEditorChaptersCourseId = 0;
+      state.adminEditorAutoLoadKey = "";
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+    };
+  }
+  const chapterSelect = $("bankEditorChapterSelect");
+  if (chapterSelect) chapterSelect.onchange = () => { state.adminEditorChapterId = Number(chapterSelect.value || 0); };
+  const search = $("bankEditorSearch");
+  if (search) search.oninput = () => { state.adminEditorQuery = search.value; };
+  const correctionOnly = $("bankEditorCorrectionOnly");
+  if (correctionOnly) correctionOnly.onchange = () => { state.adminEditorCorrectionOnly = correctionOnly.checked; };
+  const searchBtn = $("bankEditorSearchBtn");
+  if (searchBtn) searchBtn.onclick = () => loadBankEditorQuestions().catch((err) => toast(err.message));
+  const saveBtn = $("bankEditorSaveBtn");
+  if (saveBtn) saveBtn.onclick = () => saveBankEditorQuestion().catch((err) => toast(err.message));
+  maybeAutoLoadBankEditor();
+}
+
+function bankEditorAutoLoadKey() {
+  return [
+    Number(state.adminEditorCourseId || 0),
+    Number(state.adminEditorChapterId || 0),
+    state.adminEditorCorrectionOnly ? "corrections" : "all",
+    (state.adminEditorQuery || "").trim(),
+  ].join("|");
+}
+
+function maybeAutoLoadBankEditor() {
+  if (state.adminView !== "bankEditor" || state.adminEditorBusy || state.adminEditorResults.length || state.adminEditorDetail) return;
+  const key = bankEditorAutoLoadKey();
+  if (state.adminEditorAutoLoadKey === key) return;
+  state.adminEditorAutoLoadKey = key;
+  setTimeout(() => {
+    if (state.adminView !== "bankEditor" || state.adminEditorBusy || state.adminEditorResults.length || state.adminEditorDetail) return;
+    loadBankEditorQuestions().catch((err) => toast(err.message));
+  }, 0);
+}
+
+function selectedEditorChapterIds() {
+  const selectedId = Number(state.adminEditorChapterId || 0);
+  if (!selectedId) return [];
+  const chapters = state.adminEditorChapters || [];
+  const selected = chapters.find((chapter) => Number(chapter.id) === selectedId);
+  if (!selected) return [selectedId];
+  const code = String(selected.code || "");
+  const type = Number(selected.type || 0);
+  return chapters
+    .filter((chapter) => Number(chapter.type || 0) === type && String(chapter.code || "").startsWith(code))
+    .map((chapter) => Number(chapter.id))
+    .filter(Boolean);
+}
+
+function getEditorCorrectionIds(courseId = 0) {
+  const ids = collectCorrections(state.adminRows)
+    .filter((item) => !courseId || Number(item.courseId || 0) === Number(courseId))
+    .map((item) => Number(item.questionId || 0))
+    .filter(Boolean);
+  return [...new Set(ids)];
+}
+
+async function loadBankEditorQuestions() {
+  const courseId = Number(state.adminEditorCourseId || getBankEditorCourse().id || 0);
+  if (!courseId) {
+    toast("请选择题库");
+    return;
+  }
+  const query = new URLSearchParams({ user: state.user, courseId: String(courseId), limit: "160" });
+  const chapterIds = selectedEditorChapterIds();
+  if (chapterIds.length) query.set("chapterIds", chapterIds.join(","));
+  if ((state.adminEditorQuery || "").trim()) query.set("q", state.adminEditorQuery.trim());
+  if (state.adminEditorCorrectionOnly) {
+    const ids = getEditorCorrectionIds(courseId);
+    if (!ids.length) {
+      state.adminEditorResults = [];
+      state.adminEditorDetail = null;
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+      toast("当前题库暂无纠错反馈");
+      return;
+    }
+    query.set("ids", ids.join(","));
+  }
+  state.adminEditorBusy = "search";
+  renderAdminRows(state.adminRows, state.adminFailedCount);
+  try {
+    const result = await api(`/api/admin/bank-editor/questions?${query}`);
+    state.adminEditorResults = Array.isArray(result.items) ? result.items : [];
+    if (!state.adminEditorResults.some((item) => Number(item.id) === Number(state.adminEditorSelectedId))) {
+      state.adminEditorSelectedId = 0;
+      state.adminEditorDetail = null;
+    }
+  } finally {
+    state.adminEditorBusy = "";
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
+}
+
+async function openBankEditorQuestion(questionId, courseId = 0) {
+  if (!questionId) return;
+  if (courseId) state.adminEditorCourseId = Number(courseId);
+  state.adminView = "bankEditor";
+  state.adminEditorSelectedId = Number(questionId);
+  state.adminEditorBusy = "detail";
+  renderAdminRows(state.adminRows, state.adminFailedCount);
+  try {
+    const detail = await api(`/api/admin/bank-editor/question?user=${encodeURIComponent(state.user)}&id=${questionId}`);
+    state.adminEditorDetail = detail;
+    state.adminEditorCourseId = Number(detail.courseId || state.adminEditorCourseId || 0);
+    await ensureAdminEditorChapters(state.adminEditorCourseId).catch(() => {});
+    if (!state.adminEditorResults.some((item) => Number(item.id) === Number(questionId))) {
+      state.adminEditorResults = [{
+        id: detail.id,
+        courseId: detail.courseId,
+        chapterName: detail.chapterName,
+        type: detail.type,
+        title: stripText(detail.title || "").slice(0, 180),
+      }, ...state.adminEditorResults].slice(0, 160);
+    }
+  } finally {
+    state.adminEditorBusy = "";
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
+}
+
+async function saveBankEditorQuestion() {
+  const detail = state.adminEditorDetail;
+  if (!detail?.id) return;
+  const chapters = [...document.querySelectorAll("[data-editor-chapter-id]")].map((input) => ({
+    id: Number(input.dataset.editorChapterId || 0),
+    name: input.value.trim(),
+  }));
+  const payload = {
+    id: detail.id,
+    chapters,
+    title: $("bankEditorTitleInput")?.value || "",
+    question: $("bankEditorQuestionInput")?.value || "",
+    answer: $("bankEditorAnswerInput")?.value || "",
+    description: $("bankEditorDescriptionInput")?.value || "",
+  };
+  if (!payload.title.trim()) {
+    toast("题目内容不能为空");
+    return;
+  }
+  if (!confirm("确定保存题库修改吗？系统会先自动备份当前数据库。")) return;
+  state.adminEditorBusy = "save";
+  renderAdminRows(state.adminRows, state.adminFailedCount);
+  try {
+    const result = await api(`/api/admin/bank-editor/question?user=${encodeURIComponent(state.user)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.adminEditorDetail = result.question || state.adminEditorDetail;
+    state.adminCourses = [];
+    state.chapters = [];
+    await loadAdminCourses().catch(() => {});
+    await ensureAdminEditorChapters(state.adminEditorCourseId).catch(() => {});
+    await loadBankEditorQuestions().catch(() => {});
+    toast("题库修改已保存");
+  } finally {
+    state.adminEditorBusy = "";
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
 }
 
 function renderAdminDataPanel() {
@@ -5031,6 +5984,8 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
     if (state.mode === "practice") setCoursePicker(true);
     else setCoursePicker(false);
     renderMode();
+    renderWrongFilters();
+    renderPracticeContextPanel();
     if (!state.currentCourse) {
       if (state.mode === "exam") renderExamHome();
       return;
@@ -5052,7 +6007,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       $("emptyState").classList.remove("hidden");
       $("emptyState").innerHTML = state.mode === "training"
         ? `<strong>正在生成智能训练</strong><span>正在读取错题、薄弱章节和今日练习建议。</span>`
-        : `<strong>正在生成进度分析</strong><span>正在读取当前科目的章节、题型和做题记录。</span>`;
+        : `<strong>正在生成学习看板</strong><span>正在读取当前科目的进度、训练记录和学习信号。</span>`;
     }
     if (!["exam", "progress", "training"].includes(state.mode)) await loadTypes();
     await loadQuestions();

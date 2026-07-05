@@ -377,6 +377,47 @@ app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, 
     }
 });
 
+app.MapGet("/api/admin/bank-editor/questions", (QuestionBank bank, string? user, int courseId, int? chapterId, string? chapterIds, string? q, string? ids, int? limit) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        return Results.Json(bank.GetEditorQuestions(courseId, chapterId, ParseIdList(chapterIds), q ?? "", ParseIdList(ids), limit));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+    }
+});
+
+app.MapGet("/api/admin/bank-editor/question", (QuestionBank bank, string? user, int id) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        var question = bank.GetEditorQuestion(id);
+        return question is null ? Results.Json(new { ok = false, error = "question not found" }, statusCode: 404) : Results.Json(question);
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+    }
+});
+
+app.MapPost("/api/admin/bank-editor/question", async (HttpRequest request, QuestionBank bank, string? user) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        var body = await ReadJsonBody(request);
+        return Results.Json(bank.SaveEditorQuestion(body));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+    }
+});
+
 app.MapGet("/api/courses", (QuestionBank bank, string? q, string? available) =>
     Results.Json(bank.GetCourses(q ?? "", IsTruthy(available))));
 
@@ -1398,6 +1439,282 @@ sealed class QuestionBank
         };
     }
 
+    public object GetEditorQuestions(int courseId, int? chapterId, List<int> chapterIds, string search, List<int> ids, int? limit)
+    {
+        var take = Math.Max(20, Math.Min(500, limit ?? 120));
+        var queryLimit = ids.Count > 0 ? Math.Min(5000, Math.Max(take, ids.Count)) : search.Trim().Length > 0 ? 5000 : take;
+        var parameters = new Dictionary<string, object?>();
+        var sql = @"
+            select s.isubjectid, s.icourseid, s.ichapterid, s.isubjecttype, s.iindex, s.ctitle, s.cquestion, s.canswer,
+                   s.cdescription, s.ianswercount, s.dupdatedate, t.csubjectname, ch.cchaptername, ch.cchaptercode, ch.igrade
+            from coursesubject s
+            left join coursesubjecttype t on s.isubjecttype=t.isubjecttype
+            left join coursechapter ch on s.ichapterid=ch.ichapterid
+            where coalesce(s.bstopflag, 0)=0";
+        if (courseId > 0)
+        {
+            sql += " and s.icourseid=@courseId";
+            parameters["@courseId"] = courseId;
+        }
+        if (chapterId.HasValue && chapterId.Value > 0)
+        {
+            sql += " and s.ichapterid=@chapterId";
+            parameters["@chapterId"] = chapterId.Value;
+        }
+        if (chapterIds.Count > 0) sql += " and s.ichapterid in (" + string.Join(",", chapterIds) + ")";
+        if (ids.Count > 0) sql += " and s.isubjectid in (" + string.Join(",", ids) + ")";
+        sql += " order by s.ichaptertype, ch.cchaptercode, s.iindex, s.isubjectid limit " + queryLimit.ToString(CultureInfo.InvariantCulture);
+
+        var keyword = search.Trim();
+        var rows = Query(sql, parameters)
+            .Select(r =>
+            {
+                var title = TextForEdit(r["ctitle"], r["dupdatedate"]);
+                var question = TextForEdit(r["cquestion"], r["dupdatedate"]);
+                var answer = TextForEdit(r["canswer"], r["dupdatedate"]);
+                var description = TextForEdit(r["cdescription"], r["dupdatedate"]);
+                return new
+                {
+                    id = ToInt(r["isubjectid"]),
+                    courseId = ToInt(r["icourseid"]),
+                    chapterId = ToInt(r["ichapterid"]),
+                    chapterName = ToStr(r["cchaptername"]),
+                    chapterCode = ToStr(r["cchaptercode"]),
+                    chapterGrade = ToInt(r["igrade"]),
+                    type = ToStr(r["csubjectname"]),
+                    subjectType = ToInt(r["isubjecttype"]),
+                    index = ToInt(r["iindex"]),
+                    title = StripHtml(title),
+                    rawTitle = title,
+                    rawQuestion = question,
+                    rawAnswer = answer,
+                    rawDescription = description,
+                    answer = StripHtml(answer),
+                    answerCount = ToInt(r["ianswercount"])
+                };
+            });
+        if (keyword.Length > 0)
+        {
+            rows = rows.Where(item =>
+                item.id.ToString(CultureInfo.InvariantCulture).Contains(keyword, StringComparison.OrdinalIgnoreCase)
+                || item.title.Contains(keyword, StringComparison.OrdinalIgnoreCase)
+                || item.rawQuestion.Contains(keyword, StringComparison.OrdinalIgnoreCase)
+                || item.rawAnswer.Contains(keyword, StringComparison.OrdinalIgnoreCase)
+                || item.rawDescription.Contains(keyword, StringComparison.OrdinalIgnoreCase)
+                || item.chapterName.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+        }
+        var filtered = rows.Take(take).ToList();
+        return new { ok = true, items = filtered, count = filtered.Count, limit = take };
+    }
+
+    public object? GetEditorQuestion(int id)
+    {
+        var rows = Query(@"
+            select s.*, c.ccoursename, t.csubjectname, ch.cchaptername, ch.cchaptercode, ch.igrade
+            from coursesubject s
+            left join course c on s.icourseid=c.icourseid
+            left join coursesubjecttype t on s.isubjecttype=t.isubjecttype
+            left join coursechapter ch on s.ichapterid=ch.ichapterid
+            where s.isubjectid=@id",
+            new Dictionary<string, object?> { ["@id"] = id });
+        if (rows.Count == 0) return null;
+        var r = rows[0];
+        var courseId = ToInt(r["icourseid"]);
+        var chapterId = ToInt(r["ichapterid"]);
+        return new
+        {
+            ok = true,
+            id = ToInt(r["isubjectid"]),
+            courseId,
+            courseName = ToStr(r["ccoursename"]),
+            chapterId,
+            chapterName = ToStr(r["cchaptername"]),
+            chapterCode = ToStr(r["cchaptercode"]),
+            chapterGrade = ToInt(r["igrade"]),
+            chapterPath = GetChapterPath(courseId, chapterId),
+            type = ToStr(r["csubjectname"]),
+            subjectType = ToInt(r["isubjecttype"]),
+            title = TextForEdit(r["ctitle"], r["dupdatedate"]),
+            question = TextForEdit(r["cquestion"], r["dupdatedate"]),
+            answer = TextForEdit(r["canswer"], r["dupdatedate"]),
+            description = TextForEdit(r["cdescription"], r["dupdatedate"]),
+            answerCount = ToInt(r["ianswercount"]),
+            score = ToStr(r["iscore"]),
+            updatedAt = ToDateString(r["dupdatedate"])
+        };
+    }
+
+    public object SaveEditorQuestion(Dictionary<string, object?> body)
+    {
+        var id = BodyInt(body, "id");
+        if (id <= 0) throw new InvalidOperationException("缺少题目 ID");
+        var current = Query("select isubjectid, icourseid, ichapterid from coursesubject where isubjectid=@id", new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
+        if (current is null) throw new InvalidOperationException("题目不存在");
+
+        var title = NormalizeEditText(GetBodyString(body, "title"));
+        var question = NormalizeEditText(GetBodyString(body, "question"));
+        var answer = NormalizeEditText(GetBodyString(body, "answer"));
+        var description = NormalizeEditText(GetBodyString(body, "description"));
+        if (title.Length == 0) throw new InvalidOperationException("题目内容不能为空");
+
+        SqliteConnection.ClearAllPools();
+        var backupDir = BackupQuestionBank("edit-question-" + id.ToString(CultureInfo.InvariantCulture));
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _paths.SqlitePath }.ToString());
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+        try
+        {
+            foreach (var chapter in BodyChapters(body))
+            {
+                if (chapter.Id <= 0 || chapter.Name.Length == 0) continue;
+                using var chapterCmd = conn.CreateCommand();
+                chapterCmd.Transaction = tx;
+                chapterCmd.CommandText = "update coursechapter set cchaptername=@name where ichapterid=@id";
+                chapterCmd.Parameters.AddWithValue("@name", chapter.Name);
+                chapterCmd.Parameters.AddWithValue("@id", chapter.Id);
+                chapterCmd.ExecuteNonQuery();
+            }
+
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = @"
+                update coursesubject
+                set ctitle=@title,
+                    cquestion=@question,
+                    canswer=@answer,
+                    cdescription=@description,
+                    ianswercount=@answerCount,
+                    dupdatedate=@updatedAt
+                where isubjectid=@id";
+            cmd.Parameters.AddWithValue("@title", title);
+            cmd.Parameters.AddWithValue("@question", question);
+            cmd.Parameters.AddWithValue("@answer", answer);
+            cmd.Parameters.AddWithValue("@description", description);
+            cmd.Parameters.AddWithValue("@answerCount", CountOptions(title + "\n" + question));
+            cmd.Parameters.AddWithValue("@updatedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+        }
+
+        return new { ok = true, id, backup = backupDir, savedAt = NowText(), question = GetEditorQuestion(id) };
+    }
+
+    private List<object> GetChapterPath(int courseId, int chapterId)
+    {
+        if (courseId <= 0 || chapterId <= 0) return new List<object>();
+        var chapters = Query(@"
+            select ch.ichapterid, ch.cchaptername, ch.cchaptercode, ch.igrade, ch.itype,
+                   (select count(*) from coursesubject s where s.ichapterid=ch.ichapterid and coalesce(s.bstopflag,0)=0) as subject_count
+            from coursechapter ch
+            where ch.icourseid=@courseId and coalesce(ch.bstopflag,0)=0
+            order by ch.itype, ch.cchaptercode",
+            new Dictionary<string, object?> { ["@courseId"] = courseId });
+        var target = chapters.FirstOrDefault(row => ToInt(row["ichapterid"]) == chapterId);
+        if (target is null) return new List<object>();
+        var code = ToStr(target["cchaptercode"]);
+        var type = ToInt(target["itype"]);
+        return chapters
+            .Where(row => ToInt(row["itype"]) == type && code.StartsWith(ToStr(row["cchaptercode"]), StringComparison.OrdinalIgnoreCase))
+            .OrderBy(row => ToInt(row["igrade"]))
+            .ThenBy(row => ToStr(row["cchaptercode"]).Length)
+            .Select(row => new
+            {
+                id = ToInt(row["ichapterid"]),
+                name = ToStr(row["cchaptername"]),
+                code = ToStr(row["cchaptercode"]),
+                grade = ToInt(row["igrade"]),
+                questionCount = ToInt(row["subject_count"])
+            })
+            .Cast<object>()
+            .ToList();
+    }
+
+    private string BackupQuestionBank(string reason)
+    {
+        if (!File.Exists(_paths.SqlitePath)) throw new FileNotFoundException("SQLite question bank not found", _paths.SqlitePath);
+        var dataRoot = Directory.GetParent(_paths.SqlitePath)?.FullName ?? _paths.BaseRoot;
+        var backupDir = Path.Combine(dataRoot, "_backups", CleanBackupName(reason) + "-" + Timestamp());
+        Directory.CreateDirectory(backupDir);
+        File.Copy(_paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
+        return backupDir;
+    }
+
+    private static string CleanBackupName(string value)
+    {
+        value = Regex.Replace(value, @"[^\w\-]+", "-").Trim('-');
+        return value.Length == 0 ? "edit" : value.Length > 80 ? value[..80] : value;
+    }
+
+    private static int BodyInt(Dictionary<string, object?> body, string key)
+    {
+        if (!body.TryGetValue(key, out var value) || value is null) return 0;
+        if (value is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out var number)) return number;
+            if (element.ValueKind == JsonValueKind.String && int.TryParse(element.GetString(), out number)) return number;
+            return 0;
+        }
+        return int.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), out var parsed) ? parsed : 0;
+    }
+
+    private static List<(int Id, string Name)> BodyChapters(Dictionary<string, object?> body)
+    {
+        if (!body.TryGetValue("chapters", out var value) || value is null) return new List<(int, string)>();
+        if (value is not JsonElement element || element.ValueKind != JsonValueKind.Array) return new List<(int, string)>();
+        var result = new List<(int, string)>();
+        foreach (var item in element.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var id = 0;
+            var name = "";
+            if (item.TryGetProperty("id", out var idElement))
+            {
+                if (idElement.ValueKind == JsonValueKind.Number) idElement.TryGetInt32(out id);
+                else if (idElement.ValueKind == JsonValueKind.String) int.TryParse(idElement.GetString(), out id);
+            }
+            if (item.TryGetProperty("name", out var nameElement) && nameElement.ValueKind == JsonValueKind.String)
+            {
+                name = NormalizeEditText(nameElement.GetString() ?? "");
+            }
+            if (id > 0) result.Add((id, name));
+        }
+        return result;
+    }
+
+    private static string TextForEdit(object? value, object? updateDate)
+    {
+        return NormalizeAssetPaths(DecryptField(value, updateDate) ?? "")
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\r", "\n", StringComparison.Ordinal);
+    }
+
+    private static string NormalizeEditText(string value)
+    {
+        return (value ?? "")
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\r", "\n", StringComparison.Ordinal)
+            .Trim();
+    }
+
+    private static int CountOptions(string text)
+    {
+        var labels = Regex.Matches(text ?? "", @"(?m)(?:^|\n)\s*([A-H])[\.\u3001\uff0e:：]\s*")
+            .Select(match => match.Groups[1].Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        return labels is >= 2 and <= 8 ? labels : 0;
+    }
+
     private List<Dictionary<string, object?>> Query(string sql, Dictionary<string, object?> parameters)
     {
         if (!File.Exists(_paths.SqlitePath)) throw new FileNotFoundException("SQLite question bank not found. Upload or mount data/question-bank.db first.", _paths.SqlitePath);
@@ -1483,9 +1800,18 @@ sealed class QuestionBank
     private static string NormalizeHtml(string html)
     {
         if (string.IsNullOrEmpty(html)) return "";
-        html = html.Replace("\\", "/");
-        html = Regex.Replace(html, @"(?i)(src=[""']?)(?:file:///android_asset/)?(?:\.\./)?(?:data/)?", "$1/assets/");
+        html = NormalizeAssetPaths(html);
         return html.Replace("\r\n", "\n").Replace("\n", "<br>");
+    }
+
+    private static string NormalizeAssetPaths(string html)
+    {
+        if (string.IsNullOrEmpty(html)) return "";
+        html = html.Replace("\\", "/", StringComparison.Ordinal);
+        html = Regex.Replace(html, @"(?i)(src=[""']?)(?:file:///)?[a-z]:/[^""'>\s]*?/jinkaodian/data/", "$1/assets/");
+        html = Regex.Replace(html, @"(?i)(src=[""']?)(?:file:///android_asset/)?(?:\.\./)+data/", "$1/assets/");
+        html = Regex.Replace(html, @"(?i)(src=[""']?)(?:file:///android_asset/)?data/", "$1/assets/");
+        return html;
     }
 
     private static string StripHtml(string html)

@@ -1932,11 +1932,25 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
 .study-card button {
   justify-self: start;
-  min-height: 32px;
+  align-self: start;
+  min-width: 96px;
+  height: 38px;
+  min-height: 38px;
+  padding: 0 14px;
   border-color: #c7d2fe;
+  border-radius: 12px;
   background: var(--primary-50);
   color: var(--primary-600);
   font-size: 13px;
+  font-weight: 800;
+}
+
+.study-card button:disabled {
+  border-color: var(--border);
+  background: #f8fafc;
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 1;
 }
 
 .practice-quick-actions {
@@ -2011,6 +2025,8 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 }
 
 .training-hero,
+.training-advice,
+.training-plan-card,
 .training-summary-grid > div,
 .training-card,
 .training-tools {
@@ -2040,6 +2056,66 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .training-card p {
   margin: 0;
   color: var(--muted);
+}
+
+.training-advice {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  background: linear-gradient(135deg, #ffffff, #f8fafc);
+}
+
+.training-advice span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.training-advice b {
+  color: var(--primary-600);
+  font-size: 22px;
+  line-height: 1.25;
+}
+
+.training-advice small {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.training-plan-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px;
+  background: linear-gradient(135deg, #eef2ff, #ffffff);
+}
+
+.training-plan-card > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.training-plan-card span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.training-plan-card b {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.training-plan-card small {
+  color: var(--muted);
+}
+
+.training-plan-card button {
+  flex: 0 0 auto;
+  min-height: 38px;
 }
 
 .training-summary-grid,
@@ -2361,9 +2437,55 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 10px;
 }
 
+.plan-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .plan-summary {
   color: var(--muted);
   font-size: 14px;
+}
+
+.plan-today-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  background: #eef2ff;
+}
+
+.plan-today-card > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.plan-today-card span,
+.plan-today-card small {
+  color: var(--muted);
+}
+
+.plan-today-card b {
+  color: var(--primary-600);
+  font-size: 18px;
+}
+
+.plan-today-card em {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--primary-600);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
 }
 
 .plan-calendar {
@@ -2564,6 +2686,359 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .admin-data-card small {
   color: var(--muted);
   line-height: 1.6;
+}
+
+.bank-manager-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.bank-manager-card {
+  width: 100%;
+}
+
+.bank-manager-picker {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.bank-manager-picker label {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.bank-manager-picker select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.bank-manager-course-meta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-content: center;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #f8fafc;
+  padding: 10px 12px;
+}
+
+.bank-manager-course-meta b {
+  flex-basis: 100%;
+  color: var(--text);
+}
+
+.bank-manager-course-meta span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.bank-manager-actions {
+  grid-template-columns: repeat(6, minmax(0, auto));
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.bank-manager-metrics {
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+}
+
+.risk-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  border-radius: 999px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.risk-none,
+.risk-low {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.risk-medium {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.risk-high {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.risk-blocked {
+  background: #7f1d1d;
+  color: #fff;
+}
+
+.bank-manager-report-grid,
+.bank-manager-samples {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bank-manager-report-grid div,
+.bank-manager-samples div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #f8fafc;
+  padding: 11px 12px;
+}
+
+.bank-manager-report-grid b,
+.bank-manager-samples b {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.bank-manager-report-grid span,
+.bank-manager-samples span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.bank-manager-warnings,
+.bank-manager-ok,
+.bank-manager-empty {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #f8fafc;
+  padding: 11px 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.bank-manager-warnings {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.bank-manager-warnings p {
+  margin: 0;
+}
+
+.bank-manager-warnings p + p {
+  margin-top: 6px;
+}
+
+.bank-manager-ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.bank-editor-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.bank-editor-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.1fr) minmax(220px, 1.2fr) minmax(220px, 1.2fr) auto auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.bank-editor-filters label,
+.bank-editor-form label,
+.bank-editor-chapter-fields label {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.bank-editor-filters label > span,
+.bank-editor-form label > span,
+.bank-editor-chapter-fields label > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.bank-editor-filters select,
+.bank-editor-filters input,
+.bank-editor-form input,
+.bank-editor-form textarea,
+.bank-editor-chapter-fields input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--text);
+  font-size: 14px;
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+
+.bank-editor-filters select,
+.bank-editor-filters input,
+.bank-editor-chapter-fields input {
+  min-height: 44px;
+}
+
+.bank-editor-form textarea {
+  min-height: 92px;
+  resize: vertical;
+  line-height: 1.55;
+  font-family: inherit;
+}
+
+.bank-editor-filters select:focus,
+.bank-editor-filters input:focus,
+.bank-editor-form input:focus,
+.bank-editor-form textarea:focus,
+.bank-editor-chapter-fields input:focus {
+  border-color: var(--primary-500);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .14);
+  outline: none;
+}
+
+.bank-editor-check {
+  display: inline-flex !important;
+  grid-auto-flow: column;
+  grid-auto-columns: auto;
+  align-items: center;
+  justify-content: center;
+  align-self: end;
+  gap: 8px !important;
+  height: 44px;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.bank-editor-check input {
+  width: auto;
+  min-height: auto;
+  flex: 0 0 auto;
+}
+
+#bankEditorSearchBtn {
+  height: 44px;
+  min-height: 44px;
+}
+
+.bank-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 390px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.bank-editor-list-card,
+.bank-editor-detail-card {
+  min-height: 0;
+  height: clamp(320px, calc(100vh - 430px), 640px);
+  max-height: clamp(320px, calc(100vh - 430px), 640px);
+  overflow: auto;
+}
+
+.bank-editor-detail-card > .admin-data-card-head {
+  position: sticky;
+  top: -16px;
+  z-index: 3;
+  margin: -16px -16px 0;
+  padding: 16px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, .94);
+  backdrop-filter: blur(10px);
+}
+
+.bank-editor-list {
+  display: grid;
+  gap: 8px;
+  max-height: 680px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.bank-editor-result {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  min-height: 92px;
+  height: auto;
+  align-items: start;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  padding: 10px 11px;
+  color: var(--text);
+  text-align: left;
+  transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
+}
+
+.bank-editor-result:hover {
+  border-color: rgba(99, 102, 241, .35);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.bank-editor-result.active {
+  border-color: var(--primary-500);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .14);
+}
+
+.bank-editor-result b {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.bank-editor-result span,
+.bank-editor-result small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.bank-editor-result span {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.bank-editor-result small {
+  font-size: 12px;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.bank-editor-form {
+  display: grid;
+  gap: 12px;
+}
+
+.bank-editor-chapter-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .admin-table-wrap {
@@ -5623,6 +6098,16 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     padding: 14px;
   }
 
+  .training-plan-card,
+  .plan-today-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .training-plan-card button {
+    width: 100%;
+  }
+
   .training-hero strong {
     font-size: 24px;
   }
@@ -7506,6 +7991,78 @@ body:not(.admin-view).picker-open .question-pane {
 
   .print-choice-grid button {
     min-height: 86px;
+  }
+
+  .bank-manager-picker,
+  .bank-manager-report-grid,
+  .bank-manager-samples {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bank-manager-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+
+  .bank-manager-actions button {
+    width: 100%;
+  }
+
+  .bank-manager-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 8px;
+    margin-bottom: 10px;
+    padding: 8px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .admin-toolbar button,
+  .admin-toolbar #adminAddUserBtn,
+  .admin-toolbar .admin-view-btn[data-admin-view="banks"] {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: max-content;
+    min-height: 38px;
+    grid-column: auto;
+    padding: 0 13px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .bank-editor-filters,
+  .bank-editor-layout,
+  .bank-editor-chapter-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bank-editor-check {
+    justify-content: flex-start;
+  }
+
+  .bank-editor-list {
+    max-height: 360px;
+  }
+
+  .bank-editor-list-card,
+  .bank-editor-detail-card {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .bank-editor-detail-card > .admin-data-card-head {
+    position: static;
+    margin: 0;
+    padding: 0;
+    border-bottom: 0;
+    background: transparent;
+    backdrop-filter: none;
   }
 }
 
