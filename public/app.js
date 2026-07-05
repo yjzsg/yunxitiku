@@ -798,6 +798,8 @@ function normalizeStorage(data) {
     confidence: data.confidence && typeof data.confidence === "object" ? data.confidence : {},
     wrongReasons: data.wrongReasons && typeof data.wrongReasons === "object" ? data.wrongReasons : {},
     smartPractice: data.smartPractice && typeof data.smartPractice === "object" ? data.smartPractice : null,
+    trainingSessions: Array.isArray(data.trainingSessions) ? data.trainingSessions : [],
+    activeTrainingSessionId: data.activeTrainingSessionId || "",
     tags,
     tagLabels,
     settings: data.settings || {},
@@ -917,6 +919,8 @@ async function selectCourse(course, options = {}) {
     state.storage.smartPractice = null;
     state.smartPracticeFreshStart = false;
   }
+  const activeSession = activeTrainingSession();
+  if (activeSession && Number(activeSession.courseId || 0) !== Number(course.id)) state.storage.activeTrainingSessionId = "";
   state.currentChapter = null;
   state.currentIndex = -1;
   state.answers = { ...userCourseStore(course.id).answers };
@@ -1195,7 +1199,9 @@ async function loadQuestions() {
   }
 
   state.questions = items;
-  state.currentIndex = state.mode === "smart" && state.smartPracticeFreshStart ? 0 : findStartIndex(items, courseStore.lastSubjectId);
+  const activeSession = activeTrainingSession();
+  const sessionSubjectId = activeSession && (state.mode === "smart" || activeSession.mode === state.mode) ? activeSession.lastSubjectId || 0 : 0;
+  state.currentIndex = state.mode === "smart" && state.smartPracticeFreshStart ? 0 : findStartIndex(items, sessionSubjectId || courseStore.lastSubjectId);
   state.smartPracticeFreshStart = false;
   state.answerVisible = false;
   state.answerCardPage = Math.max(0, Math.floor(Math.max(0, state.currentIndex) / state.answerCardPageSize));
@@ -1236,10 +1242,16 @@ function orderItemsByIds(items, ids) {
 function getModeQuestionIds(courseStore) {
   if (state.mode === "smart") return getSmartPracticeIds(courseStore);
   if (state.mode === "wrong") {
-    return getWrongRecordsForCurrentCourse(courseStore)
+    let ids = getWrongRecordsForCurrentCourse(courseStore)
       .filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore))
       .map(([id]) => Number(id))
       .filter(Boolean);
+    const session = activeTrainingSession();
+    if (session?.mode === "wrong" && Array.isArray(session.ids) && session.ids.length) {
+      const allowed = new Set(session.ids.map(Number));
+      ids = ids.filter((id) => allowed.has(Number(id)));
+    }
+    return ids;
   }
   if (state.mode === "favorite") {
     return Object.entries(state.storage.favorite || {})
@@ -1291,16 +1303,111 @@ function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
   return ids.slice(0, 60);
 }
 
-function saveSmartPracticeSession(ids, sourceTitle = "智能推荐") {
+function normalizeSessionIds(ids) {
+  return [...new Set((ids || []).map(Number).filter(Boolean))];
+}
+
+function trainingSessionId(type = "training") {
+  return `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getTrainingSessionsForCourse(courseId = state.currentCourse?.id) {
+  const id = Number(courseId || 0);
+  return (state.storage.trainingSessions || [])
+    .filter((item) => Number(item.courseId || 0) === id)
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
+}
+
+function activeTrainingSession() {
+  const id = state.storage.activeTrainingSessionId || "";
+  if (!id) return null;
+  return (state.storage.trainingSessions || []).find((item) => item.id === id) || null;
+}
+
+function upsertTrainingSession(session, activate = true) {
+  state.storage.trainingSessions ||= [];
+  const ids = normalizeSessionIds(session.ids);
+  const now = nowText();
+  const oldIndex = state.storage.trainingSessions.findIndex((item) => item.id === session.id);
+  const old = oldIndex >= 0 ? state.storage.trainingSessions[oldIndex] : {};
+  const next = {
+    ...old,
+    ...session,
+    ids,
+    total: ids.length,
+    createdAt: old.createdAt || session.createdAt || now,
+    updatedAt: now,
+    status: session.status || old.status || "active",
+  };
+  if (oldIndex >= 0) state.storage.trainingSessions.splice(oldIndex, 1);
+  state.storage.trainingSessions.unshift(next);
+  state.storage.trainingSessions = state.storage.trainingSessions.slice(0, 80);
+  if (activate) state.storage.activeTrainingSessionId = next.id;
+  syncTrainingSessionStats(next);
+  scheduleSave();
+  return next;
+}
+
+function syncTrainingSessionStats(session = activeTrainingSession()) {
+  if (!session) return null;
+  const courseStore = peekCourseStore(session.courseId || state.currentCourse?.id);
+  const ids = normalizeSessionIds(session.ids);
+  const done = ids.filter((id) => courseStore.done?.[id] || normalizeAnswer(courseStore.answers?.[id]).length).length;
+  const verified = ids.filter((id) => courseStore.verified?.[id]).length;
+  const correct = ids.filter((id) => courseStore.correct?.[id]).length;
+  const wrong = ids.filter((id) => courseStore.wrong?.[id] || state.storage.wrong?.[id]).length;
+  session.total = ids.length;
+  session.done = done;
+  session.verified = verified;
+  session.correct = correct;
+  session.wrong = wrong;
+  session.rate = verified ? Math.round((correct / verified) * 100) : done ? Math.round((correct / done) * 100) : 0;
+  if (done >= ids.length && ids.length) {
+    session.status = "completed";
+    session.completedAt ||= nowText();
+  } else if (session.status === "completed" && done < ids.length) {
+    session.status = "active";
+    session.completedAt = "";
+  }
+  return session;
+}
+
+function syncCurrentTrainingSession(questionId = 0) {
+  const session = activeTrainingSession();
+  if (!session || Number(session.courseId || 0) !== Number(state.currentCourse?.id || 0)) return;
+  session.updatedAt = nowText();
+  if (questionId) session.lastSubjectId = Number(questionId);
+  session.currentIndex = Math.max(0, state.currentIndex);
+  syncTrainingSessionStats(session);
+}
+
+function clearActiveTrainingSession() {
+  state.storage.activeTrainingSessionId = "";
+  scheduleSave();
+}
+
+function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {}) {
+  const cleanIds = normalizeSessionIds(ids);
+  const session = upsertTrainingSession({
+    id: options.sessionId || trainingSessionId(options.type || "smart"),
+    type: options.type || "smart",
+    mode: "smart",
+    sourceTitle,
+    courseId: state.currentCourse?.id || 0,
+    courseName: state.currentCourse?.name || "",
+    ids: cleanIds,
+  });
   state.storage.smartPractice = {
+    sessionId: session.id,
     courseId: state.currentCourse?.id || 0,
     courseName: state.currentCourse?.name || "",
     sourceTitle,
-    ids: ids.map(Number).filter(Boolean),
-    createdAt: nowText(),
+    ids: cleanIds,
+    createdAt: session.createdAt,
   };
   state.smartPracticeFreshStart = true;
   scheduleSave();
+  return session;
 }
 
 function findStartIndex(items, subjectId) {
@@ -1314,7 +1421,10 @@ async function loadCurrentQuestion() {
   if (!item) return;
   item.detail = item.detail || await api(`/api/question?id=${item.id}`);
   if (state.mode === "exam") saveExamDraft();
-  else userCourseStore().lastSubjectId = item.id;
+  else {
+    userCourseStore().lastSubjectId = item.id;
+    syncCurrentTrainingSession(item.id);
+  }
   scheduleSave();
   state.answerVisible = state.submitted || isQuestionVerified(item.id);
   renderQuestion();
@@ -1669,7 +1779,9 @@ function renderWrongFilters() {
 
 function renderPracticeContextPanel() {
   let panel = $("practiceContextPanel");
-  if (state.mode !== "smart" || isAdmin() || !state.currentCourse) {
+  const activeSession = activeTrainingSession();
+  const showPanel = state.mode === "smart" || (state.mode === "wrong" && activeSession?.mode === "wrong");
+  if (!showPanel || isAdmin() || !state.currentCourse) {
     panel?.remove();
     return;
   }
@@ -1682,19 +1794,22 @@ function renderPracticeContextPanel() {
   const done = state.questions.filter((item) => hasAnswer(item.id)).length;
   const verified = state.questions.filter((item) => isQuestionVerified(item.id)).length;
   const smart = state.storage.smartPractice || {};
+  const session = syncTrainingSessionStats(activeSession);
+  const title = session?.sourceTitle || smart.sourceTitle || "智能练习";
+  const createdAt = session?.createdAt || smart.createdAt || "";
   panel.innerHTML = `
     <div>
-      <span>${escapeHtml(smart.sourceTitle || "智能练习")}</span>
-      <b>${state.questions.length} 题 · 已做 ${done} · 已确认 ${verified}</b>
-      <small>${escapeHtml(smart.courseName || state.currentCourse.name || "")}${smart.createdAt ? ` · 生成于 ${escapeHtml(smart.createdAt)}` : ""}</small>
+      <span>${escapeHtml(title)}</span>
+      <b>${state.questions.length} 题 · 已做 ${session?.done ?? done} · 已确认 ${session?.verified ?? verified} · 正确率 ${session?.rate ?? 0}%</b>
+      <small>${escapeHtml(session?.courseName || smart.courseName || state.currentCourse.name || "")}${createdAt ? ` · 生成于 ${escapeHtml(createdAt)}` : ""}</small>
     </div>
     <div class="practice-context-actions">
-      <button type="button" id="regenerateSmartBtn">重新生成</button>
-      <button type="button" id="exitSmartBtn">退出智能练习</button>
+      ${state.mode === "smart" ? `<button type="button" id="regenerateSmartBtn">重新生成</button>` : ""}
+      <button type="button" id="exitSmartBtn">${state.mode === "smart" ? "退出智能练习" : "退出本次复习"}</button>
     </div>
   `;
-  $("regenerateSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
-  $("exitSmartBtn").onclick = () => exitSmartPractice().catch((err) => toast(err.message));
+  if ($("regenerateSmartBtn")) $("regenerateSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
+  $("exitSmartBtn").onclick = () => exitTrainingSession().catch((err) => toast(err.message));
 }
 
 function renderSearchMatches() {
@@ -2012,6 +2127,7 @@ function markResult(q) {
     record.resolvedAt = "";
     state.storage.wrong[q.id] = record;
   }
+  syncCurrentTrainingSession(q.id);
 }
 
 function recordPracticeActivity(q, options = {}) {
@@ -2047,6 +2163,7 @@ function recordPracticeActivity(q, options = {}) {
   recomputeDailyActivity(day);
   trimDailyActivity();
   day.updatedAt = nowText();
+  syncCurrentTrainingSession(q.id);
 }
 
 function recomputeDailyActivity(day) {
@@ -2451,12 +2568,14 @@ function renderTraining() {
         <button type="button" id="trainingWrongBtn">查看错题本</button>
         <button type="button" id="trainingPracticeBtn">返回考试题库</button>
       </div>
+      ${renderTrainingHistoryPanel(courseStore)}
       ${renderLearningSignalPanel(courseStore)}
       ${renderReviewPlanPanel(stats, Object.keys(courseStore.wrong || {}).length, items)}
     </div>
   `;
   bindTrainingActions();
   bindStudyDashboardActions(courseStore);
+  bindTrainingHistoryActions();
   bindLearningSignalActions();
   bindReviewPlanActions(stats, Object.keys(courseStore.wrong || {}).length, items.length);
 }
@@ -2496,10 +2615,12 @@ function bindTrainingActions() {
   $("trainingSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
   $("trainingContinueSmartBtn").onclick = () => continueSmartPractice().catch((err) => toast(err.message));
   $("trainingWrongBtn").onclick = async () => {
+    clearActiveTrainingSession();
     state.mode = "wrong";
     await loadQuestions();
   };
   $("trainingPracticeBtn").onclick = async () => {
+    clearActiveTrainingSession();
     state.mode = "practice";
     await loadQuestions();
   };
@@ -2574,6 +2695,92 @@ function bindStudyDashboardActions(courseStore) {
   };
   const smartBtn = $("continueSmartBtn");
   if (smartBtn) smartBtn.onclick = () => continueSmartPractice().catch((err) => toast(err.message));
+}
+
+function renderTrainingHistoryPanel(courseStore) {
+  const sessions = getTrainingSessionsForCourse().map((session) => syncTrainingSessionStats(session)).filter(Boolean);
+  const recent = sessions.slice(0, 8);
+  const finished = sessions.filter((item) => item.status === "completed").length;
+  const active = sessions.filter((item) => item.status !== "completed").length;
+  const totalDone = sessions.reduce((sum, item) => sum + Number(item.done || 0), 0);
+  const totalCorrect = sessions.reduce((sum, item) => sum + Number(item.correct || 0), 0);
+  const totalVerified = sessions.reduce((sum, item) => sum + Number(item.verified || 0), 0);
+  const overallRate = totalVerified ? Math.round(totalCorrect / totalVerified * 100) : 0;
+  return `
+    <div class="training-history-panel">
+      <div class="training-history-head">
+        <div>
+          <span>个人训练看板</span>
+          <strong>${sessions.length} 套训练 · ${active} 套进行中 · ${finished} 套已完成</strong>
+        </div>
+        <b>${totalDone} 题 · ${overallRate}%</b>
+      </div>
+      ${recent.length ? `
+        <div class="training-history-list">
+          ${recent.map((session) => renderTrainingHistoryRow(session)).join("")}
+        </div>
+      ` : `<div class="muted">暂无训练记录，开始今日强化后会在这里沉淀自己的训练数据。</div>`}
+    </div>
+  `;
+}
+
+function renderTrainingHistoryRow(session) {
+  const total = Number(session.total || session.ids?.length || 0);
+  const done = Number(session.done || 0);
+  const progress = total ? Math.round(done / total * 100) : 0;
+  const isActive = state.storage.activeTrainingSessionId === session.id;
+  const canContinue = total && progress < 100;
+  return `
+    <section class="training-history-row ${isActive ? "active" : ""}">
+      <div class="training-history-main">
+        <span>${escapeHtml(session.sourceTitle || "智能训练")}</span>
+        <strong>${done}/${total} 题 · 正确率 ${Number(session.rate || 0)}% · 错题 ${Number(session.wrong || 0)}</strong>
+        <small>${escapeHtml(session.courseName || "")} · ${escapeHtml(session.createdAt || "")}${session.completedAt ? ` · 完成 ${escapeHtml(session.completedAt)}` : ""}</small>
+      </div>
+      <div class="training-history-progress" aria-hidden="true"><i style="width:${Math.max(2, progress)}%"></i></div>
+      <button type="button" data-training-session="${escapeHtml(session.id)}" ${canContinue ? "" : "disabled"}>${canContinue ? "继续" : "已完成"}</button>
+    </section>
+  `;
+}
+
+function bindTrainingHistoryActions() {
+  document.querySelectorAll("[data-training-session]").forEach((btn) => {
+    btn.onclick = () => continueTrainingSession(btn.dataset.trainingSession).catch((err) => toast(err.message));
+  });
+}
+
+async function continueTrainingSession(sessionId) {
+  const session = (state.storage.trainingSessions || []).find((item) => item.id === sessionId);
+  if (!session || Number(session.courseId || 0) !== Number(state.currentCourse?.id || 0)) {
+    toast("训练记录不属于当前科目");
+    return;
+  }
+  if (!Array.isArray(session.ids) || !session.ids.length) {
+    toast("训练记录没有题目");
+    return;
+  }
+  state.storage.activeTrainingSessionId = session.id;
+  resetGeneratedPracticeFilters();
+  if (session.mode === "wrong") {
+    state.mode = "wrong";
+    state.wrongFilters = { ...(state.wrongFilters || {}), review: session.type === "due" ? "due" : "all", status: "active" };
+    setCoursePicker(false);
+    await loadQuestions();
+    toast(`已继续${session.sourceTitle || "错题复习"}`);
+    return;
+  }
+  state.storage.smartPractice = {
+    sessionId: session.id,
+    courseId: session.courseId,
+    courseName: session.courseName || "",
+    sourceTitle: session.sourceTitle || "智能训练",
+    ids: normalizeSessionIds(session.ids),
+    createdAt: session.createdAt || nowText(),
+  };
+  state.mode = "smart";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast(`已继续${session.sourceTitle || "智能训练"}`);
 }
 
 function getTodayReport() {
@@ -2739,7 +2946,7 @@ async function startSignalPractice(type, label) {
       return;
     }
     resetGeneratedPracticeFilters();
-    saveSmartPracticeSession(match.ids.slice(0, 80), `收藏：${label}`);
+    saveSmartPracticeSession(match.ids.slice(0, 80), `收藏：${label}`, { type: "favorite" });
     state.mode = "smart";
     setCoursePicker(false);
     await loadQuestions();
@@ -2754,7 +2961,7 @@ async function startSignalPractice(type, label) {
     return;
   }
   resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(match.ids.slice(0, 80), `${type === "confidence" ? "信心" : "错因"}：${label}`);
+  saveSmartPracticeSession(match.ids.slice(0, 80), `${type === "confidence" ? "信心" : "错因"}：${label}`, { type });
   state.mode = "smart";
   setCoursePicker(false);
   await loadQuestions();
@@ -2771,7 +2978,7 @@ async function startSmartPractice(options = {}) {
     return;
   }
   resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids);
+  saveSmartPracticeSession(ids, "今日强化", { type: "smart" });
   state.mode = "smart";
   setCoursePicker(false);
   await loadQuestions();
@@ -2780,11 +2987,24 @@ async function startSmartPractice(options = {}) {
 
 async function exitSmartPractice() {
   if (state.mode !== "smart") return;
+  syncCurrentTrainingSession();
   state.mode = "practice";
   state.storage.smartPractice = null;
+  clearActiveTrainingSession();
   scheduleSave();
   await loadQuestions();
   toast("已退出智能练习");
+}
+
+async function exitTrainingSession() {
+  syncCurrentTrainingSession();
+  if (state.mode === "smart") {
+    await exitSmartPractice();
+    return;
+  }
+  clearActiveTrainingSession();
+  await loadQuestions();
+  toast("已退出本次训练");
 }
 
 async function continueSmartPractice() {
@@ -2794,6 +3014,20 @@ async function continueSmartPractice() {
     toast("没有可继续的智能练习");
     return;
   }
+  if (!smart.sessionId) {
+    const session = upsertTrainingSession({
+      id: trainingSessionId("smart"),
+      type: "smart",
+      mode: "smart",
+      sourceTitle: smart.sourceTitle || "智能训练",
+      courseId: state.currentCourse.id,
+      courseName: state.currentCourse.name || "",
+      ids: smart.ids,
+      createdAt: smart.createdAt || nowText(),
+    });
+    smart.sessionId = session.id;
+  }
+  if (smart.sessionId) state.storage.activeTrainingSessionId = smart.sessionId;
   resetGeneratedPracticeFilters();
   state.mode = "smart";
   setCoursePicker(false);
@@ -2803,7 +3037,24 @@ async function continueSmartPractice() {
 
 async function startDueWrongReview() {
   if (!state.currentCourse) return;
+  const dueIds = getWrongRecordsForCurrentCourse(userCourseStore())
+    .filter(([, item]) => isReviewDue(item) && !item.resolved)
+    .map(([id]) => Number(id))
+    .filter(Boolean);
+  if (!dueIds.length) {
+    toast("今天没有到期错题");
+    return;
+  }
   resetGeneratedPracticeFilters();
+  upsertTrainingSession({
+    id: trainingSessionId("due"),
+    type: "due",
+    mode: "wrong",
+    sourceTitle: "今日错题复习",
+    courseId: state.currentCourse.id,
+    courseName: state.currentCourse.name || "",
+    ids: dueIds,
+  });
   state.mode = "wrong";
   state.wrongFilters = { ...(state.wrongFilters || {}), review: "due", status: "active" };
   setCoursePicker(false);
@@ -2820,7 +3071,7 @@ async function startSimilarWrongPractice() {
     return;
   }
   resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids.slice(0, 80), "相似错题重练");
+  saveSmartPracticeSession(ids.slice(0, 80), "相似错题重练", { type: "similar" });
   state.mode = "smart";
   setCoursePicker(false);
   await loadQuestions();
@@ -2872,7 +3123,7 @@ async function startSprintPractice() {
     return;
   }
   resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids.slice(0, 100), "考前冲刺");
+  saveSmartPracticeSession(ids.slice(0, 100), "考前冲刺", { type: "sprint" });
   state.mode = "smart";
   setCoursePicker(false);
   await loadQuestions();
@@ -4775,6 +5026,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
     }
     if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
     if (state.mode === "exam" && nextMode !== "exam") stopExamTimer();
+    if (["practice", "wrong", "favorite"].includes(nextMode)) clearActiveTrainingSession();
     state.mode = nextMode;
     if (state.mode === "practice") setCoursePicker(true);
     else setCoursePicker(false);

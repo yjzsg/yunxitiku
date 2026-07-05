@@ -2112,6 +2112,109 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   padding: 12px;
 }
 
+.training-history-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow-xs);
+}
+
+.training-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.training-history-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.training-history-head span,
+.training-history-main span {
+  color: var(--text);
+  font-weight: 850;
+}
+
+.training-history-head strong {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.training-history-head b {
+  flex: 0 0 auto;
+  color: var(--primary-600);
+  font-size: 20px;
+}
+
+.training-history-list {
+  display: grid;
+  gap: 8px;
+}
+
+.training-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f8fafc;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.training-history-row:hover {
+  transform: translateY(-1px);
+  border-color: #c7d2fe;
+  box-shadow: var(--shadow-xs);
+}
+
+.training-history-row.active {
+  border-color: #a5b4fc;
+  background: #eef2ff;
+}
+
+.training-history-main {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.training-history-main strong,
+.training-history-main small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-history-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.training-history-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), #22c55e);
+}
+
+.training-history-row button {
+  min-height: 34px;
+  padding: 6px 12px;
+}
+
 .signal-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5537,6 +5640,25 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .training-tools {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .training-history-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .training-history-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .training-history-main strong,
+  .training-history-main small {
+    white-space: normal;
+  }
+
+  .training-history-row button {
+    width: 100%;
   }
 
   :root {
