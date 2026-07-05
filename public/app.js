@@ -47,6 +47,7 @@
   examSelectedChapters: null,
   analysisExpandedChapters: new Set(),
   chapterAutoExpanded: false,
+  smartPracticeFreshStart: false,
   printAfterRender: false,
   lastAnimatedQuestionId: 0,
   lastMarkedQuestionId: 0,
@@ -1154,6 +1155,7 @@ async function loadQuestions() {
   }
 
   let items = await api(`/api/questions?${params}`);
+  if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
   const shuffleKey = JSON.stringify({
     courseId: state.currentCourse.id,
@@ -1185,7 +1187,8 @@ async function loadQuestions() {
   }
 
   state.questions = items;
-  state.currentIndex = findStartIndex(items, courseStore.lastSubjectId);
+  state.currentIndex = state.mode === "smart" && state.smartPracticeFreshStart ? 0 : findStartIndex(items, courseStore.lastSubjectId);
+  state.smartPracticeFreshStart = false;
   state.answerVisible = false;
   state.answerCardPage = Math.max(0, Math.floor(Math.max(0, state.currentIndex) / state.answerCardPageSize));
   renderAll();
@@ -1217,6 +1220,11 @@ function intersectIdFilters(a, b) {
   return a.map(Number).filter((id) => set.has(id));
 }
 
+function orderItemsByIds(items, ids) {
+  const order = new Map((ids || []).map((id, index) => [Number(id), index]));
+  return items.slice().sort((a, b) => (order.get(Number(a.id)) ?? Number.MAX_SAFE_INTEGER) - (order.get(Number(b.id)) ?? Number.MAX_SAFE_INTEGER));
+}
+
 function getModeQuestionIds(courseStore) {
   if (state.mode === "smart") return getSmartPracticeIds(courseStore);
   if (state.mode === "wrong") {
@@ -1244,33 +1252,34 @@ function getSmartPracticeIds(courseStore = userCourseStore()) {
   return ids;
 }
 
-function buildSmartPracticeIds(courseStore = userCourseStore()) {
+function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
   const ids = [];
+  const randomize = !!options.randomize;
+  const prepare = (items) => randomize ? shuffleItems(items) : items;
   const pushUnique = (id) => {
     const n = Number(id);
     if (n && !ids.includes(n)) ids.push(n);
   };
+  const pushMany = (items, limit = items.length) => {
+    prepare(items).slice(0, limit).forEach(pushUnique);
+  };
   const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
-  getWrongRecordsForCurrentCourse(courseStore)
+  pushMany(getWrongRecordsForCurrentCourse(courseStore)
     .filter(([, item]) => isReviewDue(item) || Number(item.count || 0) >= 2)
-    .slice(0, 20)
-    .forEach(([id]) => pushUnique(id));
-  Object.keys(courseStore.wrong || {}).forEach(pushUnique);
-  Object.keys(courseStore.done || {})
-    .filter((id) => !courseStore.correct?.[id])
-    .forEach(pushUnique);
+    .map(([id]) => id), 20);
+  pushMany(Object.keys(courseStore.wrong || {}));
+  pushMany(Object.keys(courseStore.done || {})
+    .filter((id) => !courseStore.correct?.[id]));
   getWeakChapterRows(courseStore, allItems).slice(0, 5).forEach((chapter) => {
-    allItems
+    pushMany(allItems
       .filter((item) => chapterPathForId(item.chapterId).slice(0, 2).some((node) => Number(node.id) === Number(chapter.id)))
       .filter((item) => !courseStore.correct?.[item.id])
-      .slice(0, 10)
-      .forEach((item) => pushUnique(item.id));
+      .map((item) => item.id), 10);
   });
   if (ids.length >= 30) return ids.slice(0, 60);
-  allItems
+  pushMany(allItems
     .filter((item) => !courseStore.done?.[item.id])
-    .slice(0, 60 - ids.length)
-    .forEach((item) => pushUnique(item.id));
+    .map((item) => item.id), 60 - ids.length);
   return ids.slice(0, 60);
 }
 
@@ -1282,6 +1291,7 @@ function saveSmartPracticeSession(ids, sourceTitle = "智能推荐") {
     ids: ids.map(Number).filter(Boolean),
     createdAt: nowText(),
   };
+  state.smartPracticeFreshStart = true;
   scheduleSave();
 }
 
@@ -2720,7 +2730,7 @@ async function startSmartPractice(options = {}) {
   if (!state.currentCourse) return;
   if (!state.analysisQuestions.length) await loadAnalysisQuestions();
   if (options.force) state.storage.smartPractice = null;
-  const ids = buildSmartPracticeIds(userCourseStore());
+  const ids = buildSmartPracticeIds(userCourseStore(), { randomize: !!options.force });
   if (!ids.length) {
     toast("暂无可生成的智能练习");
     return;
