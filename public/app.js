@@ -37,6 +37,8 @@
   adminFailedCount: 0,
   adminView: "users",
   adminBankQuery: "",
+  adminBankUpdateMode: "",
+  adminBankUpdateModePromise: null,
   adminDataStatus: null,
   exam: null,
   examTimer: null,
@@ -910,6 +912,10 @@ async function selectCourse(course, options = {}) {
   }
   const restoreChapterId = options.restoreChapter ? Number(state.storage.profile.lastChapterId || 0) : 0;
   state.currentCourse = course;
+  if (state.storage.smartPractice && Number(state.storage.smartPractice.courseId || 0) !== Number(course.id)) {
+    state.storage.smartPractice = null;
+    state.smartPracticeFreshStart = false;
+  }
   state.currentChapter = null;
   state.currentIndex = -1;
   state.answers = { ...userCourseStore(course.id).answers };
@@ -1075,10 +1081,10 @@ async function selectChapter(chapter) {
   scheduleSave();
 }
 
-async function loadTypes() {
+async function loadTypes(options = {}) {
   if (!state.currentCourse) return;
   const params = new URLSearchParams({ courseId: state.currentCourse.id });
-  applyChapterParams(params);
+  if (!options.ignoreChapter) applyChapterParams(params);
   state.types = await api(`/api/types?${params}`);
   $("typeSelect").innerHTML = `<option value="">全部题型</option>` + state.types.map((t) =>
     `<option value="${t.id}">${escapeHtml(t.name || "题型")} (${t.questionCount})</option>`
@@ -1129,6 +1135,7 @@ async function loadQuestions() {
   state.answerCardPage = 0;
   const orderValue = $("orderSelect").value;
   const courseStore = userCourseStore();
+  if (state.mode !== "exam") state.answers = { ...courseStore.answers };
   const effectiveLimit = effectiveQuestionLimit();
   const params = new URLSearchParams({
     courseId: state.currentCourse.id,
@@ -1911,6 +1918,13 @@ function saveSubjectiveAnswer(q, answer) {
   const wasFilled = !!normalizeAnswer(previous);
   const isFilled = !!normalizeAnswer(answer);
   state.answers[q.id] = answer;
+  if (state.mode === "exam") {
+    if (wasFilled !== isFilled) state.lastMarkedQuestionId = q.id;
+    renderVerifyModeControls();
+    renderAnswerCardPage({ updateNav: false });
+    updateStats();
+    return;
+  }
   const courseStore = userCourseStore();
   courseStore.answers[q.id] = answer;
   resetQuestionVerification(q.id);
@@ -1937,6 +1951,11 @@ function chooseOption(q, label) {
   selected.has(label) ? selected.delete(label) : selected.add(label);
   const answer = [...selected].sort().join("");
   state.answers[q.id] = answer;
+  if (state.mode === "exam") {
+    if (answer !== previous) state.lastMarkedQuestionId = q.id;
+    renderQuestion();
+    return;
+  }
   const courseStore = userCourseStore();
   courseStore.answers[q.id] = answer;
   resetQuestionVerification(q.id);
@@ -2696,6 +2715,16 @@ function bindLearningSignalActions() {
   });
 }
 
+function resetGeneratedPracticeFilters() {
+  state.currentChapter = null;
+  state.storage.profile.lastChapterId = 0;
+  state.tagFilter = "";
+  if ($("questionSearch")) $("questionSearch").value = "";
+  if ($("typeSelect")) $("typeSelect").value = "";
+  if ($("tagSelect")) $("tagSelect").value = "";
+  if (state.chapters.length) renderChapters();
+}
+
 async function startSignalPractice(type, label) {
   if (!state.currentCourse || !label) return;
   const courseStore = userCourseStore();
@@ -2705,6 +2734,7 @@ async function startSignalPractice(type, label) {
       toast("当前分组没有收藏题");
       return;
     }
+    resetGeneratedPracticeFilters();
     saveSmartPracticeSession(match.ids.slice(0, 80), `收藏：${label}`);
     state.mode = "smart";
     setCoursePicker(false);
@@ -2719,6 +2749,7 @@ async function startSignalPractice(type, label) {
     toast("当前科目没有匹配题目");
     return;
   }
+  resetGeneratedPracticeFilters();
   saveSmartPracticeSession(match.ids.slice(0, 80), `${type === "confidence" ? "信心" : "错因"}：${label}`);
   state.mode = "smart";
   setCoursePicker(false);
@@ -2735,6 +2766,7 @@ async function startSmartPractice(options = {}) {
     toast("暂无可生成的智能练习");
     return;
   }
+  resetGeneratedPracticeFilters();
   saveSmartPracticeSession(ids);
   state.mode = "smart";
   setCoursePicker(false);
@@ -2758,6 +2790,7 @@ async function continueSmartPractice() {
     toast("没有可继续的智能练习");
     return;
   }
+  resetGeneratedPracticeFilters();
   state.mode = "smart";
   setCoursePicker(false);
   await loadQuestions();
@@ -2766,6 +2799,7 @@ async function continueSmartPractice() {
 
 async function startDueWrongReview() {
   if (!state.currentCourse) return;
+  resetGeneratedPracticeFilters();
   state.mode = "wrong";
   state.wrongFilters = { ...(state.wrongFilters || {}), review: "due", status: "active" };
   setCoursePicker(false);
@@ -2781,6 +2815,7 @@ async function startSimilarWrongPractice() {
     toast("暂无可重练的相似错题");
     return;
   }
+  resetGeneratedPracticeFilters();
   saveSmartPracticeSession(ids.slice(0, 80), "相似错题重练");
   state.mode = "smart";
   setCoursePicker(false);
@@ -2832,6 +2867,7 @@ async function startSprintPractice() {
     toast("暂无可生成的冲刺题");
     return;
   }
+  resetGeneratedPracticeFilters();
   saveSmartPracticeSession(ids.slice(0, 100), "考前冲刺");
   state.mode = "smart";
   setCoursePicker(false);
@@ -3317,6 +3353,7 @@ function renderAdminRows(rows, failedCount = 0) {
 }
 
 function bindAdminBankUpdateButtons() {
+  ensureAdminBankUpdateMode().catch(() => {});
   document.querySelectorAll("[data-update-course]").forEach((btn) => {
     btn.onclick = () => {
       updateQuestionBank(Number(btn.dataset.updateCourse || 0), btn).catch((err) => {
@@ -3325,6 +3362,25 @@ function bindAdminBankUpdateButtons() {
       });
     };
   });
+}
+
+async function ensureAdminBankUpdateMode() {
+  if (state.adminBankUpdateMode || state.user.toLowerCase() !== "admin") return state.adminBankUpdateMode;
+  if (state.adminBankUpdateModePromise) return state.adminBankUpdateModePromise;
+  const sample = (state.adminCourses || []).find((course) => !!course.owned && Number(course.questionCount || 0) > 0);
+  if (!sample) return "";
+  state.adminBankUpdateModePromise = (async () => {
+    const query = new URLSearchParams({ user: state.user, courseId: String(sample.id), dryRun: "1" });
+    const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
+    state.adminBankUpdateMode = result.reserved || result.mode === "upload" ? "upload" : "pull";
+    refreshAdminBankTable();
+    return state.adminBankUpdateMode;
+  })();
+  try {
+    return await state.adminBankUpdateModePromise;
+  } finally {
+    state.adminBankUpdateModePromise = null;
+  }
 }
 
 function renderAdminUserTable(rows) {
@@ -3501,7 +3557,8 @@ function getFilteredAdminCourses() {
 function renderAdminBankSummary(visibleCount = getFilteredAdminCourses().length) {
   const courses = state.adminCourses || [];
   const canUpdateCount = courses.filter((course) => !!course.owned && Number(course.questionCount || 0) > 0).length;
-  return `共 ${courses.length} 门 · 可拉取更新 ${canUpdateCount} 门 · 当前显示 ${visibleCount} 门`;
+  const modeText = state.adminBankUpdateMode === "upload" ? "上传更新" : state.adminBankUpdateMode === "pull" ? "拉取更新" : "可更新";
+  return `共 ${courses.length} 门 · ${modeText} ${canUpdateCount} 门 · 当前显示 ${visibleCount} 门`;
 }
 
 function renderAdminBankRows(visibleCourses) {
@@ -3509,6 +3566,7 @@ function renderAdminBankRows(visibleCourses) {
     const hasLocal = Number(course.questionCount || 0) > 0;
     const canUpdate = !!course.owned && hasLocal;
     const status = !course.owned ? "未授权" : hasLocal ? "已授权 / 已下载" : "已授权 / 无本地题库";
+    const updateText = state.adminBankUpdateMode === "upload" ? "上传更新" : state.adminBankUpdateMode === "pull" ? "拉取更新" : "更新题库";
     return `
       <tr class="${canUpdate ? "" : "muted-row"}">
         <td><b>${escapeHtml(course.name)}</b><span class="admin-course-id">ID ${course.id}</span></td>
@@ -3517,7 +3575,7 @@ function renderAdminBankRows(visibleCourses) {
         <td>${escapeHtml(formatRelativeTime(course.changedAt))}<span>${escapeHtml(course.changedAt || "未记录")}</span></td>
         <td><span class="status-pill ${canUpdate ? "active" : "disabled"}">${escapeHtml(status)}</span></td>
         <td>
-          <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? "拉取更新" : "不可更新"}</button>
+          <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? updateText : "不可更新"}</button>
         </td>
       </tr>
     `;
@@ -3830,12 +3888,13 @@ async function submitPaper(autoSubmit = false) {
 
 function resetPractice() {
   stopExamTimer();
-  if (state.mode === "exam") state.exam = null;
+  const resettingExam = state.mode === "exam";
+  if (resettingExam) state.exam = null;
   state.answers = {};
   state.submitted = false;
   state.answerVisible = false;
-  if (state.currentCourse) userCourseStore().answers = {};
-  clearVerifiedForCourse();
+  if (state.currentCourse && !resettingExam) userCourseStore().answers = {};
+  if (!resettingExam) clearVerifiedForCourse();
   scheduleSave();
   if (!state.questions.length) {
     if (state.mode === "exam") renderExamHome();
@@ -4079,7 +4138,6 @@ async function startExamPaper() {
     submittedAt: null,
     result: null,
   };
-  userCourseStore().answers = {};
   startExamTimer();
   renderAll();
   await loadCurrentQuestion();
@@ -4223,9 +4281,26 @@ function hideToast() {
 
 async function updateQuestionBank(courseId = 0, btn = null) {
   if (state.user.toLowerCase() !== "admin") return;
-  if (!confirm("确定从服务器拉取并更新该题库吗？更新完成后会重新导出题库数据。")) return;
+  if (!courseId) {
+    toast("请选择要更新的题库");
+    return;
+  }
+  if (!state.adminBankUpdateMode) {
+    toast("正在识别更新方式，请稍后再点一次");
+    ensureAdminBankUpdateMode().catch((err) => toast(err.message));
+    return;
+  }
+  if (state.adminBankUpdateMode === "upload") {
+    await uploadCourseQuestionBank(courseId, btn);
+    return;
+  }
   const query = new URLSearchParams({ user: state.user });
-  if (courseId) query.set("courseId", String(courseId));
+  query.set("courseId", String(courseId));
+  if (!confirm("确定从服务器拉取并更新该题库吗？更新完成后会重新导出题库数据。")) return;
+  await pullQuestionBankUpdate(query, btn);
+}
+
+async function pullQuestionBankUpdate(query, btn = null) {
   const oldText = btn?.textContent || "";
   if (btn) {
     btn.disabled = true;
@@ -4235,9 +4310,48 @@ async function updateQuestionBank(courseId = 0, btn = null) {
     .finally(() => {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = oldText || "拉取更新";
+        btn.textContent = oldText || "更新题库";
       }
     });
+  await handleQuestionBankUpdateResult(result);
+}
+
+async function uploadCourseQuestionBank(courseId, btn = null) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".zip";
+  input.className = "hidden";
+  document.body.appendChild(input);
+  try {
+    const file = await new Promise((resolve) => {
+      input.onchange = () => resolve(input.files?.[0] || null);
+      input.click();
+    });
+    if (!file) return;
+    if (!confirm("确定上传并更新该题库吗？系统会匹配压缩包内相同 ID 的题库，并先自动备份当前数据。")) return;
+    const oldText = btn?.textContent || "";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "上传中...";
+    }
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const query = new URLSearchParams({ user: state.user, courseId: String(courseId) });
+      const result = await api(`/api/admin/update-bank?${query}`, { method: "POST", body: form });
+      await handleQuestionBankUpdateResult(result);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || "更新题库";
+      }
+    }
+  } finally {
+    input.remove();
+  }
+}
+
+async function handleQuestionBankUpdateResult(result) {
   if (result.reserved || result.mode === "upload") {
     toast(result.message || "当前部署使用上传题库包更新");
     if (isAdmin() && state.adminView === "banks") renderAdminRows(state.adminRows, state.adminFailedCount);
@@ -4450,6 +4564,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       state.currentIndex = -1;
       state.submitted = false;
       state.answerVisible = false;
+      await loadTypes({ ignoreChapter: true });
       renderAnswerCard();
       updateStats();
       renderExamHome();
@@ -4462,6 +4577,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
         ? `<strong>正在生成智能训练</strong><span>正在读取错题、薄弱章节和今日练习建议。</span>`
         : `<strong>正在生成进度分析</strong><span>正在读取当前科目的章节、题型和做题记录。</span>`;
     }
+    if (!["exam", "progress", "training"].includes(state.mode)) await loadTypes();
     await loadQuestions();
   };
 });
