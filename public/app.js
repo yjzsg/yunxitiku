@@ -126,6 +126,17 @@ function isSubjective(q) {
   return !(q?.options || []).length;
 }
 
+function isMultiChoice(q) {
+  const typeText = String(q?.type || "");
+  if (/多选|多项|不定项/.test(typeText)) return true;
+  if (/单选|判断/.test(typeText)) return false;
+  return normalizeAnswer(q?.answer).length > 1;
+}
+
+function shouldAutoVerifyInstant(q) {
+  return currentVerifyMode() === "instant" && !isSubjective(q) && !isMultiChoice(q);
+}
+
 function normalizeAnswer(value) {
   return String(value || "").trim().replace(/[、,，\s]/g, "");
 }
@@ -586,6 +597,14 @@ function ensureVerifyModeControl() {
   btn.title = "切换刷题验证方式";
   const submitBtn = $("submitBtn");
   submitBtn?.parentNode.insertBefore(btn, submitBtn);
+
+  const confirmBtn = document.createElement("button");
+  confirmBtn.id = "confirmAnswerBtn";
+  confirmBtn.type = "button";
+  confirmBtn.className = "confirm-answer-btn hidden";
+  confirmBtn.textContent = "确认答案";
+  confirmBtn.title = "确认当前题并显示答案";
+  submitBtn?.parentNode.insertBefore(confirmBtn, submitBtn);
 }
 
 function setMobileMenu(open) {
@@ -1216,8 +1235,12 @@ async function loadQuestions() {
 
   state.questions = items;
   const activeSession = activeTrainingSession();
-  const sessionSubjectId = activeSession && (state.mode === "smart" || activeSession.mode === state.mode) ? activeSession.lastSubjectId || 0 : 0;
-  state.currentIndex = state.mode === "smart" && state.smartPracticeFreshStart ? 0 : findStartIndex(items, sessionSubjectId || courseStore.lastSubjectId);
+  const sessionMatchesMode = activeSession && (state.mode === "smart" || activeSession.mode === state.mode);
+  state.currentIndex = state.mode === "smart" && state.smartPracticeFreshStart
+    ? 0
+    : sessionMatchesMode
+      ? findTrainingStartIndex(items, activeSession, courseStore.lastSubjectId)
+      : findStartIndex(items, courseStore.lastSubjectId);
   state.smartPracticeFreshStart = false;
   state.answerVisible = false;
   state.answerCardPage = Math.max(0, Math.floor(Math.max(0, state.currentIndex) / state.answerCardPageSize));
@@ -1359,6 +1382,15 @@ function activeTrainingSession() {
   return (state.storage.trainingSessions || []).find((item) => item.id === id) || null;
 }
 
+function findActiveTrainingSessionByType(type, courseId = state.currentCourse?.id) {
+  const sessions = getTrainingSessionsForCourse(courseId);
+  return sessions.find((session) => {
+    if (session.type !== type) return false;
+    syncTrainingSessionStats(session);
+    return session.status !== "completed" && normalizeSessionIds(session.ids).length;
+  }) || null;
+}
+
 function upsertTrainingSession(session, activate = true) {
   state.storage.trainingSessions ||= [];
   const ids = normalizeSessionIds(session.ids);
@@ -1460,6 +1492,18 @@ function findStartIndex(items, subjectId) {
   if (!items.length) return -1;
   const index = items.findIndex((item) => item.id === subjectId);
   return index >= 0 ? index : 0;
+}
+
+function findTrainingStartIndex(items, session, fallbackSubjectId = 0) {
+  if (!items.length) return -1;
+  const subjectId = Number(session?.lastSubjectId || fallbackSubjectId || 0);
+  if (subjectId) {
+    const bySubject = items.findIndex((item) => Number(item.id) === subjectId);
+    if (bySubject >= 0) return bySubject;
+  }
+  const index = Number(session?.currentIndex);
+  if (Number.isFinite(index) && index >= 0 && index < items.length) return index;
+  return findStartIndex(items, fallbackSubjectId);
 }
 
 async function loadCurrentQuestion() {
@@ -2110,7 +2154,7 @@ function saveSubjectiveAnswer(q, answer) {
   if (wasFilled !== isFilled) state.lastMarkedQuestionId = q.id;
   if (normalizeAnswer(answer)) recordPracticeActivity(q);
   if (state.submitted && normalizeAnswer(answer) && !isSubjective(q)) markResult(q);
-  if (currentVerifyMode() === "instant" && normalizeAnswer(answer)) {
+  if (shouldAutoVerifyInstant(q) && normalizeAnswer(answer)) {
     verifyQuestionResult(q);
     state.answerVisible = true;
   }
@@ -2123,7 +2167,7 @@ function saveSubjectiveAnswer(q, answer) {
 function chooseOption(q, label) {
   const previous = state.answers[q.id] || "";
   const selected = new Set((state.answers[q.id] || "").split("").filter(Boolean));
-  const multi = (q.answer || "").length > 1;
+  const multi = isMultiChoice(q);
   if (!multi) selected.clear();
   selected.has(label) ? selected.delete(label) : selected.add(label);
   const answer = [...selected].sort().join("");
@@ -2142,7 +2186,7 @@ function chooseOption(q, label) {
   if (answer !== previous) state.lastMarkedQuestionId = q.id;
   if (answer) recordPracticeActivity(q);
   if (state.submitted && state.answers[q.id]) markResult(q);
-  if (answer && currentVerifyMode() === "instant") {
+  if (answer && shouldAutoVerifyInstant(q)) {
     verifyQuestionResult(q);
     state.answerVisible = true;
   }
@@ -2461,9 +2505,21 @@ function renderVerifyModeControls() {
     modeBtn.setAttribute("aria-pressed", String(state.verifyMode !== "paper"));
     modeBtn.title = {
       paper: "考试式练习：提交答卷后统一显示对错",
-      instant: "立即反馈：选择答案后立刻显示答案和解析",
+      instant: "立即反馈：单选/判断选择后反馈，多选选完后点确认答案",
       review: "背题模式：先看答案，再做信心、错因和笔记标记",
     }[state.verifyMode] || "";
+  }
+  const confirmBtn = $("confirmAnswerBtn");
+  if (confirmBtn) {
+    const q = state.questions[state.currentIndex]?.detail;
+    const needsConfirm = !!q && state.verifyMode === "instant" && !isExam && !isAdmin() && (isMultiChoice(q) || isSubjective(q));
+    const verified = needsConfirm && isQuestionVerified(q.id);
+    confirmBtn.classList.toggle("hidden", !needsConfirm);
+    confirmBtn.disabled = !!verified;
+    confirmBtn.textContent = verified ? "已确认" : "确认答案";
+    confirmBtn.title = isSubjective(q)
+      ? "确认后显示参考答案，主观题需人工核对"
+      : "选完全部答案后确认并显示结果";
   }
   const submitBtn = $("submitBtn");
   if (submitBtn) {
@@ -2604,6 +2660,7 @@ function renderTraining() {
   const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
   const similarPreview = previewPracticePlan("similar", courseStore, previewContext);
   const sprintPreview = previewPracticePlan("sprint", courseStore, previewContext);
+  const activeSmartSession = findActiveTrainingSessionByType("smart");
   const hasReviewPlan = !!activeReviewPlan().examDate;
   const planOverview = hasReviewPlan
     ? buildReviewPlanOverview(stats, Object.keys(courseStore.wrong || {}).length, items)
@@ -2629,7 +2686,7 @@ function renderTraining() {
           <strong>智能训练</strong>
           <p>${escapeHtml(state.currentCourse?.name || "当前科目")} · 今日已练 ${today.total} 题 · 确认正确率 ${today.rate}%</p>
         </div>
-        <button class="primary-action" id="trainingSmartBtn" type="button">开始今日强化</button>
+        <button class="primary-action" id="trainingSmartBtn" type="button">${activeSmartSession ? "继续今日强化" : "开始今日强化"}</button>
       </div>
       <div class="training-advice">
         <span>今日建议</span>
@@ -2708,7 +2765,7 @@ function previewPracticePlan(type, courseStore, context = {}) {
 }
 
 function bindTrainingActions() {
-  $("trainingSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
+  $("trainingSmartBtn").onclick = () => startSmartPractice().catch((err) => toast(err.message));
   $("trainingContinueSmartBtn").onclick = () => continueSmartPractice().catch((err) => toast(err.message));
   if ($("trainingPlanBtn")) $("trainingPlanBtn").onclick = () => startTodayReviewPlan().catch((err) => toast(err.message));
   $("trainingDashboardBtn").onclick = async () => {
@@ -2730,7 +2787,7 @@ function bindTrainingActions() {
   document.querySelectorAll("[data-training-action]").forEach((btn) => {
     btn.onclick = () => {
       const action = btn.dataset.trainingAction;
-      if (action === "smart") startSmartPractice({ force: true }).catch((err) => toast(err.message));
+      if (action === "smart") startSmartPractice().catch((err) => toast(err.message));
       if (action === "due") startDueWrongReview().catch((err) => toast(err.message));
       if (action === "similar") startSimilarWrongPractice().catch((err) => toast(err.message));
       if (action === "sprint") startSprintPractice().catch((err) => toast(err.message));
@@ -3073,6 +3130,13 @@ async function startSignalPractice(type, label) {
 
 async function startSmartPractice(options = {}) {
   if (!state.currentCourse) return;
+  if (!options.force) {
+    const activeSmart = findActiveTrainingSessionByType("smart");
+    if (activeSmart) {
+      await continueTrainingSession(activeSmart.id);
+      return;
+    }
+  }
   if (!state.analysisQuestions.length) await loadAnalysisQuestions();
   if (options.force) state.storage.smartPractice = null;
   const ids = buildSmartPracticeIds(userCourseStore(), { randomize: !!options.force });
@@ -5052,6 +5116,48 @@ async function moveQuestion(delta) {
   await loadCurrentQuestion();
 }
 
+function isSwipeIgnoredTarget(target) {
+  return !!target?.closest?.("button, input, textarea, select, label, a, .answer-card-wrap, .question-tag-panel, .practice-context-panel, .modal");
+}
+
+function canSwipeQuestions() {
+  return !isAdmin()
+    && !state.pickerOpen
+    && state.questions.length > 1
+    && state.currentIndex >= 0
+    && !["training", "progress"].includes(state.mode)
+    && !$("questionBody")?.classList.contains("hidden");
+}
+
+function bindQuestionSwipe() {
+  const view = $("questionView");
+  if (!view || view.dataset.swipeBound) return;
+  view.dataset.swipeBound = "1";
+  view.addEventListener("touchstart", (event) => {
+    const touch = event.changedTouches?.[0];
+    if (!touch || isSwipeIgnoredTarget(event.target) || !canSwipeQuestions()) {
+      state.touchStart = null;
+      return;
+    }
+    state.touchStart = {
+      x: touch.clientX,
+      y: touch.clientY,
+      at: Date.now(),
+    };
+  }, { passive: true });
+  view.addEventListener("touchend", (event) => {
+    const start = state.touchStart;
+    state.touchStart = null;
+    const touch = event.changedTouches?.[0];
+    if (!start || !touch || !canSwipeQuestions()) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    const elapsed = Date.now() - start.at;
+    if (elapsed > 650 || Math.abs(dx) < 58 || Math.abs(dx) < Math.abs(dy) * 1.25 || Math.abs(dy) > 90) return;
+    moveQuestion(dx < 0 ? 1 : -1).catch((err) => toast(err.message));
+  }, { passive: true });
+}
+
 async function submitPaper(autoSubmit = false) {
   if (state.mode === "exam" && state.submitted && state.exam?.result) {
     toast("已经交卷");
@@ -5932,6 +6038,14 @@ function handleGlobalShortcuts(event) {
     submitPaper().catch((err) => toast(err.message));
     return;
   }
+  if (!event.ctrlKey && !event.shiftKey && event.key === "Enter" && state.currentIndex >= 0) {
+    const q = state.questions[state.currentIndex]?.detail;
+    if (q && currentVerifyMode() === "instant" && (isMultiChoice(q) || isSubjective(q)) && hasAnswer(q.id) && !isQuestionVerified(q.id)) {
+      event.preventDefault();
+      confirmCurrentAnswer();
+      return;
+    }
+  }
   if (!event.ctrlKey && !event.shiftKey && event.code === "Space" && state.currentIndex >= 0) {
     event.preventDefault();
     toggleFavorite();
@@ -5974,6 +6088,7 @@ function handleGlobalShortcuts(event) {
 }
 
 ensureMobileControls();
+bindQuestionSwipe();
 
 document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
   btn.onclick = async () => {
@@ -6062,6 +6177,7 @@ $("prevBtn").onclick = () => moveQuestion(-1);
 $("nextBtn").onclick = () => moveQuestion(1);
 $("answerToggleBtn").onclick = toggleAnswer;
 $("verifyModeBtn").onclick = toggleVerifyMode;
+$("confirmAnswerBtn").onclick = confirmCurrentAnswer;
 $("submitBtn").onclick = () => submitPaper().catch((err) => toast(err.message));
 $("resetBtn").onclick = resetPractice;
 $("favoriteBtn").onclick = toggleFavorite;
@@ -6122,6 +6238,7 @@ $("orderSelect").addEventListener("change", loadQuestions);
 $("limitSelect").addEventListener("change", loadQuestions);
 
 window.addEventListener("beforeunload", () => {
+  syncCurrentTrainingSession();
   if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
   if (state.user && state.saveTimer) navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}`, JSON.stringify(state.storage));
 });

@@ -919,6 +919,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   overflow: auto;
   padding: 24px;
   background: var(--question-bg);
+  touch-action: pan-y;
 }
 
 .empty {
