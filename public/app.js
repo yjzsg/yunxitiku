@@ -589,22 +589,26 @@ function ensureMobileControls() {
 }
 
 function ensureVerifyModeControl() {
-  if ($("verifyModeBtn")) return;
-  const btn = document.createElement("button");
-  btn.id = "verifyModeBtn";
-  btn.type = "button";
-  btn.className = "verify-mode-btn";
-  btn.title = "切换刷题验证方式";
   const submitBtn = $("submitBtn");
-  submitBtn?.parentNode.insertBefore(btn, submitBtn);
+  if (!$("verifyModeBtn")) {
+    const btn = document.createElement("button");
+    btn.id = "verifyModeBtn";
+    btn.type = "button";
+    btn.className = "verify-mode-btn";
+    btn.title = "切换刷题验证方式";
+    submitBtn?.parentNode.insertBefore(btn, submitBtn);
+  }
 
-  const confirmBtn = document.createElement("button");
-  confirmBtn.id = "confirmAnswerBtn";
-  confirmBtn.type = "button";
-  confirmBtn.className = "confirm-answer-btn hidden";
-  confirmBtn.textContent = "确认答案";
-  confirmBtn.title = "确认当前题并显示答案";
-  submitBtn?.parentNode.insertBefore(confirmBtn, submitBtn);
+  if (!$("confirmAnswerBtn")) {
+    const confirmBtn = document.createElement("button");
+    confirmBtn.id = "confirmAnswerBtn";
+    confirmBtn.type = "button";
+    confirmBtn.className = "confirm-answer-btn hidden";
+    confirmBtn.textContent = "确认答案";
+    confirmBtn.title = "确认当前题并显示答案";
+    const nextBtn = $("nextBtn");
+    nextBtn?.parentNode.insertBefore(confirmBtn, nextBtn);
+  }
 }
 
 function setMobileMenu(open) {
@@ -5117,7 +5121,9 @@ async function moveQuestion(delta) {
 }
 
 function isSwipeIgnoredTarget(target) {
-  return !!target?.closest?.("button, input, textarea, select, label, a, .answer-card-wrap, .question-tag-panel, .practice-context-panel, .modal");
+  if (!target?.closest) return false;
+  if (target.closest(".option")) return false;
+  return !!target.closest("input, textarea, select, label, a, .answer-card-wrap, .question-tag-panel, .practice-context-panel, .question-actions, .toolbar, .main-nav, .modal");
 }
 
 function canSwipeQuestions() {
@@ -5133,29 +5139,60 @@ function bindQuestionSwipe() {
   const view = $("questionView");
   if (!view || view.dataset.swipeBound) return;
   view.dataset.swipeBound = "1";
-  view.addEventListener("touchstart", (event) => {
-    const touch = event.changedTouches?.[0];
-    if (!touch || isSwipeIgnoredTarget(event.target) || !canSwipeQuestions()) {
+  const startSwipe = (point, target) => {
+    if (!point || isSwipeIgnoredTarget(target) || !canSwipeQuestions()) {
       state.touchStart = null;
       return;
     }
     state.touchStart = {
-      x: touch.clientX,
-      y: touch.clientY,
+      x: point.clientX,
+      y: point.clientY,
       at: Date.now(),
+      active: false,
     };
-  }, { passive: true });
-  view.addEventListener("touchend", (event) => {
+  };
+  const finishSwipe = (point) => {
     const start = state.touchStart;
     state.touchStart = null;
-    const touch = event.changedTouches?.[0];
-    if (!start || !touch || !canSwipeQuestions()) return;
-    const dx = touch.clientX - start.x;
-    const dy = touch.clientY - start.y;
+    if (!start || !point || !canSwipeQuestions()) return;
+    const dx = point.clientX - start.x;
+    const dy = point.clientY - start.y;
     const elapsed = Date.now() - start.at;
     if (elapsed > 650 || Math.abs(dx) < 58 || Math.abs(dx) < Math.abs(dy) * 1.25 || Math.abs(dy) > 90) return;
     moveQuestion(dx < 0 ? 1 : -1).catch((err) => toast(err.message));
+  };
+  const updateSwipe = (point, event) => {
+    const start = state.touchStart;
+    if (!start || !point) return;
+    const dx = point.clientX - start.x;
+    const dy = point.clientY - start.y;
+    if (Math.abs(dx) > 18 && Math.abs(dx) > Math.abs(dy) * 1.15) {
+      start.active = true;
+      event?.preventDefault?.();
+    }
+  };
+  view.addEventListener("touchstart", (event) => {
+    startSwipe(event.changedTouches?.[0], event.target);
   }, { passive: true });
+  view.addEventListener("touchmove", (event) => {
+    updateSwipe(event.changedTouches?.[0], event);
+  }, { passive: false });
+  view.addEventListener("touchend", (event) => {
+    finishSwipe(event.changedTouches?.[0]);
+  }, { passive: true });
+  view.addEventListener("pointerdown", (event) => {
+    if (event.button && event.button !== 0) return;
+    startSwipe(event, event.target);
+  });
+  view.addEventListener("pointermove", (event) => {
+    updateSwipe(event, event);
+  });
+  view.addEventListener("pointerup", (event) => {
+    finishSwipe(event);
+  });
+  view.addEventListener("pointercancel", () => {
+    state.touchStart = null;
+  });
 }
 
 async function submitPaper(autoSubmit = false) {
