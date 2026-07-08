@@ -1962,29 +1962,31 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
 .practice-context-panel {
   width: calc(100% - 32px);
-  margin: 12px auto 0;
-  display: flex;
+  margin: 8px auto 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
+  padding: 10px 12px;
   background: linear-gradient(135deg, rgba(238, 242, 255, 0.94), rgba(255, 255, 255, 0.94));
 }
 
 .practice-context-panel > div:first-child {
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .practice-context-panel span {
   color: var(--primary-600);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .practice-context-panel b {
   color: var(--text);
-  font-size: 17px;
+  font-size: 14px;
+  line-height: 1.3;
 }
 
 .practice-context-panel small {
@@ -1995,16 +1997,26 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   white-space: nowrap;
 }
 
+.practice-context-toggle {
+  display: none;
+  min-height: 30px;
+  padding: 5px 10px;
+  border-color: #c7d2fe;
+  background: var(--primary-50);
+  color: var(--primary-600);
+  white-space: nowrap;
+}
+
 .practice-context-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   flex-wrap: wrap;
 }
 
 .practice-context-actions button {
-  min-height: 34px;
-  padding: 6px 12px;
+  min-height: 30px;
+  padding: 5px 10px;
   border-color: #c7d2fe;
   background: #fff;
   color: var(--primary-600);
@@ -6067,21 +6079,43 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 @media screen and (max-width: 760px) {
   .practice-context-panel {
     width: calc(100% - 20px);
-    margin-top: 8px;
-    align-items: stretch;
-    flex-direction: column;
-    gap: 10px;
-    padding: 12px;
+    margin-top: 6px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .practice-context-panel small {
+    display: none;
+  }
+
+  .practice-context-panel b {
+    font-size: 13px;
+  }
+
+  .practice-context-toggle {
+    display: inline-flex;
   }
 
   .practice-context-actions {
+    grid-column: 1 / -1;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
   }
 
   .practice-context-actions button {
     min-width: 0;
     padding-inline: 8px;
+  }
+
+  .practice-context-panel.collapsed {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .practice-context-panel.collapsed .practice-context-actions {
+    display: none;
   }
 
   .signal-grid {

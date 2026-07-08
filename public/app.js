@@ -65,6 +65,7 @@
   analysisExpandedChapters: new Set(),
   chapterAutoExpanded: false,
   smartPracticeFreshStart: false,
+  practiceContextCollapsed: null,
   printAfterRender: false,
   lastAnimatedQuestionId: 0,
   lastMarkedQuestionId: 0,
@@ -1848,13 +1849,26 @@ function renderPracticeContextPanel() {
       <b>${state.questions.length} 题 · 已做 ${session?.done ?? done} · 已确认 ${session?.verified ?? verified} · 正确率 ${session?.rate ?? 0}%</b>
       <small>${escapeHtml(session?.courseName || smart.courseName || state.currentCourse.name || "")}${createdAt ? ` · 生成于 ${escapeHtml(createdAt)}` : ""}</small>
     </div>
+    <button class="practice-context-toggle" id="practiceContextToggleBtn" type="button">${isPracticeContextCollapsed() ? "展开" : "收起"}</button>
     <div class="practice-context-actions">
       ${state.mode === "smart" ? `<button type="button" id="regenerateSmartBtn">重新生成</button>` : ""}
       <button type="button" id="exitSmartBtn">${state.mode === "smart" ? "退出智能练习" : "退出本次复习"}</button>
     </div>
   `;
+  panel.classList.toggle("collapsed", isPracticeContextCollapsed());
+  $("practiceContextToggleBtn").onclick = () => {
+    state.practiceContextCollapsed = !isPracticeContextCollapsed();
+    renderPracticeContextPanel();
+  };
   if ($("regenerateSmartBtn")) $("regenerateSmartBtn").onclick = () => startSmartPractice({ force: true }).catch((err) => toast(err.message));
   $("exitSmartBtn").onclick = () => exitTrainingSession().catch((err) => toast(err.message));
+}
+
+function isPracticeContextCollapsed() {
+  if (state.practiceContextCollapsed === null) {
+    return window.matchMedia?.("(max-width: 760px)")?.matches || false;
+  }
+  return !!state.practiceContextCollapsed;
 }
 
 function renderSearchMatches() {
@@ -2363,7 +2377,7 @@ function updateStats() {
 }
 
 function renderMode() {
-  const visualMode = state.mode === "smart" ? "practice" : state.mode;
+  const visualMode = state.mode === "smart" ? "training" : state.mode;
   document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.mode === visualMode);
   });
