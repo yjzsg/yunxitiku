@@ -27,6 +27,7 @@
   mobileToolsOpen: false,
   answerCardCollapsed: false,
   mobileTagsOpen: false,
+  tagPanelQuestionId: 0,
   wrongFilters: { status: "active", minCount: "1", period: "all" },
   tagFilter: "",
   answerCardPage: 0,
@@ -1638,10 +1639,18 @@ function renderQuestionTags(q) {
     $("answerBox").parentNode.insertBefore(panel, $("answerBox"));
   }
   const currentTags = questionTags(q.id);
-  const tagSummary = currentTags.length ? currentTags.join("、") : "未添加";
   const confidence = state.storage.confidence?.[q.id] || "";
   const wrongReason = questionWrongReason(q.id);
   const favoriteGroup = favoriteGroupOf(q.id);
+  const tagSummaryParts = [
+    ...currentTags,
+    confidence ? `信心：${confidence}` : "",
+    wrongReason ? `错因：${wrongReason}` : "",
+    favoriteGroup ? `收藏：${favoriteGroup}` : "",
+  ].filter(Boolean);
+  const tagSummary = tagSummaryParts.length ? tagSummaryParts.join(" · ") : "未添加标注";
+  const keepOpen = Number(state.tagPanelQuestionId || 0) === Number(q.id) && state.mobileTagsOpen;
+  state.tagPanelQuestionId = Number(q.id || 0);
   const renderToggleGroup = (items, attr, activeValue = "") => items.map((label) => {
     const escaped = escapeHtml(label);
     const isActive = Array.isArray(activeValue) ? activeValue.includes(label) : activeValue === label;
@@ -1674,7 +1683,7 @@ function renderQuestionTags(q) {
       </div>
     </div>
   `;
-  setMobileTagsOpen(false);
+  setMobileTagsOpen(keepOpen);
   $("tagPanelToggleBtn").onclick = () => setMobileTagsOpen(!state.mobileTagsOpen);
   panel.querySelectorAll("[data-toggle-tag]").forEach((btn) => {
     btn.onclick = () => toggleQuestionTag(q.id, btn.dataset.toggleTag);

@@ -8112,3 +8112,31 @@ body.panel-page .answer-card-wrap,
 .question-side-panel.hidden {
   display: none !important;
 }
+
+/* Keep dynamic practice chrome in stable grid rows. */
+.practice-context-panel {
+  grid-row: 2;
+  min-height: 0;
+}
+
+@media screen and (max-width: 760px) {
+  body:not(.admin-view):not(.picker-open) .workspace {
+    grid-template-rows: minmax(0, 1fr) !important;
+    align-content: stretch !important;
+  }
+
+  body:not(.admin-view):not(.picker-open) .course-pane {
+    display: none !important;
+  }
+
+  body:not(.admin-view):not(.picker-open) .question-pane {
+    grid-row: 1 !important;
+    align-self: stretch !important;
+    height: 100%;
+    min-height: 0;
+  }
+
+  body.answer-card-collapsed .question-pane {
+    grid-template-rows: auto auto minmax(0, 1fr) auto 42px;
+  }
+}
