@@ -7,11 +7,15 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using static AppHelpers;
 
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+SQLitePCL.Batteries.Init();
 
 if (args.Length >= 2 && args[0] == "--healthcheck")
 {
@@ -50,10 +54,24 @@ builder.WebHost.ConfigureKestrel(options =>
 });
 builder.Services.AddSingleton<AppPaths>();
 builder.Services.AddSingleton<AuthStore>();
+builder.Services.AddSingleton<SessionStore>();
+builder.Services.AddSingleton<UserDataStore>();
 builder.Services.AddSingleton<QuestionBank>();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddFixedWindowLimiter("login", limiter =>
+    {
+        limiter.PermitLimit = 12;
+        limiter.Window = TimeSpan.FromMinutes(1);
+        limiter.QueueLimit = 0;
+        limiter.AutoReplenishment = true;
+    });
+});
 
 var app = builder.Build();
 var paths = app.Services.GetRequiredService<AppPaths>();
+var sessions = app.Services.GetRequiredService<SessionStore>();
 Directory.CreateDirectory(paths.UserDataRoot);
 Directory.CreateDirectory(paths.DataAssetsRoot);
 Directory.CreateDirectory(Path.GetDirectoryName(paths.SqlitePath) ?? paths.BaseRoot);
@@ -78,6 +96,47 @@ app.Use(async (context, next) =>
     }
 });
 
+app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+    var protectedApi = path.StartsWithSegments("/api")
+        && !path.StartsWithSegments("/api/health")
+        && !path.StartsWithSegments("/api/users")
+        && !path.StartsWithSegments("/api/auth/login")
+        && !path.StartsWithSegments("/api/auth/change-password");
+    var protectedAsset = path.StartsWithSegments("/assets");
+    if (!protectedApi && !protectedAsset)
+    {
+        await next();
+        return;
+    }
+
+    var sessionUser = sessions.Resolve(context.Request);
+    if (sessionUser.Length == 0)
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsJsonAsync(new { ok = false, error = "登录已失效，请重新登录" });
+        return;
+    }
+    var auth = context.RequestServices.GetRequiredService<AuthStore>();
+    if (auth.IsDisabled(sessionUser))
+    {
+        sessions.Remove(context.Request);
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { ok = false, error = "账号已停用" });
+        return;
+    }
+    if (path.StartsWithSegments("/api/admin") && !sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { ok = false, error = "admin only" });
+        return;
+    }
+    context.Items[SessionStore.UserItemKey] = sessionUser;
+    await next();
+});
+
 var publicFiles = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(paths.PublicRoot);
 app.UseDefaultFiles(new DefaultFilesOptions
 {
@@ -94,12 +153,7 @@ app.MapGet("/api/health", () => Results.Json(new
 {
     ok = true,
     sqlite = File.Exists(paths.SqlitePath),
-    tables = QuestionBank.TryReadTableCounts(paths.SqlitePath),
-    sqlitePath = paths.SqlitePath,
-    publicRoot = paths.PublicRoot,
-    userDataRoot = paths.UserDataRoot,
-    assetsRoot = paths.DataAssetsRoot,
-    assetSample = paths.FindAssetSample()
+    tables = QuestionBank.TryReadTableCounts(paths.SqlitePath)
 }));
 
 app.MapGet("/api/users", (AuthStore auth) =>
@@ -118,8 +172,9 @@ app.MapGet("/api/users", (AuthStore auth) =>
     }));
 });
 
-app.MapPost("/api/auth/login", async (HttpRequest request, AuthStore auth) =>
+app.MapPost("/api/auth/login", async (HttpContext context, AuthStore auth, SessionStore sessionStore) =>
 {
+    var request = context.Request;
     var body = await ReadJsonBody(request);
     var user = CleanUserName(GetBodyString(body, "user"));
     var password = GetBodyString(body, "password");
@@ -135,14 +190,17 @@ app.MapPost("/api/auth/login", async (HttpRequest request, AuthStore auth) =>
         {
             return Results.Json(new { ok = false, error = "密码不正确" }, statusCode: 401);
         }
+        sessionStore.SignIn(context, user);
         return Results.Json(new { ok = true, user, mustChangePassword = true });
     }
     if (!auth.Verify(password, profile)) return Results.Json(new { ok = false, error = "密码不正确" }, statusCode: 401);
+    sessionStore.SignIn(context, user);
     return Results.Json(new { ok = true, user, mustChangePassword = auth.MustChangePassword(profile) });
-});
+}).RequireRateLimiting("login");
 
-app.MapPost("/api/auth/change-password", async (HttpRequest request, AuthStore auth) =>
+app.MapPost("/api/auth/change-password", async (HttpContext context, AuthStore auth, SessionStore sessionStore) =>
 {
+    var request = context.Request;
     var body = await ReadJsonBody(request);
     var user = CleanUserName(GetBodyString(body, "user"));
     var oldPassword = GetBodyString(body, "oldPassword");
@@ -155,36 +213,51 @@ app.MapPost("/api/auth/change-password", async (HttpRequest request, AuthStore a
     next["mustChangePassword"] = false;
     auth.Set(user, next);
     auth.Save();
+    sessionStore.SignIn(context, user);
     return Results.Json(new { ok = true, user });
+}).RequireRateLimiting("login");
+
+app.MapPost("/api/auth/logout", (HttpContext context, SessionStore sessionStore) =>
+{
+    sessionStore.SignOut(context);
+    return Results.Json(new { ok = true });
 });
 
-app.MapGet("/api/user/load", (string? user) =>
+app.MapGet("/api/user/load", async (HttpContext context, string? user, UserDataStore userData) =>
 {
-    var clean = CleanUserName(user);
-    var path = UserDataPath(paths, clean);
-    if (!File.Exists(path)) return Results.Json(new { user = clean, data = new Dictionary<string, object?>() });
+    var clean = ResolveRequestedUser(context, user);
     try
     {
-        var data = JsonSerializer.Deserialize<object>(File.ReadAllText(path, Encoding.UTF8)) ?? new Dictionary<string, object?>();
-        return Results.Json(new { user = clean, data });
+        var loaded = await userData.LoadAsync(clean);
+        return Results.Json(new { user = clean, data = loaded.Data, revision = loaded.Revision });
     }
     catch
     {
-        return Results.Json(new { user = clean, data = new Dictionary<string, object?>() });
+        return Results.Json(new { user = clean, data = new Dictionary<string, object?>(), revision = "" });
     }
 });
 
-app.MapPost("/api/user/save", async (HttpRequest request, string? user) =>
+app.MapPost("/api/user/save", async (HttpContext context, string? user, UserDataStore userData) =>
 {
-    var clean = CleanUserName(user);
+    var request = context.Request;
+    var clean = ResolveRequestedUser(context, user);
     using var reader = new StreamReader(request.Body, request.ContentType?.Contains("charset", StringComparison.OrdinalIgnoreCase) == true ? Encoding.UTF8 : Encoding.UTF8);
     var body = await reader.ReadToEndAsync();
-    if (body.Length > 2 * 1024 * 1024) return Results.Json(new { ok = false, error = "user data too large" }, statusCode: 400);
+    if (Encoding.UTF8.GetByteCount(body) > 32 * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
     if (string.IsNullOrWhiteSpace(body)) body = "{}";
     JsonSerializer.Deserialize<object>(body);
-    Directory.CreateDirectory(paths.UserDataRoot);
-    await File.WriteAllTextAsync(UserDataPath(paths, clean), body, Encoding.UTF8);
-    return Results.Json(new { ok = true, user = clean, savedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") });
+    var expectedRevision = request.Headers.IfMatch.FirstOrDefault()?.Trim('"')
+        ?? Convert.ToString(request.Query["revision"], CultureInfo.InvariantCulture)
+        ?? "";
+    try
+    {
+        var revision = await userData.SaveAsync(clean, body, expectedRevision);
+        return Results.Json(new { ok = true, user = clean, revision, savedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") });
+    }
+    catch (UserDataConflictException)
+    {
+        return Results.Json(new { ok = false, error = "用户数据已在其他页面更新，请刷新后重试", code = "user_data_conflict" }, statusCode: 409);
+    }
 });
 
 app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, AuthStore auth) =>
@@ -439,8 +512,9 @@ app.MapGet("/api/question", (QuestionBank bank, int id) =>
 app.MapGet("/assets/{**relative}", (string relative) =>
 {
     relative = Uri.UnescapeDataString(relative).Replace('/', Path.DirectorySeparatorChar);
-    if (relative.Contains("..")) return Results.Json(new { error = "bad path" }, statusCode: 400);
-    var path = Path.Combine(paths.DataAssetsRoot, relative);
+    var root = Path.GetFullPath(paths.DataAssetsRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+    var path = Path.GetFullPath(Path.Combine(root, relative));
+    if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return Results.Json(new { error = "bad path" }, statusCode: 400);
     if (!File.Exists(path)) return Results.Json(new { error = "asset not found" }, statusCode: 404);
     return Results.File(path, ContentType(path));
 });
@@ -517,6 +591,14 @@ internal static bool IsTruthy(string? value)
 
 internal static bool IsAdmin(string? value) => CleanUserName(value).Equals("admin", StringComparison.OrdinalIgnoreCase);
 
+internal static string ResolveRequestedUser(HttpContext context, string? requested)
+{
+    var sessionUser = Convert.ToString(context.Items[SessionStore.UserItemKey], CultureInfo.InvariantCulture) ?? "";
+    if (sessionUser.Length == 0) throw new UnauthorizedAccessException("登录已失效");
+    if (!sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase)) return CleanUserName(sessionUser);
+    return string.IsNullOrWhiteSpace(requested) ? "admin" : CleanUserName(requested);
+}
+
 internal static string NormalizeDataType(string? value)
 {
     var type = (value ?? "").Trim().ToLowerInvariant();
@@ -561,6 +643,31 @@ internal static string ContentType(string path)
         _ => "application/octet-stream"
     };
 }
+}
+
+static class BackupRetention
+{
+    public static void Prune(string root, int keepLatest = 20, int keepDays = 30)
+    {
+        try
+        {
+            if (!Directory.Exists(root)) return;
+            var cutoff = DateTime.UtcNow.AddDays(-Math.Max(1, keepDays));
+            var entries = Directory.EnumerateFileSystemEntries(root)
+                .Select(path => new { Path = path, Updated = File.GetLastWriteTimeUtc(path) })
+                .OrderByDescending(item => item.Updated)
+                .ToList();
+            foreach (var item in entries.Skip(Math.Max(1, keepLatest)).Where(item => item.Updated < cutoff))
+            {
+                if (Directory.Exists(item.Path)) Directory.Delete(item.Path, true);
+                else if (File.Exists(item.Path)) File.Delete(item.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 备份清理失败: {ex.Message}");
+        }
+    }
 }
 
 static class AdminDataTransfer
@@ -656,6 +763,7 @@ static class AdminDataTransfer
             {
                 CopyDirectory(paths.DataAssetsRoot, Path.Combine(backupDir, "assets"));
             }
+            BackupRetention.Prune(Path.Combine(dataRoot, "_backups"));
 
             File.Copy(sourceDb, paths.SqlitePath, true);
             ReplaceDirectory(paths.DataAssetsRoot, sourceAssets);
@@ -699,6 +807,7 @@ static class AdminDataTransfer
             {
                 CopyDirectory(paths.DataAssetsRoot, Path.Combine(backupDir, "assets"));
             }
+            BackupRetention.Prune(Path.Combine(dataRoot, "_backups"));
 
             QuestionBank.EnsureDatabase(paths.SqlitePath);
             var result = MergeCourseIntoBank(paths.SqlitePath, sourceDb, courseId);
@@ -756,6 +865,7 @@ static class AdminDataTransfer
                     zip.CreateEntryFromFile(file, relative, CompressionLevel.Fastest);
                 }
             }
+            BackupRetention.Prune(backupRoot);
 
             foreach (var old in Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly))
             {
@@ -954,10 +1064,18 @@ static class AdminDataTransfer
 
     private static void ExtractZipSafe(string zipPath, string destination)
     {
+        const long maxExpandedBytes = 4L * 1024 * 1024 * 1024;
+        const long maxEntryBytes = 1024L * 1024 * 1024;
+        const int maxEntries = 100_000;
         var fullDestination = Path.GetFullPath(destination);
         using var archive = ZipFile.OpenRead(zipPath);
+        if (archive.Entries.Count > maxEntries) throw new InvalidOperationException($"压缩包文件数量超过 {maxEntries}");
+        long expandedBytes = 0;
         foreach (var entry in archive.Entries)
         {
+            if (entry.Length > maxEntryBytes) throw new InvalidOperationException("压缩包包含超过 1GB 的单个文件");
+            expandedBytes = checked(expandedBytes + entry.Length);
+            if (expandedBytes > maxExpandedBytes) throw new InvalidOperationException("压缩包解压后超过 4GB 限制");
             var clean = entry.FullName.Replace('\\', '/').TrimStart('/');
             if (clean.Length == 0 || clean.Contains("../", StringComparison.Ordinal) || clean.StartsWith("..", StringComparison.Ordinal))
             {
@@ -1036,6 +1154,128 @@ static class AdminDataTransfer
         return fullPath.StartsWith(fullBackup + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
             || string.Equals(fullPath, fullBackup, StringComparison.OrdinalIgnoreCase);
     }
+}
+
+sealed class UserDataStore
+{
+    private readonly AppPaths _paths;
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new(StringComparer.OrdinalIgnoreCase);
+
+    public UserDataStore(AppPaths paths)
+    {
+        _paths = paths;
+    }
+
+    public async Task<(object Data, string Revision)> LoadAsync(string user)
+    {
+        var clean = CleanUserName(user);
+        var gate = _locks.GetOrAdd(clean, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            var path = UserDataPath(_paths, clean);
+            if (!File.Exists(path)) return (new Dictionary<string, object?>(), "");
+            var body = await File.ReadAllTextAsync(path, Encoding.UTF8);
+            var data = JsonSerializer.Deserialize<object>(body) ?? new Dictionary<string, object?>();
+            return (data, Revision(body));
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task<string> SaveAsync(string user, string body, string expectedRevision)
+    {
+        var clean = CleanUserName(user);
+        var gate = _locks.GetOrAdd(clean, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            Directory.CreateDirectory(_paths.UserDataRoot);
+            var path = UserDataPath(_paths, clean);
+            var currentBody = File.Exists(path) ? await File.ReadAllTextAsync(path, Encoding.UTF8) : "";
+            var currentRevision = currentBody.Length == 0 ? "" : Revision(currentBody);
+            if (expectedRevision.Length > 0 && !string.Equals(expectedRevision, currentRevision, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UserDataConflictException();
+            }
+
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                await File.WriteAllTextAsync(temp, body, new UTF8Encoding(false));
+                File.Move(temp, path, true);
+            }
+            finally
+            {
+                TryDeleteFile(temp);
+            }
+            return Revision(body);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private static string Revision(string body) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
+}
+
+sealed class UserDataConflictException : Exception
+{
+}
+
+sealed class SessionStore
+{
+    public const string UserItemKey = "yunxi.session.user";
+    private const string CookieName = "yunxi_session";
+    private static readonly TimeSpan Lifetime = TimeSpan.FromDays(7);
+    private readonly ConcurrentDictionary<string, SessionRecord> _sessions = new(StringComparer.Ordinal);
+
+    public void SignIn(HttpContext context, string user)
+    {
+        Remove(context.Request);
+        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        _sessions[token] = new SessionRecord(CleanUserName(user), DateTimeOffset.UtcNow.Add(Lifetime));
+        context.Response.Cookies.Append(CookieName, token, new CookieOptions
+        {
+            HttpOnly = true,
+            SameSite = SameSiteMode.Strict,
+            Secure = context.Request.IsHttps,
+            MaxAge = Lifetime,
+            Path = "/",
+            IsEssential = true
+        });
+    }
+
+    public string Resolve(HttpRequest request)
+    {
+        if (!request.Cookies.TryGetValue(CookieName, out var token) || string.IsNullOrWhiteSpace(token)) return "";
+        if (!_sessions.TryGetValue(token, out var record)) return "";
+        if (record.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            _sessions.TryRemove(token, out _);
+            return "";
+        }
+        return record.User;
+    }
+
+    public void Remove(HttpRequest request)
+    {
+        if (request.Cookies.TryGetValue(CookieName, out var token) && !string.IsNullOrWhiteSpace(token))
+        {
+            _sessions.TryRemove(token, out _);
+        }
+    }
+
+    public void SignOut(HttpContext context)
+    {
+        Remove(context.Request);
+        context.Response.Cookies.Delete(CookieName, new CookieOptions { Path = "/" });
+    }
+
+    private sealed record SessionRecord(string User, DateTimeOffset ExpiresAt);
 }
 
 sealed class AppPaths
@@ -1646,6 +1886,7 @@ sealed class QuestionBank
         var backupDir = Path.Combine(dataRoot, "_backups", CleanBackupName(reason) + "-" + Timestamp());
         Directory.CreateDirectory(backupDir);
         File.Copy(_paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
+        BackupRetention.Prune(Path.Combine(dataRoot, "_backups"));
         return backupDir;
     }
 

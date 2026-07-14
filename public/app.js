@@ -18,7 +18,10 @@
   answerVisible: false,
   zoom: 1,
   storage: {},
+  storageRevision: "",
   saveTimer: null,
+  saveChain: null,
+  saveErrorShownAt: 0,
   pendingPasswordUser: "",
   pendingOldPassword: "",
   pickerOpen: false,
@@ -94,7 +97,10 @@ async function api(path, options) {
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || res.statusText);
+    const error = new Error(err.error || res.statusText);
+    error.status = res.status;
+    error.code = err.code || "";
+    throw error;
   }
   return res.json();
 }
@@ -118,9 +124,54 @@ function shuffleItems(items) {
   return result;
 }
 
-function addLazyLoading(html) {
+function sanitizeRichHtml(html) {
   if (!html) return "";
-  return String(html).replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy"');
+  const allowedTags = new Set([
+    "A", "B", "BLOCKQUOTE", "BR", "CODE", "DEL", "DIV", "EM", "FONT", "H1", "H2", "H3", "H4",
+    "H5", "H6", "HR", "I", "IMG", "LI", "MARK", "OL", "P", "PRE", "S", "SMALL", "SPAN", "STRONG",
+    "SUB", "SUP", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "U", "UL",
+  ]);
+  const globalAttrs = new Set(["class", "title"]);
+  const tagAttrs = {
+    A: new Set(["href", "target", "rel"]),
+    FONT: new Set(["color", "size"]),
+    IMG: new Set(["src", "alt", "width", "height", "loading"]),
+    TD: new Set(["colspan", "rowspan", "align", "valign"]),
+    TH: new Set(["colspan", "rowspan", "align", "valign"]),
+  };
+  const isSafeUrl = (value, image = false) => {
+    const text = String(value || "").trim();
+    if (!text) return false;
+    if (/^(?:https?:|\/|\.\/|\.\.\/|assets\/)/i.test(text)) return true;
+    return image && /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(text);
+  };
+  const template = document.createElement("template");
+  template.innerHTML = String(html);
+  for (const node of [...template.content.querySelectorAll("*")]) {
+    if (!allowedTags.has(node.tagName)) {
+      if (["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "FORM", "SVG", "MATH"].includes(node.tagName)) node.remove();
+      else node.replaceWith(...node.childNodes);
+      continue;
+    }
+    for (const attr of [...node.attributes]) {
+      const name = attr.name.toLowerCase();
+      const permitted = globalAttrs.has(name) || tagAttrs[node.tagName]?.has(name);
+      if (!permitted || name.startsWith("on") || name === "style") node.removeAttribute(attr.name);
+    }
+    if (node.tagName === "A") {
+      if (!isSafeUrl(node.getAttribute("href"))) node.removeAttribute("href");
+      if (node.getAttribute("target") === "_blank") node.setAttribute("rel", "noopener noreferrer");
+    }
+    if (node.tagName === "IMG") {
+      if (!isSafeUrl(node.getAttribute("src"), true)) node.removeAttribute("src");
+      node.setAttribute("loading", "lazy");
+    }
+  }
+  return template.innerHTML;
+}
+
+function addLazyLoading(html) {
+  return sanitizeRichHtml(html);
 }
 
 function isSubjective(q) {
@@ -793,6 +844,7 @@ async function enterApp(user, options = {}) {
 
 async function logout() {
   await saveUserData().catch(() => {});
+  await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   stopExamTimer();
   localStorage.removeItem(SESSION_USER_KEY);
   clearTimeout(state.saveTimer);
@@ -809,6 +861,7 @@ async function loadUserData(user) {
   const res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
   state.user = res.user;
   state.storage = normalizeStorage(res.data || {});
+  state.storageRevision = res.revision || "";
   state.zoom = normalizeZoom(state.storage.settings?.zoom);
   localStorage.setItem(LAST_USER_KEY, state.user);
   renderUsers();
@@ -823,6 +876,10 @@ function normalizeZoom(value) {
 function normalizeStorage(data) {
   const tags = data.tags && typeof data.tags === "object" ? data.tags : {};
   const tagLabels = [...new Set([...(Array.isArray(data.tagLabels) ? data.tagLabels : Object.keys(tags || {})), ...DEFAULT_TAG_LABELS])];
+  const plans = data.plans && typeof data.plans === "object" ? data.plans : {};
+  const examDrafts = data.examDrafts && typeof data.examDrafts === "object" ? data.examDrafts : {};
+  if (data.plan?.courseId && !plans[String(data.plan.courseId)]) plans[String(data.plan.courseId)] = data.plan;
+  if (data.examDraft?.courseId && !examDrafts[String(data.examDraft.courseId)]) examDrafts[String(data.examDraft.courseId)] = data.examDraft;
   return {
     profile: data.profile || {},
     courses: data.courses || {},
@@ -832,7 +889,8 @@ function normalizeStorage(data) {
     corrections: Array.isArray(data.corrections) ? data.corrections : [],
     history: Array.isArray(data.history) ? data.history : [],
     examHistory: Array.isArray(data.examHistory) ? data.examHistory : [],
-    examDraft: data.examDraft && typeof data.examDraft === "object" ? data.examDraft : null,
+    examDraft: null,
+    examDrafts,
     dailyReports: Array.isArray(data.dailyReports) ? data.dailyReports : [],
     dailyActivity: data.dailyActivity && typeof data.dailyActivity === "object" ? data.dailyActivity : {},
     confidence: data.confidence && typeof data.confidence === "object" ? data.confidence : {},
@@ -844,6 +902,7 @@ function normalizeStorage(data) {
     tagLabels,
     settings: data.settings || {},
     plan: data.plan || null,
+    plans,
   };
 }
 
@@ -860,16 +919,36 @@ function peekCourseStore(courseId = state.currentCourse?.id) {
 
 function scheduleSave() {
   clearTimeout(state.saveTimer);
-  state.saveTimer = setTimeout(saveUserData, 450);
+  state.saveTimer = setTimeout(() => {
+    state.saveTimer = null;
+    saveUserData().catch(handleUserSaveError);
+  }, 450);
 }
 
-async function saveUserData() {
-  if (!state.user) return;
-  await api(`/api/user/save?user=${encodeURIComponent(state.user)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify(state.storage),
-  });
+function saveUserData() {
+  if (!state.user) return Promise.resolve();
+  const run = async () => {
+    const headers = { "Content-Type": "application/json; charset=utf-8" };
+    if (state.storageRevision) headers["If-Match"] = `"${state.storageRevision}"`;
+    const result = await api(`/api/user/save?user=${encodeURIComponent(state.user)}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(state.storage),
+    });
+    state.storageRevision = result.revision || state.storageRevision;
+    return result;
+  };
+  state.saveChain = (state.saveChain || Promise.resolve()).catch(() => {}).then(run);
+  return state.saveChain;
+}
+
+function handleUserSaveError(err) {
+  const now = Date.now();
+  if (now - Number(state.saveErrorShownAt || 0) < 5000) return;
+  state.saveErrorShownAt = now;
+  toast(err?.status === 409
+    ? "数据已在其他页面更新，请刷新页面后继续，避免覆盖最新进度"
+    : `保存失败：${err?.message || "请检查网络和磁盘空间"}`);
 }
 
 async function switchUser(name) {
@@ -1433,22 +1512,22 @@ function syncTrainingSessionStats(session = activeTrainingSession()) {
   session.verified = verified;
   session.correct = correct;
   session.wrong = wrong;
-  session.rate = verified ? Math.round((correct / verified) * 100) : done ? Math.round((correct / done) * 100) : 0;
-  if (done >= ids.length && ids.length) {
+  session.rate = verified ? Math.round((correct / verified) * 100) : 0;
+  if (verified >= ids.length && ids.length) {
     session.status = "completed";
     session.completedAt ||= nowText();
     if (session.type === "plan" && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0)) {
-      state.storage.plan ||= { dailyLog: {} };
-      state.storage.plan.dailyLog ||= {};
+      const plan = ensureReviewPlan(session.courseId);
+      plan.dailyLog ||= {};
       const key = session.planKey || dateKey(parseDate(session.createdAt) || new Date());
-      state.storage.plan.dailyLog[key] ||= {
+      plan.dailyLog[key] ||= {
         newDone: Number(session.taskCounts?.new || 0),
         reviewDone: Number(session.taskCounts?.review || 0) + Number(session.taskCounts?.carryover || 0),
         weakDone: Number(session.taskCounts?.weak || 0),
         at: session.completedAt,
       };
     }
-  } else if (session.status === "completed" && done < ids.length) {
+  } else if (session.status === "completed" && verified < ids.length) {
     session.status = "active";
     session.completedAt = "";
   }
@@ -3490,10 +3569,31 @@ function bindDeepAnalysisActions() {
 }
 
 function activeReviewPlan() {
-  const plan = state.storage.plan && typeof state.storage.plan === "object" ? state.storage.plan : {};
   const courseId = Number(state.currentCourse?.id || 0);
-  if (courseId && plan.courseId && Number(plan.courseId) !== courseId) return {};
-  return plan;
+  if (!courseId) return {};
+  state.storage.plans ||= {};
+  const key = String(courseId);
+  if (!state.storage.plans[key] && state.storage.plan && (!state.storage.plan.courseId || Number(state.storage.plan.courseId) === courseId)) {
+    state.storage.plans[key] = { ...state.storage.plan, courseId };
+    state.storage.plan = null;
+  }
+  return state.storage.plans[key] || {};
+}
+
+function ensureReviewPlan(courseId = state.currentCourse?.id) {
+  const id = Number(courseId || 0);
+  if (!id) return {};
+  state.storage.plans ||= {};
+  state.storage.plans[String(id)] ||= { courseId: id, dailyLog: {} };
+  return state.storage.plans[String(id)];
+}
+
+function saveActiveReviewPlan(plan) {
+  const courseId = Number(state.currentCourse?.id || plan?.courseId || 0);
+  if (!courseId) return;
+  state.storage.plans ||= {};
+  state.storage.plans[String(courseId)] = { ...(plan || {}), courseId };
+  state.storage.plan = null;
 }
 
 function daysUntilExam(examDate) {
@@ -3757,8 +3857,9 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
       const userChangedTarget = typedTarget > 0 && typedTarget !== previousSuggestedTarget;
       const dailyTarget = Math.max(1, userChangedTarget ? typedTarget : suggestedTarget);
       const overview = buildReviewPlanOverview(stats, wrongTotal, items);
-      state.storage.plan = {
-        ...(state.storage.plan || {}),
+      const currentPlan = activeReviewPlan();
+      saveActiveReviewPlan({
+        ...currentPlan,
         examDate,
         courseId: state.currentCourse?.id,
         dailyTarget,
@@ -3766,15 +3867,15 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
         lastSuggestedTarget: suggestedTarget,
         lastRebalancedAt: nowText(),
         carryoverIds: overview.pools.carryoverIds,
-        createdAt: state.storage.plan?.createdAt || nowText(),
-        dailyLog: state.storage.plan?.dailyLog || {},
+        createdAt: currentPlan.createdAt || nowText(),
+        dailyLog: currentPlan.dailyLog || {},
         snapshot: {
           total: totalItems,
           done: stats.done,
           correct: stats.correct,
           wrong: wrongTotal,
         },
-      };
+      });
       scheduleSave();
       renderProgress();
       toast("复习计划已保存");
@@ -3784,18 +3885,18 @@ function bindReviewPlanActions(stats, wrongTotal, totalItems = state.questions.l
   if (startBtn) startBtn.onclick = () => startTodayReviewPlan().catch((err) => toast(err.message));
   document.querySelectorAll("[data-plan-day]").forEach((checkbox) => {
     checkbox.onchange = () => {
-      state.storage.plan ||= { dailyLog: {} };
-      state.storage.plan.dailyLog ||= {};
+      const plan = ensureReviewPlan();
+      plan.dailyLog ||= {};
       const key = checkbox.dataset.planDay;
       if (checkbox.checked) {
-        state.storage.plan.dailyLog[key] = {
+        plan.dailyLog[key] = {
           newDone: Number(checkbox.dataset.newTask || 0),
           reviewDone: Number(checkbox.dataset.reviewTask || 0),
           weakDone: Number(checkbox.dataset.weakTask || 0),
           at: nowText(),
         };
       } else {
-        delete state.storage.plan.dailyLog[key];
+        delete plan.dailyLog[key];
       }
       scheduleSave();
       checkbox.closest(".plan-day")?.classList.toggle("done", checkbox.checked);
@@ -3826,14 +3927,14 @@ async function startTodayReviewPlan() {
   const session = saveSmartPracticeSession(ids, "今日计划", { type: "plan" });
   session.planKey = todayKey();
   session.taskCounts = overview.task.counts;
-  state.storage.plan = {
-    ...(state.storage.plan || {}),
+  saveActiveReviewPlan({
+    ...activeReviewPlan(),
     courseId: state.currentCourse.id,
     todaySessionId: session.id,
     lastSuggestedTarget: overview.suggestedTarget,
     lastRebalancedAt: nowText(),
     carryoverIds: overview.pools.carryoverIds,
-  };
+  });
   scheduleSave();
   state.mode = "smart";
   setCoursePicker(false);
@@ -5107,7 +5208,10 @@ async function adminCorrectionAction(user, correctionId, action) {
   }
   await api(`/api/user/save?user=${encodeURIComponent(user)}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      ...(res.revision ? { "If-Match": `"${res.revision}"` } : {}),
+    },
     body: JSON.stringify(data),
   });
   toast("纠错反馈已更新");
@@ -5345,11 +5449,19 @@ function toggleAnswer() {
 }
 
 function examDraftForCurrentCourse() {
-  const draft = state.storage.examDraft;
   if (!state.currentCourse) return null;
+  const courseKey = String(state.currentCourse.id || "");
+  state.storage.examDrafts = state.storage.examDrafts && typeof state.storage.examDrafts === "object"
+    ? state.storage.examDrafts
+    : {};
+  if (state.storage.examDraft?.courseId && !state.storage.examDrafts[String(state.storage.examDraft.courseId)]) {
+    state.storage.examDrafts[String(state.storage.examDraft.courseId)] = state.storage.examDraft;
+    state.storage.examDraft = null;
+    scheduleSave();
+  }
+  const draft = state.storage.examDrafts[courseKey];
   if (!draft || typeof draft !== "object") return null;
   if (!Array.isArray(draft.questionIds) || !draft.questionIds.length) return null;
-  if (Number(draft.courseId || 0) !== Number(state.currentCourse.id || 0)) return null;
   return draft;
 }
 
@@ -5360,7 +5472,11 @@ function examDraftAnswerCount(draft = examDraftForCurrentCourse()) {
 
 function saveExamDraft() {
   if (state.mode !== "exam" || !state.exam || state.submitted || !state.currentCourse || !state.questions.length) return;
-  state.storage.examDraft = {
+  const courseKey = String(state.currentCourse.id);
+  state.storage.examDrafts = state.storage.examDrafts && typeof state.storage.examDrafts === "object"
+    ? state.storage.examDrafts
+    : {};
+  const draft = {
     id: state.exam.draftId || `${state.exam.startedAt}-${state.currentCourse.id}`,
     courseId: state.currentCourse.id,
     courseName: state.currentCourse.name || "",
@@ -5375,12 +5491,16 @@ function saveExamDraft() {
     savedAt: Date.now(),
     savedAtText: nowText(),
   };
-  state.exam.draftId = state.storage.examDraft.id;
+  state.storage.examDrafts[courseKey] = draft;
+  state.storage.examDraft = null;
+  state.exam.draftId = draft.id;
   scheduleSave();
 }
 
-function clearExamDraft() {
-  if (!state.storage.examDraft) return;
+function clearExamDraft(courseId = state.currentCourse?.id) {
+  const courseKey = String(courseId || "");
+  if (!courseKey || !state.storage.examDrafts?.[courseKey]) return;
+  delete state.storage.examDrafts[courseKey];
   state.storage.examDraft = null;
   scheduleSave();
 }
@@ -5791,7 +5911,7 @@ function renderExamStatus() {
 
 function stripText(html) {
   const div = document.createElement("div");
-  div.innerHTML = html || "";
+  div.innerHTML = sanitizeRichHtml(html);
   return div.innerText || "";
 }
 
@@ -6286,7 +6406,10 @@ $("limitSelect").addEventListener("change", loadQuestions);
 window.addEventListener("beforeunload", () => {
   syncCurrentTrainingSession();
   if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
-  if (state.user && state.saveTimer) navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}`, JSON.stringify(state.storage));
+  if (state.user && state.saveTimer) {
+    const revision = state.storageRevision ? `&revision=${encodeURIComponent(state.storageRevision)}` : "";
+    navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}${revision}`, JSON.stringify(state.storage));
+  }
 });
 
 init().catch((err) => {

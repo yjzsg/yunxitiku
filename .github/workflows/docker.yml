@@ -25,6 +25,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore and verify
+        run: |
+          dotnet restore src/YunxiTiku.Web/YunxiTiku.Web.csproj
+          dotnet build src/YunxiTiku.Web/YunxiTiku.Web.csproj -c Release --no-restore
+          dotnet list src/YunxiTiku.Web/YunxiTiku.Web.csproj package --vulnerable --include-transitive | tee vulnerable.txt
+          if grep -Eiq 'has the following vulnerable packages|具有下列易受攻击的包' vulnerable.txt; then exit 1; fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
