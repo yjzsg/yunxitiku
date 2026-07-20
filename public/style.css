@@ -388,6 +388,44 @@ body.is-admin .admin-only {
   right: 12px;
 }
 
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.save-status[data-status="dirty"] {
+  color: var(--warning);
+  border-color: #fcd34d;
+  background: var(--warning-50);
+}
+
+.save-status[data-status="saving"] {
+  color: var(--primary-600);
+  border-color: #c7d2fe;
+  background: var(--primary-50);
+}
+
+.save-status[data-status="error"] {
+  color: var(--danger);
+  border-color: #fecaca;
+  background: var(--danger-50);
+}
+
+.save-status[data-status="idle"] {
+  color: var(--success);
+  border-color: #bbf7d0;
+  background: var(--success-50);
+}
+
 .account-box {
   margin-left: auto;
   display: flex;
@@ -867,6 +905,20 @@ body.admin-view .workspace {
   background: var(--primary-50);
   color: var(--primary-600);
   font-weight: 700;
+}
+
+
+.exam-paused-flag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid #fcd34d;
+  background: var(--warning-50);
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .exam-status {
@@ -8140,3 +8192,271 @@ body.panel-page .answer-card-wrap,
     grid-template-rows: auto auto minmax(0, 1fr) auto 42px;
   }
 }
+
+/* --- UX polish: conflict recovery / admin shell / mobile refinement --- */
+.conflict-modal {
+  width: min(520px, calc(100vw - 28px));
+}
+
+.conflict-message {
+  margin: 0 0 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.conflict-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.conflict-metric {
+  display: grid;
+  gap: 4px;
+  padding: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card-soft);
+  text-align: center;
+}
+
+.conflict-metric b {
+  font-size: 18px;
+  color: var(--text);
+}
+
+.conflict-metric span,
+.conflict-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.conflict-hint {
+  display: block;
+  margin-top: 10px;
+}
+
+.admin-shell {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-toolbar {
+  align-items: flex-start;
+}
+
+.admin-toolbar-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-view-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.admin-view-btn {
+  min-width: 72px;
+}
+
+.admin-view-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow-xs);
+}
+
+.admin-view-head strong {
+  display: block;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.admin-view-head span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.admin-view-head-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-view-head-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid #c7d2fe;
+  background: var(--primary-50);
+  color: var(--primary-600);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.admin-view-body {
+  min-width: 0;
+}
+
+.admin-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-user-actions button {
+  min-width: 88px;
+}
+
+@media screen and (max-width: 760px) {
+  .main-nav {
+    min-height: 56px;
+    padding: 0 10px;
+    gap: 4px;
+  }
+
+  .account-box {
+    gap: 6px;
+  }
+
+  .save-status {
+    font-size: 11px;
+    padding: 0 6px;
+  }
+
+  .toolbar {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .toolbar button,
+  .question-actions button {
+    min-width: 0;
+    min-height: 36px;
+    padding: 0 10px;
+    border-radius: 11px;
+    font-size: 12px;
+  }
+
+  .mobile-menu-btn,
+  .mobile-actions-btn,
+  .mobile-tools-btn {
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+
+  .question-view {
+    padding: 14px 12px 18px;
+  }
+
+  .question-actions {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .answer-card-wrap {
+    padding: 8px;
+  }
+
+  .answer-card-collapse-btn {
+    width: 100%;
+    margin-bottom: 6px;
+  }
+
+  .admin-toolbar {
+    gap: 8px;
+  }
+
+  .admin-view-tabs {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+
+  .admin-view-btn {
+    flex: 0 0 auto;
+    min-width: 68px;
+  }
+
+  .admin-view-head {
+    flex-direction: column;
+    padding: 12px;
+  }
+
+  .admin-user-card {
+    padding: 12px;
+    border-radius: 14px;
+  }
+
+  .admin-user-actions button,
+  .admin-actions button {
+    min-width: 0;
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .conflict-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .conflict-actions {
+    flex-direction: column;
+  }
+
+  .conflict-actions button {
+    width: 100%;
+  }
+
+  .modal-panel {
+    width: min(100%, calc(100vw - 20px));
+  }
+}
+
+@media screen and (max-width: 420px) {
+  .toolbar button {
+    font-size: 11px;
+    padding: 0 8px;
+  }
+
+  .save-status {
+    display: none;
+  }
+
+  .admin-view-head-meta {
+    width: 100%;
+  }
+
+  .admin-view-head-meta span {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  .conflict-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+

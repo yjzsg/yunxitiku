@@ -1,4 +1,4 @@
-﻿const state = {
+const state = {
   mode: "training",
   user: "",
   users: [],
@@ -22,6 +22,10 @@
   saveTimer: null,
   saveChain: null,
   saveErrorShownAt: 0,
+  storageDirty: false,
+  saveStatus: "idle",
+  conflictOpen: false,
+  conflictLocalSnapshot: null,
   pendingPasswordUser: "",
   pendingOldPassword: "",
   pickerOpen: false,
@@ -593,7 +597,7 @@ function ensureMobileControls() {
     btn.id = "mobileMenuBtn";
     btn.className = "mobile-menu-btn";
     btn.type = "button";
-    btn.textContent = "\u66f4\u591a";
+    btn.textContent = "菜单";
     const refresh = document.querySelector('[data-action="refresh"]');
     refresh?.parentNode.insertBefore(btn, refresh);
   }
@@ -603,7 +607,7 @@ function ensureMobileControls() {
     btn.id = "mobileActionsBtn";
     btn.className = "mobile-actions-btn";
     btn.type = "button";
-    btn.textContent = "\u66f4\u591a";
+    btn.textContent = "操作";
     $("noteBtn").parentNode.insertBefore(btn, $("noteBtn"));
   }
 
@@ -612,7 +616,7 @@ function ensureMobileControls() {
     btn.id = "mobileToolsBtn";
     btn.className = "mobile-tools-btn";
     btn.type = "button";
-    btn.textContent = "\u66f4\u591a";
+    btn.textContent = "工具";
     const toolbar = document.querySelector(".toolbar");
     toolbar?.appendChild(btn);
   }
@@ -664,31 +668,73 @@ function ensureVerifyModeControl() {
 }
 
 function setMobileMenu(open) {
-  state.mobileMenuOpen = open;
-  document.body.classList.toggle("mobile-menu-open", open);
+  state.mobileMenuOpen = !!open;
+  if (state.mobileMenuOpen) {
+    state.mobileActionsOpen = false;
+    state.mobileToolsOpen = false;
+  }
+  document.body.classList.toggle("mobile-menu-open", state.mobileMenuOpen);
+  document.body.classList.toggle("mobile-actions-open", state.mobileActionsOpen);
+  document.body.classList.toggle("mobile-tools-open", state.mobileToolsOpen);
   if ($("mobileMenuBtn")) {
-    $("mobileMenuBtn").textContent = open ? "\u6536\u8d77" : "\u66f4\u591a";
-    $("mobileMenuBtn").setAttribute("aria-expanded", String(open));
+    $("mobileMenuBtn").textContent = state.mobileMenuOpen ? "收起" : "菜单";
+    $("mobileMenuBtn").setAttribute("aria-expanded", String(state.mobileMenuOpen));
+  }
+  if ($("mobileActionsBtn")) {
+    $("mobileActionsBtn").textContent = state.mobileActionsOpen ? "收起" : "操作";
+    $("mobileActionsBtn").setAttribute("aria-expanded", String(state.mobileActionsOpen));
+  }
+  if ($("mobileToolsBtn")) {
+    $("mobileToolsBtn").textContent = state.mobileToolsOpen ? "收起" : "工具";
+    $("mobileToolsBtn").setAttribute("aria-expanded", String(state.mobileToolsOpen));
   }
   scheduleNavIndicator();
   setTimeout(updateNavIndicator, 260);
 }
 
 function setMobileActions(open) {
-  state.mobileActionsOpen = open;
-  document.body.classList.toggle("mobile-actions-open", open);
+  state.mobileActionsOpen = !!open;
+  if (state.mobileActionsOpen) {
+    state.mobileMenuOpen = false;
+    state.mobileToolsOpen = false;
+  }
+  document.body.classList.toggle("mobile-menu-open", state.mobileMenuOpen);
+  document.body.classList.toggle("mobile-actions-open", state.mobileActionsOpen);
+  document.body.classList.toggle("mobile-tools-open", state.mobileToolsOpen);
+  if ($("mobileMenuBtn")) {
+    $("mobileMenuBtn").textContent = state.mobileMenuOpen ? "收起" : "菜单";
+    $("mobileMenuBtn").setAttribute("aria-expanded", String(state.mobileMenuOpen));
+  }
   if ($("mobileActionsBtn")) {
-    $("mobileActionsBtn").textContent = open ? "\u6536\u8d77" : "\u66f4\u591a";
-    $("mobileActionsBtn").setAttribute("aria-expanded", String(open));
+    $("mobileActionsBtn").textContent = state.mobileActionsOpen ? "收起" : "操作";
+    $("mobileActionsBtn").setAttribute("aria-expanded", String(state.mobileActionsOpen));
+  }
+  if ($("mobileToolsBtn")) {
+    $("mobileToolsBtn").textContent = state.mobileToolsOpen ? "收起" : "工具";
+    $("mobileToolsBtn").setAttribute("aria-expanded", String(state.mobileToolsOpen));
   }
 }
 
 function setMobileTools(open) {
-  state.mobileToolsOpen = open;
-  document.body.classList.toggle("mobile-tools-open", open);
+  state.mobileToolsOpen = !!open;
+  if (state.mobileToolsOpen) {
+    state.mobileMenuOpen = false;
+    state.mobileActionsOpen = false;
+  }
+  document.body.classList.toggle("mobile-menu-open", state.mobileMenuOpen);
+  document.body.classList.toggle("mobile-actions-open", state.mobileActionsOpen);
+  document.body.classList.toggle("mobile-tools-open", state.mobileToolsOpen);
+  if ($("mobileMenuBtn")) {
+    $("mobileMenuBtn").textContent = state.mobileMenuOpen ? "收起" : "菜单";
+    $("mobileMenuBtn").setAttribute("aria-expanded", String(state.mobileMenuOpen));
+  }
+  if ($("mobileActionsBtn")) {
+    $("mobileActionsBtn").textContent = state.mobileActionsOpen ? "收起" : "操作";
+    $("mobileActionsBtn").setAttribute("aria-expanded", String(state.mobileActionsOpen));
+  }
   if ($("mobileToolsBtn")) {
-    $("mobileToolsBtn").textContent = open ? "\u6536\u8d77" : "\u66f4\u591a";
-    $("mobileToolsBtn").setAttribute("aria-expanded", String(open));
+    $("mobileToolsBtn").textContent = state.mobileToolsOpen ? "收起" : "工具";
+    $("mobileToolsBtn").setAttribute("aria-expanded", String(state.mobileToolsOpen));
   }
 }
 
@@ -757,6 +803,7 @@ function renderUsers() {
   setText("accountLabel", `账号：${state.user || "未登录"}`);
   setText("userName", state.user || "未登录");
   document.body.classList.toggle("is-admin", (state.user || "").toLowerCase() === "admin");
+  updateSaveStatusUi();
 }
 
 function showLogin() {
@@ -768,14 +815,24 @@ function showLogin() {
   $("changePasswordBox").classList.add("hidden");
   state.pendingPasswordUser = "";
   state.pendingOldPassword = "";
-  const lastUser = localStorage.getItem(LAST_USER_KEY) || "admin";
+  const lastUser = localStorage.getItem(LAST_USER_KEY) || "";
   $("loginUserSelect").value = lastUser;
   $("loginUserSelect").focus();
 }
 
 async function login() {
-  const user = $("loginUserSelect").value.trim() || "admin";
+  const user = $("loginUserSelect").value.trim();
   const password = $("loginPassword").value;
+  if (!user) {
+    toast("请输入账号");
+    $("loginUserSelect").focus();
+    return;
+  }
+  if (!password) {
+    toast("请输入密码");
+    $("loginPassword").focus();
+    return;
+  }
   const result = await api("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json; charset=utf-8" },
@@ -849,6 +906,8 @@ async function logout() {
   localStorage.removeItem(SESSION_USER_KEY);
   clearTimeout(state.saveTimer);
   state.saveTimer = null;
+  state.storageDirty = false;
+  setSaveStatus("idle");
   state.user = "";
   state.currentCourse = null;
   state.questions = [];
@@ -862,6 +921,8 @@ async function loadUserData(user) {
   state.user = res.user;
   state.storage = normalizeStorage(res.data || {});
   state.storageRevision = res.revision || "";
+  state.storageDirty = false;
+  setSaveStatus("idle");
   state.zoom = normalizeZoom(state.storage.settings?.zoom);
   localStorage.setItem(LAST_USER_KEY, state.user);
   renderUsers();
@@ -917,7 +978,37 @@ function peekCourseStore(courseId = state.currentCourse?.id) {
   return state.storage.courses[String(courseId || "global")] || { answers: {}, done: {}, correct: {}, wrong: {}, verified: {}, lastSubjectId: 0 };
 }
 
+function setSaveStatus(status) {
+  state.saveStatus = status || "idle";
+  updateSaveStatusUi();
+}
+
+function updateSaveStatusUi() {
+  const el = $("saveStatusLabel");
+  if (!el) return;
+  if (!state.user) {
+    el.textContent = "";
+    el.dataset.status = "idle";
+    return;
+  }
+  const map = {
+    idle: "已同步",
+    dirty: "未保存",
+    saving: "保存中…",
+    error: "保存失败",
+  };
+  el.textContent = map[state.saveStatus] || map.idle;
+  el.dataset.status = state.saveStatus || "idle";
+}
+
+function markStorageDirty() {
+  state.storageDirty = true;
+  if (state.saveStatus !== "saving") setSaveStatus("dirty");
+}
+
 function scheduleSave() {
+  if (!state.user) return;
+  markStorageDirty();
   clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(() => {
     state.saveTimer = null;
@@ -925,9 +1016,27 @@ function scheduleSave() {
   }, 450);
 }
 
+function flushPendingSaveBeacon() {
+  if (!state.user || !state.storageDirty) return false;
+  try {
+    const revision = state.storageRevision ? `&revision=${encodeURIComponent(state.storageRevision)}` : "";
+    const body = JSON.stringify(state.storage);
+    const blob = new Blob([body], { type: "application/json; charset=utf-8" });
+    const ok = navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}${revision}`, blob);
+    if (ok) {
+      state.storageDirty = false;
+      setSaveStatus("idle");
+    }
+    return ok;
+  } catch (_err) {
+    return false;
+  }
+}
+
 function saveUserData() {
   if (!state.user) return Promise.resolve();
   const run = async () => {
+    setSaveStatus("saving");
     const headers = { "Content-Type": "application/json; charset=utf-8" };
     if (state.storageRevision) headers["If-Match"] = `"${state.storageRevision}"`;
     const result = await api(`/api/user/save?user=${encodeURIComponent(state.user)}`, {
@@ -936,6 +1045,8 @@ function saveUserData() {
       body: JSON.stringify(state.storage),
     });
     state.storageRevision = result.revision || state.storageRevision;
+    state.storageDirty = false;
+    setSaveStatus("idle");
     return result;
   };
   state.saveChain = (state.saveChain || Promise.resolve()).catch(() => {}).then(run);
@@ -943,12 +1054,114 @@ function saveUserData() {
 }
 
 function handleUserSaveError(err) {
+  setSaveStatus("error");
+  state.storageDirty = true;
   const now = Date.now();
+  if (err?.status === 409 || err?.code === "user_data_conflict") {
+    openConflictDialog(err);
+    return;
+  }
   if (now - Number(state.saveErrorShownAt || 0) < 5000) return;
   state.saveErrorShownAt = now;
-  toast(err?.status === 409
-    ? "数据已在其他页面更新，请刷新页面后继续，避免覆盖最新进度"
-    : `保存失败：${err?.message || "请检查网络和磁盘空间"}`);
+  toast(`保存失败：${err?.message || "请检查网络和磁盘空间"}`);
+}
+
+function summarizeStorage(data = {}) {
+  const courses = Object.values(data.courses || {});
+  const done = courses.reduce((sum, course) => sum + Object.keys(course?.done || {}).length, 0);
+  const wrong = Object.keys(data.wrong || {}).length;
+  const favorite = Object.keys(data.favorite || {}).length;
+  const notes = Object.keys(data.notes || {}).length;
+  const examDrafts = Object.keys(data.examDrafts || {}).length + (data.examDraft ? 1 : 0);
+  return { done, wrong, favorite, notes, examDrafts };
+}
+
+function openConflictDialog(err) {
+  if (state.conflictOpen) return;
+  state.conflictOpen = true;
+  state.conflictLocalSnapshot = {
+    user: state.user,
+    revision: state.storageRevision || "",
+    storage: JSON.parse(JSON.stringify(state.storage || {})),
+    at: nowText(),
+  };
+  const modal = $("conflictModal");
+  if (!modal) {
+    toast("数据已在其他页面更新，请刷新后继续");
+    return;
+  }
+  const local = summarizeStorage(state.conflictLocalSnapshot.storage);
+  $("conflictMessage").textContent = err?.message || "当前账号的数据已在其他页面更新。为避免覆盖，请选择如何处理本地未保存改动。";
+  $("conflictSummary").innerHTML = `
+    <div class="conflict-metric"><b>${local.done}</b><span>本页已做题标记</span></div>
+    <div class="conflict-metric"><b>${local.wrong}</b><span>错题</span></div>
+    <div class="conflict-metric"><b>${local.favorite}</b><span>收藏</span></div>
+    <div class="conflict-metric"><b>${local.notes}</b><span>笔记</span></div>
+    <div class="conflict-metric"><b>${local.examDrafts}</b><span>考试草稿</span></div>
+  `;
+  modal.classList.remove("hidden");
+  setSaveStatus("error");
+}
+
+function closeConflictDialog() {
+  state.conflictOpen = false;
+  $("conflictModal")?.classList.add("hidden");
+}
+
+function exportConflictLocalDraft() {
+  const snapshot = state.conflictLocalSnapshot;
+  if (!snapshot) {
+    toast("没有可导出的本地草稿");
+    return;
+  }
+  const payload = {
+    type: "yunxi-local-draft",
+    exportedAt: nowText(),
+    user: snapshot.user,
+    baseRevision: snapshot.revision,
+    storage: snapshot.storage,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  a.href = url;
+  a.download = `yunxi-local-draft-${snapshot.user || "user"}-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast("本地草稿已导出");
+}
+
+async function reloadServerUserDataFromConflict() {
+  if (!state.user) return;
+  const snapshot = state.conflictLocalSnapshot;
+  try {
+    await loadUserData(state.user);
+    state.storageDirty = false;
+    setSaveStatus("idle");
+    closeConflictDialog();
+    if (isAdmin()) {
+      await renderAdminDashboard();
+    } else if (state.currentCourse) {
+      await loadQuestions();
+      if (state.currentIndex >= 0) await loadCurrentQuestion();
+      else renderAll();
+    } else {
+      await restoreLastCourse();
+    }
+    toast(snapshot ? "已加载服务器最新数据，本地草稿可随时导出备份" : "已加载服务器最新数据");
+  } catch (err) {
+    toast(err?.message || "加载服务器数据失败");
+  }
+}
+
+function keepLocalConflictDraft() {
+  closeConflictDialog();
+  setSaveStatus("error");
+  state.storageDirty = true;
+  toast("已保留本地改动，暂不覆盖服务器。建议先导出草稿");
 }
 
 async function switchUser(name) {
@@ -4116,21 +4329,53 @@ function buildUserCourseStats(data) {
 
 function renderAdminRows(rows, failedCount = 0) {
   state.adminView = state.adminView || "users";
+  const viewMeta = {
+    users: { title: "账号管理", desc: "查看进度、停用账号、重置密码" },
+    courses: { title: "课程进度", desc: "按课程横向查看学习情况" },
+    corrections: { title: "纠错反馈", desc: "处理用户提交的题目问题" },
+    banks: { title: "题库更新", desc: "按课程上传更新包" },
+    bankManager: { title: "题库管理器", desc: "预览、发布与回滚课程题库" },
+    bankEditor: { title: "题库编辑", desc: "在线修改题干、选项与解析" },
+    data: { title: "数据管理", desc: "整包上传下载题库和用户数据" },
+  };
+  const currentMeta = viewMeta[state.adminView] || viewMeta.users;
   $("adminDashboard").innerHTML = `
-    <div class="admin-toolbar">
-      <button id="adminAddUserBtn" class="primary-action" type="button">添加用户</button>
-      <button class="admin-view-btn ${state.adminView === "users" ? "active" : ""}" data-admin-view="users" type="button">账号视图</button>
-      <button class="admin-view-btn ${state.adminView === "courses" ? "active" : ""}" data-admin-view="courses" type="button">按课程视图</button>
-      <button class="admin-view-btn ${state.adminView === "corrections" ? "active" : ""}" data-admin-view="corrections" type="button">纠错反馈</button>
-      <button class="admin-view-btn ${state.adminView === "banks" ? "active" : ""}" data-admin-view="banks" type="button">题库更新</button>
-      <button class="admin-view-btn ${state.adminView === "bankManager" ? "active" : ""}" data-admin-view="bankManager" type="button">题库管理器</button>
-      <button class="admin-view-btn ${state.adminView === "bankEditor" ? "active" : ""}" data-admin-view="bankEditor" type="button">题库编辑</button>
-      <button class="admin-view-btn ${state.adminView === "data" ? "active" : ""}" data-admin-view="data" type="button">数据管理</button>
-      ${failedCount ? `<span class="admin-warning">${failedCount} 个用户数据加载失败，已跳过</span>` : ""}
+    <div class="admin-shell">
+      <div class="admin-toolbar">
+        <div class="admin-toolbar-main">
+          <button id="adminAddUserBtn" class="primary-action" type="button">添加用户</button>
+          <button id="adminRefreshBtn" type="button">刷新看板</button>
+        </div>
+        <div class="admin-view-tabs" role="tablist" aria-label="管理视图">
+          <button class="admin-view-btn ${state.adminView === "users" ? "active" : ""}" data-admin-view="users" type="button">账号</button>
+          <button class="admin-view-btn ${state.adminView === "courses" ? "active" : ""}" data-admin-view="courses" type="button">课程</button>
+          <button class="admin-view-btn ${state.adminView === "corrections" ? "active" : ""}" data-admin-view="corrections" type="button">纠错</button>
+          <button class="admin-view-btn ${state.adminView === "banks" ? "active" : ""}" data-admin-view="banks" type="button">更新</button>
+          <button class="admin-view-btn ${state.adminView === "bankManager" ? "active" : ""}" data-admin-view="bankManager" type="button">管理器</button>
+          <button class="admin-view-btn ${state.adminView === "bankEditor" ? "active" : ""}" data-admin-view="bankEditor" type="button">编辑</button>
+          <button class="admin-view-btn ${state.adminView === "data" ? "active" : ""}" data-admin-view="data" type="button">数据</button>
+        </div>
+        ${failedCount ? `<span class="admin-warning">${failedCount} 个用户数据加载失败，已跳过</span>` : ""}
+      </div>
+      <div class="admin-view-head">
+        <div>
+          <strong>${escapeHtml(currentMeta.title)}</strong>
+          <span>${escapeHtml(currentMeta.desc)}</span>
+        </div>
+        <div class="admin-view-head-meta">
+          <span>用户 ${rows.length}</span>
+          <span>课程 ${state.adminCourses.length || state.courses.length || 0}</span>
+        </div>
+      </div>
+      <div class="admin-view-body">
+        ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "bankManager" ? renderAdminBankManagerPanel() : state.adminView === "bankEditor" ? renderAdminBankEditorPanel() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
+      </div>
     </div>
-    ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "bankManager" ? renderAdminBankManagerPanel() : state.adminView === "bankEditor" ? renderAdminBankEditorPanel() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
   `;
   $("adminAddUserBtn").onclick = openAdminUserDialog;
+  if ($("adminRefreshBtn")) {
+    $("adminRefreshBtn").onclick = () => renderAdminDashboard().catch((err) => toast(err.message));
+  }
   document.querySelectorAll("[data-admin-view]").forEach((btn) => {
     btn.onclick = () => {
       state.adminView = btn.dataset.adminView;
@@ -5181,7 +5426,14 @@ async function adminUserAction(target, action) {
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({ target, action }),
   });
-  toast(result.message || `${names[action] || "操作"}成功`);
+  const hints = {
+    "reset-password": "默认密码已重置为 123456，用户下次登录需修改",
+    "clear-data": "该账号做题数据已清空",
+    delete: "账号已删除",
+    disable: "账号已停用",
+    enable: "账号已启用",
+  };
+  toast(result.message || hints[action] || `${names[action] || "操作"}成功`);
   await loadUsers();
   await renderAdminDashboard();
 }
@@ -5235,8 +5487,7 @@ async function moveQuestion(delta) {
 
 function isSwipeIgnoredTarget(target) {
   if (!target?.closest) return false;
-  if (target.closest(".option")) return false;
-  return !!target.closest("input, textarea, select, label, a, .answer-card-wrap, .question-tag-panel, .practice-context-panel, .question-actions, .toolbar, .main-nav, .modal");
+  return !!target.closest("input, textarea, select, label, a, button.option, .option, .options, .answer-card-wrap, .question-tag-panel, .practice-context-panel, .question-actions, .toolbar, .main-nav, .modal");
 }
 
 function canSwipeQuestions() {
@@ -5381,9 +5632,11 @@ async function submitPaper(autoSubmit = false) {
   renderQuestion();
   renderPracticeContextPanel();
   if (state.mode === "exam") {
-    toast(`${autoSubmit ? "时间到，已自动交卷" : "已交卷"}：${formatScore(score)}/${formatScore(totalScore)} 分`);
+    const subjectiveHint = subjective ? `，主观题 ${subjective} 道未自动计分` : "";
+    toast(`${autoSubmit ? "时间到，已自动交卷" : "已交卷"}：${formatScore(score)}/${formatScore(totalScore)} 分${subjectiveHint}`);
   } else {
-    toast(`已提交：${correct}/${checked} 题正确`);
+    const subjectiveHint = subjective ? `，主观题 ${subjective} 道需人工核对` : "";
+    toast(`已提交：${correct}/${checked} 题正确${subjectiveHint}`);
   }
 }
 
@@ -5391,30 +5644,56 @@ function resetPractice() {
   stopExamTimer();
   const resettingExam = state.mode === "exam";
   if (resettingExam) {
+    if (!confirm("确定放弃本次模拟考试吗？已答内容将清除。")) return;
     clearExamDraft();
     state.exam = null;
-  }
-  state.answers = {};
-  state.submitted = false;
-  state.answerVisible = false;
-  if (state.currentCourse && !resettingExam) userCourseStore().answers = {};
-  if (!resettingExam) clearVerifiedForCourse();
-  scheduleSave();
-  if (resettingExam) {
+    state.answers = {};
+    state.submitted = false;
+    state.answerVisible = false;
     state.questions = [];
     state.currentIndex = -1;
+    scheduleSave();
     renderExamHome();
     toast("已放弃本次模拟考");
     return;
   }
+
+  const ids = state.questions.map((item) => Number(item.id)).filter(Boolean);
+  if (!ids.length) {
+    toast("当前没有可重置的题目");
+    return;
+  }
+  const scopeLabel = state.currentChapter
+    ? `当前章节「${state.currentChapter.name}」共 ${ids.length} 题`
+    : `当前题单共 ${ids.length} 题`;
+  if (!confirm(`仅清空${scopeLabel}的作答记录，不会影响其他章节。\n\n确定继续？`)) return;
+
+  const courseStore = userCourseStore();
+  state.answers = {};
+  state.submitted = false;
+  state.answerVisible = false;
+  for (const id of ids) {
+    const key = String(id);
+    delete courseStore.answers?.[id];
+    delete courseStore.answers?.[key];
+    delete courseStore.done?.[id];
+    delete courseStore.done?.[key];
+    delete courseStore.correct?.[id];
+    delete courseStore.correct?.[key];
+    delete courseStore.wrong?.[id];
+    delete courseStore.wrong?.[key];
+    delete courseStore.verified?.[id];
+    delete courseStore.verified?.[key];
+  }
+  // Keep course-level progress for other chapters intact.
+  scheduleSave();
   if (!state.questions.length) {
-    if (state.mode === "exam") renderExamHome();
-    else renderAll();
-    toast("已清空本次作答");
+    renderAll();
+    toast("已清空当前题单作答");
     return;
   }
   renderQuestion();
-  toast("已清空本次作答");
+  toast("已清空当前题单作答");
 }
 
 function isFavorite(id) {
@@ -5488,6 +5767,9 @@ function saveExamDraft() {
     answerCardPage: Math.max(0, state.answerCardPage),
     startedAt: Number(state.exam.startedAt || Date.now()),
     endsAt: Number(state.exam.endsAt || Date.now()),
+    remainingMs: getExamRemainingMs(state.exam),
+    pausedAt: state.exam.pausedAt || null,
+    pauseReason: state.exam.pauseReason || "",
     savedAt: Date.now(),
     savedAtText: nowText(),
   };
@@ -5507,15 +5789,18 @@ function clearExamDraft(courseId = state.currentCourse?.id) {
 
 function renderExamDraftCard(draft = examDraftForCurrentCourse()) {
   if (!draft) return "";
-  const leftMs = Number(draft.endsAt || 0) - Date.now();
+  const leftMs = draft.pausedAt != null || draft.remainingMs != null
+    ? Math.max(0, Number(draft.remainingMs || 0))
+    : Math.max(0, Number(draft.endsAt || 0) - Date.now());
   const expired = leftMs <= 0;
+  const paused = !!draft.pausedAt && !expired;
   const answered = examDraftAnswerCount(draft);
   const total = draft.questionIds?.length || 0;
   return `
     <div class="exam-draft-card">
       <div>
         <strong>未完成考试</strong>
-        <span>${escapeHtml(draft.rule?.name || "模拟卷")} · 已答 ${answered}/${total} 题 · ${expired ? "已到交卷时间" : `剩余 ${formatSeconds(leftMs / 1000)}`}</span>
+        <span>${escapeHtml(draft.rule?.name || "模拟卷")} · 已答 ${answered}/${total} 题 · ${expired ? "已到交卷时间" : paused ? `已暂停 · 剩余 ${formatSeconds(leftMs / 1000)}` : `剩余 ${formatSeconds(leftMs / 1000)}`}</span>
         <small>${escapeHtml(draft.courseName || state.currentCourse?.name || "")} · 保存于 ${escapeHtml(draft.savedAtText || "")}</small>
       </div>
       <div class="exam-draft-actions">
@@ -5567,21 +5852,27 @@ async function resumeExamDraft() {
     throw new Error("考试草稿中的题目已不存在");
   }
   state.currentIndex = Math.min(Math.max(0, Number(draft.currentIndex || 0)), state.questions.length - 1);
+  const remaining = draft.pausedAt != null || draft.remainingMs != null
+    ? Math.max(0, Number(draft.remainingMs || 0))
+    : Math.max(0, Number(draft.endsAt || 0) - Date.now());
   state.exam = {
     rule: draft.rule || getExamRule(),
     scoreMap: draft.scoreMap || {},
     startedAt: Number(draft.startedAt || Date.now()),
-    endsAt: Number(draft.endsAt || Date.now()),
+    endsAt: Date.now() + remaining,
+    remainingMs: remaining,
+    pausedAt: null,
+    pauseReason: "",
     submittedAt: null,
     result: null,
     draftId: draft.id || `${Date.now()}-${draft.courseId || 0}`,
   };
-  startExamTimer();
   renderAll();
   await loadCurrentQuestion();
-  if (Date.now() >= state.exam.endsAt) {
+  if (remaining <= 0) {
     await submitPaper(true);
   } else {
+    startExamTimer();
     toast("已恢复未完成考试");
   }
 }
@@ -5832,11 +6123,15 @@ async function startExamPaper() {
   state.answerVisible = false;
   state.currentIndex = 0;
   state.answerCardPage = 0;
+  const durationMs = rule.durationMinutes * 60000;
   state.exam = {
     rule,
     scoreMap,
     startedAt: Date.now(),
-    endsAt: Date.now() + rule.durationMinutes * 60000,
+    endsAt: Date.now() + durationMs,
+    remainingMs: durationMs,
+    pausedAt: null,
+    pauseReason: "",
     submittedAt: null,
     result: null,
   };
@@ -5864,15 +6159,71 @@ async function fetchExamPartQuestions(part, count, chapterId = 0) {
   return shuffleItems(items).slice(0, count);
 }
 
+function getExamRemainingMs(exam = state.exam) {
+  if (!exam) return 0;
+  if (exam.pausedAt) return Math.max(0, Number(exam.remainingMs || 0));
+  return Math.max(0, Number(exam.endsAt || 0) - Date.now());
+}
+
+function isExamTimedOut(exam = state.exam) {
+  return !!exam && !state.submitted && getExamRemainingMs(exam) <= 0;
+}
+
+function pauseExamTimer(reason = "background") {
+  if (state.mode !== "exam" || !state.exam || state.submitted) {
+    stopExamTimer();
+    return;
+  }
+  if (!state.exam.pausedAt) {
+    state.exam.remainingMs = Math.max(0, Number(state.exam.endsAt || 0) - Date.now());
+    state.exam.pausedAt = Date.now();
+    state.exam.pauseReason = reason;
+  }
+  stopExamTimer();
+  renderExamStatus();
+}
+
+function resumeExamTimer() {
+  if (state.mode !== "exam" || !state.exam || state.submitted) return;
+  if (state.exam.pausedAt) {
+    const remaining = Math.max(0, Number(state.exam.remainingMs || 0));
+    state.exam.endsAt = Date.now() + remaining;
+    state.exam.remainingMs = remaining;
+    state.exam.pausedAt = null;
+    state.exam.pauseReason = "";
+  }
+  if (isExamTimedOut()) {
+    stopExamTimer();
+    renderExamStatus();
+    submitPaper(true).catch((err) => toast(err.message));
+    return;
+  }
+  startExamTimer();
+  renderExamStatus();
+}
+
 function startExamTimer() {
   stopExamTimer();
-  state.examTimer = setInterval(() => {
+  if (state.mode !== "exam" || !state.exam || state.submitted || state.exam.pausedAt) {
     renderExamStatus();
-    if (state.mode === "exam" && state.exam && !state.submitted && Date.now() >= state.exam.endsAt) {
+    return;
+  }
+  state.examTimer = setInterval(() => {
+    if (state.mode !== "exam" || !state.exam || state.submitted) return;
+    if (state.exam.pausedAt) {
+      stopExamTimer();
+      renderExamStatus();
+      return;
+    }
+    renderExamStatus();
+    if (isExamTimedOut()) {
       submitPaper(true).catch((err) => toast(err.message));
     }
   }, 1000);
   renderExamStatus();
+  if (isExamTimedOut()) {
+    submitPaper(true).catch((err) => toast(err.message));
+  }
 }
 
 function stopExamTimer() {
@@ -5882,8 +6233,12 @@ function stopExamTimer() {
 
 function syncExamTimer() {
   if (state.mode !== "exam" || !state.exam) return;
+  if (state.exam.pausedAt) {
+    renderExamStatus();
+    return;
+  }
   renderExamStatus();
-  if (!state.submitted && Date.now() >= state.exam.endsAt) {
+  if (isExamTimedOut()) {
     submitPaper(true).catch((err) => toast(err.message));
   }
 }
@@ -5896,14 +6251,16 @@ function renderExamStatus() {
     host.innerHTML = "";
     return;
   }
-  const left = Math.max(0, state.exam.endsAt - Date.now());
+  const left = getExamRemainingMs();
   const minutes = Math.floor(left / 60000);
   const seconds = Math.floor((left % 60000) / 1000);
   const result = state.exam.result;
+  const paused = !!state.exam.pausedAt && !result;
   host.classList.remove("hidden");
   host.innerHTML = `
     <span>模拟考场</span>
     <b>${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}</b>
+    ${paused ? `<span class="exam-paused-flag">已暂停</span>` : ""}
     <span>满分 ${state.exam.rule.totalScore} 分</span>
     ${result ? `<span>得分 <b>${formatScore(result.score)}</b> / ${formatScore(result.totalScore)}，正确率 ${result.rate}%</span>` : ""}
   `;
@@ -6181,7 +6538,7 @@ function isTypingTarget(target) {
 }
 
 function hasOpenModal() {
-  return ["correctionModal", "adminUserModal"].some((id) => {
+  return ["correctionModal", "adminUserModal", "printModal", "conflictModal"].some((id) => {
     const el = $(id);
     return el && !el.classList.contains("hidden");
   });
@@ -6212,7 +6569,7 @@ function handleGlobalShortcuts(event) {
       return;
     }
   }
-  if (!event.ctrlKey && !event.shiftKey && event.code === "Space" && state.currentIndex >= 0) {
+  if (!event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "f" && state.currentIndex >= 0) {
     event.preventDefault();
     toggleFavorite();
     return;
@@ -6237,10 +6594,7 @@ function handleGlobalShortcuts(event) {
     if (q?.options?.some((option) => option.label === "A") && !shouldRevealCurrentAnswer(q)) {
       event.preventDefault();
       chooseOption(q, "A");
-      return;
     }
-    event.preventDefault();
-    toggleAnswer();
     return;
   }
   if (!event.ctrlKey && !event.shiftKey && /^[b-z]$/i.test(event.key) && state.currentIndex >= 0) {
@@ -6377,6 +6731,15 @@ $("printAllBtn").onclick = () => printQuestions("all").catch((err) => toast(err.
 $("printModal").addEventListener("click", (event) => {
   if (event.target === $("printModal")) closePrintDialog();
 });
+if ($("conflictModal")) {
+  $("conflictCloseBtn").onclick = keepLocalConflictDraft;
+  $("conflictKeepBtn").onclick = keepLocalConflictDraft;
+  $("conflictExportBtn").onclick = exportConflictLocalDraft;
+  $("conflictReloadBtn").onclick = () => reloadServerUserDataFromConflict().catch((err) => toast(err.message));
+  $("conflictModal").addEventListener("click", (event) => {
+    if (event.target === $("conflictModal")) keepLocalConflictDraft();
+  });
+}
 window.addEventListener("afterprint", cleanupPrintView);
 $("zoomInBtn").onclick = () => changeZoom(0.1);
 $("zoomOutBtn").onclick = () => changeZoom(-0.1);
@@ -6385,14 +6748,19 @@ document.addEventListener("fullscreenchange", updateFullscreenState);
 document.addEventListener("keydown", handleGlobalShortcuts);
 window.addEventListener("resize", debounce(scheduleNavIndicator, 120));
 document.addEventListener("visibilitychange", () => {
-  if (state.mode !== "exam" || !state.exam) return;
   if (document.hidden) {
-    saveExamDraft();
-    stopExamTimer();
+    if (state.mode === "exam" && state.exam && !state.submitted) {
+      pauseExamTimer("background");
+      saveExamDraft();
+    }
+    if (state.storageDirty) {
+      saveUserData().catch(() => flushPendingSaveBeacon());
+    }
+    return;
   }
-  else {
-    startExamTimer();
-    syncExamTimer();
+  if (state.mode === "exam" && state.exam && !state.submitted) {
+    resumeExamTimer();
+    if (!state.submitted) saveExamDraft();
   }
 });
 document.querySelector('[data-action="refresh"]').onclick = () => loadCourses().then(() => toast("已重新读取本地题库"));
@@ -6405,11 +6773,15 @@ $("limitSelect").addEventListener("change", loadQuestions);
 
 window.addEventListener("beforeunload", () => {
   syncCurrentTrainingSession();
-  if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
-  if (state.user && state.saveTimer) {
-    const revision = state.storageRevision ? `&revision=${encodeURIComponent(state.storageRevision)}` : "";
-    navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}${revision}`, JSON.stringify(state.storage));
+  if (state.mode === "exam" && state.exam && !state.submitted) {
+    pauseExamTimer("unload");
+    saveExamDraft();
   }
+  if (state.saveTimer) {
+    clearTimeout(state.saveTimer);
+    state.saveTimer = null;
+  }
+  flushPendingSaveBeacon();
 });
 
 init().catch((err) => {

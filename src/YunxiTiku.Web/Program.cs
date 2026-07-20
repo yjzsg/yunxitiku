@@ -733,6 +733,7 @@ static class AdminDataTransfer
         using var zip = ZipFile.Open(tempZip, ZipArchiveMode.Create);
         foreach (var file in Directory.EnumerateFiles(paths.UserDataRoot, "*", SearchOption.AllDirectories)
                      .Where(path => !IsUnderBackup(path, backupRoot))
+                     .Where(path => !string.Equals(Path.GetFileName(path), "sessions.json", StringComparison.OrdinalIgnoreCase))
                      .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             var relative = Path.GetRelativePath(paths.UserDataRoot, file).Replace('\\', '/');
@@ -1232,12 +1233,23 @@ sealed class SessionStore
     private const string CookieName = "yunxi_session";
     private static readonly TimeSpan Lifetime = TimeSpan.FromDays(7);
     private readonly ConcurrentDictionary<string, SessionRecord> _sessions = new(StringComparer.Ordinal);
+    private readonly AppPaths _paths;
+    private readonly object _fileLock = new();
+    private bool _loaded;
+
+    public SessionStore(AppPaths paths)
+    {
+        _paths = paths;
+        EnsureLoaded();
+    }
 
     public void SignIn(HttpContext context, string user)
     {
+        EnsureLoaded();
         Remove(context.Request);
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
         _sessions[token] = new SessionRecord(CleanUserName(user), DateTimeOffset.UtcNow.Add(Lifetime));
+        Persist();
         context.Response.Cookies.Append(CookieName, token, new CookieOptions
         {
             HttpOnly = true,
@@ -1251,11 +1263,13 @@ sealed class SessionStore
 
     public string Resolve(HttpRequest request)
     {
+        EnsureLoaded();
         if (!request.Cookies.TryGetValue(CookieName, out var token) || string.IsNullOrWhiteSpace(token)) return "";
         if (!_sessions.TryGetValue(token, out var record)) return "";
         if (record.ExpiresAt <= DateTimeOffset.UtcNow)
         {
             _sessions.TryRemove(token, out _);
+            Persist();
             return "";
         }
         return record.User;
@@ -1263,9 +1277,10 @@ sealed class SessionStore
 
     public void Remove(HttpRequest request)
     {
+        EnsureLoaded();
         if (request.Cookies.TryGetValue(CookieName, out var token) && !string.IsNullOrWhiteSpace(token))
         {
-            _sessions.TryRemove(token, out _);
+            if (_sessions.TryRemove(token, out _)) Persist();
         }
     }
 
@@ -1275,8 +1290,83 @@ sealed class SessionStore
         context.Response.Cookies.Delete(CookieName, new CookieOptions { Path = "/" });
     }
 
+    private void EnsureLoaded()
+    {
+        if (_loaded) return;
+        lock (_fileLock)
+        {
+            if (_loaded) return;
+            try
+            {
+                var path = SessionFilePath();
+                if (File.Exists(path))
+                {
+                    var json = File.ReadAllText(path, Encoding.UTF8);
+                    var rows = JsonSerializer.Deserialize<List<SessionFileRow>>(json) ?? [];
+                    var now = DateTimeOffset.UtcNow;
+                    foreach (var row in rows)
+                    {
+                        if (string.IsNullOrWhiteSpace(row.Token) || string.IsNullOrWhiteSpace(row.User)) continue;
+                        if (!DateTimeOffset.TryParse(row.ExpiresAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var expires)) continue;
+                        if (expires <= now) continue;
+                        _sessions[row.Token] = new SessionRecord(CleanUserName(row.User), expires);
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore corrupt session file and start fresh in-memory.
+            }
+            _loaded = true;
+        }
+    }
+
+    private void Persist()
+    {
+        lock (_fileLock)
+        {
+            try
+            {
+                Directory.CreateDirectory(_paths.UserDataRoot);
+                var now = DateTimeOffset.UtcNow;
+                var rows = _sessions
+                    .Where(kv => kv.Value.ExpiresAt > now)
+                    .Select(kv => new SessionFileRow
+                    {
+                        Token = kv.Key,
+                        User = kv.Value.User,
+                        ExpiresAt = kv.Value.ExpiresAt.ToString("O", CultureInfo.InvariantCulture)
+                    })
+                    .ToList();
+                // prune expired from memory too
+                foreach (var expired in _sessions.Where(kv => kv.Value.ExpiresAt <= now).Select(kv => kv.Key).ToList())
+                {
+                    _sessions.TryRemove(expired, out _);
+                }
+                var temp = SessionFilePath() + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                var json = JsonSerializer.Serialize(rows);
+                File.WriteAllText(temp, json, new UTF8Encoding(false));
+                File.Move(temp, SessionFilePath(), true);
+            }
+            catch
+            {
+                // Persistence is best-effort; auth still works for current process lifetime.
+            }
+        }
+    }
+
+    private string SessionFilePath() => Path.Combine(_paths.UserDataRoot, "sessions.json");
+
     private sealed record SessionRecord(string User, DateTimeOffset ExpiresAt);
+
+    private sealed class SessionFileRow
+    {
+        public string Token { get; set; } = "";
+        public string User { get; set; } = "";
+        public string ExpiresAt { get; set; } = "";
+    }
 }
+
 
 sealed class AppPaths
 {

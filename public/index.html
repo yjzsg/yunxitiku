@@ -54,6 +54,7 @@
       <button class="hidden" data-action="refresh" type="button">刷新列表</button>
       <div class="account-box">
         <span id="accountLabel">账号：未登录</span>
+        <span id="saveStatusLabel" class="save-status" data-status="idle"></span>
         <button id="logoutBtn">退出</button>
       </div>
     </header>
@@ -61,7 +62,7 @@
     <section class="toolbar">
       <button id="searchToggleBtn">搜索</button>
       <button id="answerToggleBtn">显示答案</button>
-      <button id="resetBtn">重新做题</button>
+      <button id="resetBtn" title="仅清空当前题单作答，不影响其他章节">清空本题单</button>
       <button id="submitBtn">提交答卷</button>
       <span class="toolbar-spacer"></span>
       <button id="filterBtn">试题筛选</button>
@@ -224,6 +225,23 @@
     </div>
   </div>
   <section id="printView" class="print-view hidden"></section>
+
+  <div id="conflictModal" class="modal-backdrop hidden">
+    <div class="modal-panel conflict-modal">
+      <div class="modal-head">
+        <strong>数据冲突</strong>
+        <button id="conflictCloseBtn" type="button">关闭</button>
+      </div>
+      <p id="conflictMessage" class="conflict-message">当前账号的数据已在其他页面更新。为避免覆盖，请选择如何处理本地未保存改动。</p>
+      <div class="conflict-summary" id="conflictSummary"></div>
+      <div class="modal-actions conflict-actions">
+        <button id="conflictReloadBtn" class="primary-action" type="button">加载服务器最新数据</button>
+        <button id="conflictExportBtn" type="button">导出本地草稿</button>
+        <button id="conflictKeepBtn" type="button">暂时保留本地</button>
+      </div>
+      <small class="conflict-hint">推荐：先导出本地草稿，再加载服务器数据，避免进度丢失。</small>
+    </div>
+  </div>
   <div id="toast" class="toast hidden"></div>
   <script src="/app.js"></script>
 </body>
