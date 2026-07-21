@@ -925,6 +925,10 @@ async function loadUserData(user) {
   setSaveStatus("idle");
   state.zoom = normalizeZoom(state.storage.settings?.zoom);
   localStorage.setItem(LAST_USER_KEY, state.user);
+  if (refreshDailyTrainingState()) {
+    // Day rolled over while data was offline: keep local dirty so today's clean slate persists.
+    scheduleSave();
+  }
   renderUsers();
 }
 
@@ -1679,13 +1683,57 @@ function activeTrainingSession() {
   return (state.storage.trainingSessions || []).find((item) => item.id === id) || null;
 }
 
-function findActiveTrainingSessionByType(type, courseId = state.currentCourse?.id) {
+function sessionDayKey(session) {
+  if (!session) return "";
+  if (session.dayKey) return String(session.dayKey);
+  if (session.planKey) return String(session.planKey);
+  return dateKey(parseDate(session.createdAt) || parseDate(session.updatedAt) || new Date());
+}
+
+function isSessionFromToday(session) {
+  return !!session && sessionDayKey(session) === todayKey();
+}
+
+function findActiveTrainingSessionByType(type, courseId = state.currentCourse?.id, options = {}) {
+  const onlyToday = options.onlyToday !== false;
   const sessions = getTrainingSessionsForCourse(courseId);
   return sessions.find((session) => {
     if (session.type !== type) return false;
+    if (onlyToday && !isSessionFromToday(session)) return false;
     syncTrainingSessionStats(session);
     return session.status !== "completed" && normalizeSessionIds(session.ids).length;
   }) || null;
+}
+
+function refreshDailyTrainingState() {
+  const key = todayKey();
+  let changed = false;
+  const active = activeTrainingSession();
+  if (active && !isSessionFromToday(active)) {
+    // Previous-day unfinished sessions stay in history, but must not block today's training.
+    if (active.status !== "completed") {
+      active.status = "expired";
+      active.expiredAt = active.expiredAt || nowText();
+      active.expiredReason = "rolled_to_next_day";
+    }
+    state.storage.activeTrainingSessionId = "";
+    changed = true;
+  }
+  const smart = state.storage.smartPractice;
+  if (smart) {
+    const smartDay = smart.dayKey || dateKey(parseDate(smart.createdAt) || new Date());
+    if (smartDay !== key) {
+      state.storage.smartPractice = null;
+      changed = true;
+    }
+  }
+  // Keep dailyActivity keyed by date; ensure today bucket exists for stable UI.
+  state.storage.dailyActivity ||= {};
+  if (!state.storage.dailyActivity[key]) {
+    state.storage.dailyActivity[key] = { courses: {}, total: 0, correct: 0, verified: 0, updatedAt: nowText() };
+    changed = true;
+  }
+  return changed;
 }
 
 function upsertTrainingSession(session, activate = true) {
@@ -1699,6 +1747,7 @@ function upsertTrainingSession(session, activate = true) {
     ...session,
     ids,
     total: ids.length,
+    dayKey: session.dayKey || old.dayKey || todayKey(),
     createdAt: old.createdAt || session.createdAt || now,
     updatedAt: now,
     status: session.status || old.status || "active",
@@ -1778,6 +1827,7 @@ function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {
     courseName: state.currentCourse?.name || "",
     sourceTitle,
     ids: cleanIds,
+    dayKey: session.dayKey || todayKey(),
     createdAt: session.createdAt,
   };
   state.smartPracticeFreshStart = true;
@@ -2958,14 +3008,22 @@ function renderTraining() {
   const today = getTodayActivity();
   const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
+  refreshDailyTrainingState();
   const smart = state.storage.smartPractice;
-  const canContinueSmart = smart && Number(smart.courseId || 0) === Number(state.currentCourse?.id || 0) && Array.isArray(smart.ids) && smart.ids.length;
+  const smartDay = smart?.dayKey || dateKey(parseDate(smart?.createdAt) || new Date());
+  const canContinueSmart = !!(
+    smart
+    && Number(smart.courseId || 0) === Number(state.currentCourse?.id || 0)
+    && Array.isArray(smart.ids)
+    && smart.ids.length
+    && smartDay === todayKey()
+  );
   const analysisReady = state.analysisCourseId === Number(state.currentCourse?.id || 0) && state.analysisQuestions.length;
   const previewContext = { items, stats, due, weak, analysisReady };
   const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
   const similarPreview = previewPracticePlan("similar", courseStore, previewContext);
   const sprintPreview = previewPracticePlan("sprint", courseStore, previewContext);
-  const activeSmartSession = findActiveTrainingSessionByType("smart");
+  const activeSmartSession = findActiveTrainingSessionByType("smart", state.currentCourse?.id, { onlyToday: true });
   const hasReviewPlan = !!activeReviewPlan().examDate;
   const planOverview = hasReviewPlan
     ? buildReviewPlanOverview(stats, Object.keys(courseStore.wrong || {}).length, items)
@@ -3241,6 +3299,7 @@ async function continueTrainingSession(sessionId) {
     sourceTitle: session.sourceTitle || "智能训练",
     ids: normalizeSessionIds(session.ids),
     createdAt: session.createdAt || nowText(),
+    dayKey: session.dayKey || sessionDayKey(session),
   };
   state.mode = "smart";
   setCoursePicker(false);
@@ -3435,8 +3494,9 @@ async function startSignalPractice(type, label) {
 
 async function startSmartPractice(options = {}) {
   if (!state.currentCourse) return;
+  refreshDailyTrainingState();
   if (!options.force) {
-    const activeSmart = findActiveTrainingSessionByType("smart");
+    const activeSmart = findActiveTrainingSessionByType("smart", state.currentCourse?.id, { onlyToday: true });
     if (activeSmart) {
       await continueTrainingSession(activeSmart.id);
       return;
@@ -3481,9 +3541,12 @@ async function exitTrainingSession() {
 
 async function continueSmartPractice() {
   if (!state.currentCourse) return;
+  refreshDailyTrainingState();
   const smart = state.storage.smartPractice;
-  if (!smart || Number(smart.courseId || 0) !== Number(state.currentCourse.id) || !Array.isArray(smart.ids) || !smart.ids.length) {
-    toast("没有可继续的智能练习");
+  const smartDay = smart?.dayKey || dateKey(parseDate(smart?.createdAt) || new Date());
+  if (!smart || Number(smart.courseId || 0) !== Number(state.currentCourse.id) || !Array.isArray(smart.ids) || !smart.ids.length || smartDay !== todayKey()) {
+    toast("没有可继续的今日智能练习，请开始今日强化");
+    if (state.mode === "training") renderTraining();
     return;
   }
   if (!smart.sessionId) {
@@ -6757,6 +6820,10 @@ document.addEventListener("visibilitychange", () => {
       saveUserData().catch(() => flushPendingSaveBeacon());
     }
     return;
+  }
+  if (state.user && refreshDailyTrainingState()) {
+    scheduleSave();
+    if (state.mode === "training") renderTraining();
   }
   if (state.mode === "exam" && state.exam && !state.submitted) {
     resumeExamTimer();

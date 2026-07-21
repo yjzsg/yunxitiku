@@ -8460,3 +8460,118 @@ body.panel-page .answer-card-wrap,
   }
 }
 
+/* Fix: top/mobile icon vertical centering */
+.nav-item,
+.toolbar button,
+.question-actions button,
+.mobile-menu-btn,
+.mobile-tools-btn,
+.mobile-actions-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-item::before,
+.toolbar button::before,
+.question-actions button::before,
+#nextBtn::after,
+#searchToggleBtn::before,
+#filterBtn::before,
+#printBtn::before,
+#zoomInBtn::before,
+#zoomOutBtn::before,
+#fullscreenBtn::before,
+#answerToggleBtn::before,
+#verifyModeBtn::before,
+#submitBtn::before,
+#resetBtn::before,
+#prevBtn::before,
+#noteBtn::before,
+#favoriteBtn::before,
+#wrongBtn::before,
+.mobile-tools-btn::before {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  vertical-align: middle;
+  position: relative;
+  top: 0;
+  transform: none;
+}
+
+@media screen and (max-width: 760px) {
+  .main-nav {
+    align-items: center;
+  }
+
+  .nav-item.active,
+  body.mobile-menu-open .nav-item {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 38px;
+    padding: 0 10px;
+    gap: 6px;
+  }
+
+  .nav-item::before {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    margin: 0;
+    line-height: 0;
+  }
+
+  .toolbar button,
+  .question-actions button,
+  .mobile-menu-btn,
+  .mobile-tools-btn,
+  .mobile-actions-btn {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    line-height: 1;
+  }
+
+  .toolbar button::before,
+  .question-actions button::before,
+  #nextBtn::after {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    flex: 0 0 15px;
+    margin: 0;
+    line-height: 0;
+  }
+
+  .account-box,
+  #accountLabel,
+  .account-box button,
+  .save-status {
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+@media screen and (max-width: 420px) {
+  .toolbar button {
+    gap: 4px;
+  }
+
+  .toolbar button::before,
+  .question-actions button::before,
+  #nextBtn::after {
+    width: 14px;
+    height: 14px;
+    flex-basis: 14px;
+  }
+}
+
