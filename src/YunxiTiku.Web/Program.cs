@@ -60,13 +60,16 @@ builder.Services.AddSingleton<QuestionBank>();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.AddFixedWindowLimiter("login", limiter =>
-    {
-        limiter.PermitLimit = 12;
-        limiter.Window = TimeSpan.FromMinutes(1);
-        limiter.QueueLimit = 0;
-        limiter.AutoReplenishment = true;
-    });
+    options.AddPolicy("login", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
 });
 
 var app = builder.Build();
@@ -99,12 +102,19 @@ app.Use(async (context, next) =>
 app.UseRateLimiter();
 app.Use(async (context, next) =>
 {
+    var headers = context.Response.Headers;
+    if (!headers.ContainsKey("X-Content-Type-Options")) headers["X-Content-Type-Options"] = "nosniff";
+    if (!headers.ContainsKey("X-Frame-Options")) headers["X-Frame-Options"] = "SAMEORIGIN";
+    if (!headers.ContainsKey("Referrer-Policy")) headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    await next();
+});
+app.Use(async (context, next) =>
+{
     var path = context.Request.Path;
     var protectedApi = path.StartsWithSegments("/api")
         && !path.StartsWithSegments("/api/health")
         && !path.StartsWithSegments("/api/users")
-        && !path.StartsWithSegments("/api/auth/login")
-        && !path.StartsWithSegments("/api/auth/change-password");
+        && !path.StartsWithSegments("/api/auth/login");
     var protectedAsset = path.StartsWithSegments("/assets");
     if (!protectedApi && !protectedAsset)
     {
@@ -156,7 +166,7 @@ app.MapGet("/api/health", () => Results.Json(new
     tables = QuestionBank.TryReadTableCounts(paths.SqlitePath)
 }));
 
-app.MapGet("/api/users", (AuthStore auth) =>
+app.MapGet("/api/users", () =>
 {
     var users = Directory.GetFiles(paths.UserDataRoot, "*.json")
         .Select(Path.GetFileNameWithoutExtension)
@@ -167,8 +177,7 @@ app.MapGet("/api/users", (AuthStore auth) =>
     if (!users.Any(name => name.Equals("admin", StringComparison.OrdinalIgnoreCase))) users.Insert(0, "admin");
     return Results.Json(users.Select(name => new
     {
-        name,
-        disabled = auth.IsDisabled(name)
+        name
     }));
 });
 
@@ -202,7 +211,7 @@ app.MapPost("/api/auth/change-password", async (HttpContext context, AuthStore a
 {
     var request = context.Request;
     var body = await ReadJsonBody(request);
-    var user = CleanUserName(GetBodyString(body, "user"));
+    var user = CleanUserName(Convert.ToString(context.Items[SessionStore.UserItemKey], CultureInfo.InvariantCulture) ?? "");
     var oldPassword = GetBodyString(body, "oldPassword");
     var newPassword = GetBodyString(body, "newPassword");
     if (newPassword.Length < 6) return Results.Json(new { ok = false, error = "新密码至少 6 位" }, statusCode: 400);
@@ -241,6 +250,7 @@ app.MapPost("/api/user/save", async (HttpContext context, string? user, UserData
 {
     var request = context.Request;
     var clean = ResolveRequestedUser(context, user);
+    if (request.ContentLength > 32L * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
     using var reader = new StreamReader(request.Body, request.ContentType?.Contains("charset", StringComparison.OrdinalIgnoreCase) == true ? Encoding.UTF8 : Encoding.UTF8);
     var body = await reader.ReadToEndAsync();
     if (Encoding.UTF8.GetByteCount(body) > 32 * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
@@ -376,7 +386,7 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, 
     }
     catch (Exception ex)
     {
-        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+        return Results.Json(SafeError(ex), statusCode: 400);
     }
     finally
     {
@@ -413,7 +423,7 @@ app.MapGet("/api/admin/data/download", (HttpContext context, string? user, strin
     }
     catch (Exception ex)
     {
-        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+        return Results.Json(SafeError(ex), statusCode: 400);
     }
 });
 
@@ -442,7 +452,7 @@ app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, 
     }
     catch (Exception ex)
     {
-        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+        return Results.Json(SafeError(ex), statusCode: 400);
     }
     finally
     {
@@ -459,7 +469,7 @@ app.MapGet("/api/admin/bank-editor/questions", (QuestionBank bank, string? user,
     }
     catch (Exception ex)
     {
-        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+        return Results.Json(SafeError(ex), statusCode: 400);
     }
 });
 
@@ -473,7 +483,7 @@ app.MapGet("/api/admin/bank-editor/question", (QuestionBank bank, string? user, 
     }
     catch (Exception ex)
     {
-        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+        return Results.Json(SafeError(ex), statusCode: 400);
     }
 });
 
@@ -487,7 +497,7 @@ app.MapPost("/api/admin/bank-editor/question", async (HttpRequest request, Quest
     }
     catch (Exception ex)
     {
-        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+        return Results.Json(SafeError(ex), statusCode: 400);
     }
 });
 
@@ -590,6 +600,13 @@ internal static bool IsTruthy(string? value)
 }
 
 internal static bool IsAdmin(string? value) => CleanUserName(value).Equals("admin", StringComparison.OrdinalIgnoreCase);
+
+internal static object SafeError(Exception ex)
+{
+    Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR: {ex}");
+    if (ex is InvalidOperationException || ex is UserDataConflictException) return new { ok = false, error = ex.Message };
+    return new { ok = false, error = "操作失败，请稍后重试" };
+}
 
 internal static string ResolveRequestedUser(HttpContext context, string? requested)
 {
@@ -852,6 +869,7 @@ static class AdminDataTransfer
             var files = CollectUserDataFiles(importDir).ToList();
             if (files.Count == 0) throw new InvalidOperationException("没有找到可导入的用户数据文件");
             foreach (var file in files) ValidateJsonFile(file.Path, file.Name);
+            var hasAccounts = files.Any(file => string.Equals(file.Name, "accounts.dat", StringComparison.OrdinalIgnoreCase));
 
             Directory.CreateDirectory(paths.UserDataRoot);
             var backupRoot = Path.Combine(paths.UserDataRoot, "_backups");
@@ -872,7 +890,7 @@ static class AdminDataTransfer
             {
                 File.Delete(old);
             }
-            if (File.Exists(paths.AuthDataPath)) File.Delete(paths.AuthDataPath);
+            if (hasAccounts && File.Exists(paths.AuthDataPath)) File.Delete(paths.AuthDataPath);
 
             foreach (var file in files)
             {
@@ -925,7 +943,7 @@ static class AdminDataTransfer
 
     private static void ValidateQuestionDb(string path)
     {
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly }.ToString());
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
         conn.Open();
         foreach (var table in new[] { "course", "coursechapter", "coursesubject", "coursesubjecttype" })
         {
@@ -937,7 +955,7 @@ static class AdminDataTransfer
 
     private static (string Name, int Chapters, int Subjects) ReadCourseImportInfo(string dbPath, int courseId)
     {
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ToString());
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
         conn.Open();
         var name = Convert.ToString(ExecuteScalar(conn, "select ccoursename from course where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId }), CultureInfo.InvariantCulture) ?? "";
         if (name.Length == 0) throw new InvalidOperationException($"压缩包中没有找到题库 ID {courseId}");
@@ -948,7 +966,7 @@ static class AdminDataTransfer
 
     private static (int Chapters, int Subjects) MergeCourseIntoBank(string targetDb, string sourceDb, int courseId)
     {
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = targetDb }.ToString());
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = targetDb, DefaultTimeout = 30 }.ToString());
         conn.Open();
         using (var attach = conn.CreateCommand())
         {
@@ -1377,7 +1395,31 @@ sealed class AppPaths
         SqlitePath = Resolve(configuration["App:SqlitePath"] ?? "../data/question-bank.db");
         DataAssetsRoot = Resolve(configuration["App:DataAssetsRoot"] ?? "../data/assets");
         UserDataRoot = Resolve(configuration["App:UserDataRoot"] ?? "../userdata");
-        DefaultLoginPassword = configuration["App:DefaultLoginPassword"] ?? "123456";
+        var configured = configuration["App:DefaultLoginPassword"];
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            DefaultLoginPassword = configured;
+        }
+        else
+        {
+            DefaultLoginPassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(6));
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [INIT] 未配置 App:DefaultLoginPassword，本次启动生成的默认登录口令（管理员首次登录用）: {DefaultLoginPassword}");
+            TryWriteInitialAdminPassword(UserDataRoot, DefaultLoginPassword);
+        }
+    }
+
+    private static void TryWriteInitialAdminPassword(string userDataRoot, string password)
+    {
+        try
+        {
+            Directory.CreateDirectory(userDataRoot);
+            var path = Path.Combine(userDataRoot, "admin-init-password.txt");
+            File.WriteAllText(path, $"管理员首次登录口令：{password}\n（请在首次登录并修改密码后删除本文件）\n", new UTF8Encoding(false));
+        }
+        catch
+        {
+            // Best-effort: 文件写入失败不影响服务启动。
+        }
     }
 
     public string BaseRoot { get; }
@@ -1452,7 +1494,8 @@ sealed class AuthStore
         return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
         {
             ["salt"] = salt,
-            ["hash"] = PasswordHash(password, salt),
+            ["hash"] = Pbkdf2Hash(password, salt),
+            ["hashAlgo"] = "pbkdf2",
             ["changedAt"] = NowText()
         };
     }
@@ -1461,7 +1504,10 @@ sealed class AuthStore
     {
         var salt = GetProfileString(profile, "salt");
         var hash = GetProfileString(profile, "hash");
-        return salt.Length > 0 && hash.Length > 0 && string.Equals(PasswordHash(password, salt), hash, StringComparison.OrdinalIgnoreCase);
+        if (salt.Length == 0 || hash.Length == 0) return false;
+        var algo = GetProfileString(profile, "hashAlgo");
+        var computed = algo == "pbkdf2" ? Pbkdf2Hash(password, salt) : PasswordHash(password, salt);
+        return string.Equals(computed, hash, StringComparison.OrdinalIgnoreCase);
     }
 
     public void Save()
@@ -1508,6 +1554,14 @@ sealed class AuthStore
         var bytes = Encoding.UTF8.GetBytes(salt + "\n" + password);
         return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     }
+
+    private static string Pbkdf2Hash(string password, string salt)
+    {
+        var saltBytes = Convert.FromBase64String(salt);
+        using var derive = new Rfc2898DeriveBytes(password, saltBytes, 100_000, HashAlgorithmName.SHA256);
+        var key = derive.GetBytes(32);
+        return Convert.ToHexString(key).ToLowerInvariant();
+    }
 }
 
 sealed class QuestionBank
@@ -1523,7 +1577,7 @@ sealed class QuestionBank
     {
         if (File.Exists(sqlitePath)) return;
         Directory.CreateDirectory(Path.GetDirectoryName(sqlitePath) ?? ".");
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sqlitePath }.ToString());
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sqlitePath, DefaultTimeout = 30 }.ToString());
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
@@ -1621,7 +1675,7 @@ sealed class QuestionBank
         if (!File.Exists(sqlitePath)) return new { ok = false };
         try
         {
-            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sqlitePath, Mode = SqliteOpenMode.ReadOnly }.ToString());
+            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sqlitePath, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
             conn.Open();
             var result = new Dictionary<string, int>();
             foreach (var table in new[] { "course", "coursechapter", "coursesubject", "coursesubjecttype" })
@@ -1634,7 +1688,8 @@ sealed class QuestionBank
         }
         catch (Exception ex)
         {
-            return new { ok = false, error = ex.Message };
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR: {ex}");
+            return new { ok = false };
         }
     }
 
@@ -1726,7 +1781,7 @@ sealed class QuestionBank
             answerCount = ToInt(r["ianswercount"])
         });
         if (search.Length > 0) items = items.Where(i => i.title.Contains(search, StringComparison.OrdinalIgnoreCase));
-        return items.ToList();
+        return items.Take(effectiveLimit).ToList();
     }
 
     public object? GetQuestion(int id)
@@ -1889,7 +1944,7 @@ sealed class QuestionBank
 
         SqliteConnection.ClearAllPools();
         var backupDir = BackupQuestionBank("edit-question-" + id.ToString(CultureInfo.InvariantCulture));
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _paths.SqlitePath }.ToString());
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _paths.SqlitePath, DefaultTimeout = 30 }.ToString());
         conn.Open();
         using var tx = conn.BeginTransaction();
         try
@@ -2049,7 +2104,7 @@ sealed class QuestionBank
     private List<Dictionary<string, object?>> Query(string sql, Dictionary<string, object?> parameters)
     {
         if (!File.Exists(_paths.SqlitePath)) throw new FileNotFoundException("SQLite question bank not found. Upload or mount data/question-bank.db first.", _paths.SqlitePath);
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _paths.SqlitePath, Mode = SqliteOpenMode.ReadOnly }.ToString());
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _paths.SqlitePath, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         foreach (var pair in parameters) cmd.Parameters.AddWithValue(pair.Key, pair.Value ?? DBNull.Value);

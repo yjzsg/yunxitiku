@@ -135,7 +135,7 @@ function sanitizeRichHtml(html) {
     "H5", "H6", "HR", "I", "IMG", "LI", "MARK", "OL", "P", "PRE", "S", "SMALL", "SPAN", "STRONG",
     "SUB", "SUP", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "U", "UL",
   ]);
-  const globalAttrs = new Set(["class", "title"]);
+  const globalAttrs = new Set(["title"]);
   const tagAttrs = {
     A: new Set(["href", "target", "rel"]),
     FONT: new Set(["color", "size"]),
@@ -146,7 +146,7 @@ function sanitizeRichHtml(html) {
   const isSafeUrl = (value, image = false) => {
     const text = String(value || "").trim();
     if (!text) return false;
-    if (/^(?:https?:|\/|\.\/|\.\.\/|assets\/)/i.test(text)) return true;
+    if (/^(?:https?:|\/|\.\/|assets\/)/i.test(text)) return true;
     return image && /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(text);
   };
   const template = document.createElement("template");
@@ -159,8 +159,9 @@ function sanitizeRichHtml(html) {
     }
     for (const attr of [...node.attributes]) {
       const name = attr.name.toLowerCase();
+      const safeClass = name === "class" && /^[a-zA-Z0-9_\- ]+$/.test(attr.value);
       const permitted = globalAttrs.has(name) || tagAttrs[node.tagName]?.has(name);
-      if (!permitted || name.startsWith("on") || name === "style") node.removeAttribute(attr.name);
+      if (name.startsWith("data-") || (!permitted && !safeClass) || name.startsWith("on") || name === "style") node.removeAttribute(attr.name);
     }
     if (node.tagName === "A") {
       if (!isSafeUrl(node.getAttribute("href"))) node.removeAttribute("href");
@@ -778,7 +779,7 @@ async function toggleFullscreen() {
 
 async function init() {
   ensureMobileControls();
-  setAnswerCardCollapsed(false);
+  setAnswerCardCollapsed(window.innerWidth >= 761 && window.innerHeight < 850);
   updateFullscreenState();
   await loadUsers();
   const sessionUser = localStorage.getItem(SESSION_USER_KEY);
@@ -1150,7 +1151,7 @@ async function reloadServerUserDataFromConflict() {
       await renderAdminDashboard();
     } else if (state.currentCourse) {
       await loadQuestions();
-      if (state.currentIndex >= 0) await loadCurrentQuestion();
+      if (state.currentIndex >= 0) await loadCurrentQuestion().catch((err) => toast(err.message));
       else renderAll();
     } else {
       await restoreLastCourse();
@@ -1283,8 +1284,12 @@ async function selectCourse(course, options = {}) {
 }
 
 async function loadChapters() {
+  const courseId = state.currentCourse?.id;
+  if (courseId == null) return;
   $("chapterList").innerHTML = `<div class="muted">正在读取章节...</div>`;
-  state.chapters = await api(`/api/chapters?courseId=${state.currentCourse.id}`);
+  const chapters = await api(`/api/chapters?courseId=${courseId}`);
+  if (Number(state.currentCourse?.id) !== Number(courseId)) return;
+  state.chapters = chapters;
   state.expandedChapters = new Set();
   state.chapterAutoExpanded = false;
   renderChapters();
@@ -1502,7 +1507,9 @@ async function loadQuestions() {
     params.set("limit", String(Math.max(mergedIds.length, effectiveLimit)));
   }
 
+  const requestedCourseId = Number(state.currentCourse?.id);
   let items = await api(`/api/questions?${params}`);
+  if (Number(state.currentCourse?.id) !== requestedCourseId) return;
   if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
   const shuffleKey = JSON.stringify({
@@ -1546,7 +1553,7 @@ async function loadQuestions() {
   state.answerVisible = false;
   state.answerCardPage = Math.max(0, Math.floor(Math.max(0, state.currentIndex) / state.answerCardPageSize));
   renderAll();
-  if (state.currentIndex >= 0 && state.mode !== "progress") await loadCurrentQuestion();
+  if (state.currentIndex >= 0 && state.mode !== "progress") await loadCurrentQuestion().catch((err) => toast(err.message));
 }
 
 async function loadAnalysisQuestions() {
@@ -1856,7 +1863,9 @@ function findTrainingStartIndex(items, session, fallbackSubjectId = 0) {
 async function loadCurrentQuestion() {
   const item = state.questions[state.currentIndex];
   if (!item) return;
-  item.detail = item.detail || await api(`/api/question?id=${item.id}`);
+  if (!item.detail) item.detail = await api(`/api/question?id=${item.id}`);
+  if (Number(state.questions[state.currentIndex]?.id) !== Number(item.id)) return;
+  if (!item.detail) return;
   if (state.mode === "exam") saveExamDraft();
   else {
     userCourseStore().lastSubjectId = item.id;
@@ -1929,6 +1938,7 @@ function ensureQuestionSidePanel() {
 
 function renderQuestion() {
   const item = state.questions[state.currentIndex];
+  if (!item || !item.detail) return;
   const q = item.detail;
   const revealAnswer = shouldRevealCurrentAnswer(q);
   const questionBody = $("questionBody");
@@ -2303,7 +2313,7 @@ async function moveSearchMatch(delta) {
   else pos = (pos + delta + matches.length) % matches.length;
   state.currentIndex = matches[pos];
   state.answerCardPage = Math.floor(state.currentIndex / state.answerCardPageSize);
-  await loadCurrentQuestion();
+  await loadCurrentQuestion().catch((err) => toast(err.message));
 }
 
 function highlightSearchTerm(html) {
@@ -2753,7 +2763,7 @@ function renderAnswerCardPage(options = {}) {
       state.currentIndex = index;
       state.answerCardPage = Math.floor(index / state.answerCardPageSize);
       renderAnswerCardPage({ updateNav: false });
-      await loadCurrentQuestion();
+      await loadCurrentQuestion().catch((err) => toast(err.message));
     };
     content.appendChild(btn);
   }
@@ -5545,7 +5555,7 @@ function getCourseStats(courseId = state.currentCourse?.id) {
 async function moveQuestion(delta) {
   if (!state.questions.length) return;
   state.currentIndex = Math.max(0, Math.min(state.questions.length - 1, state.currentIndex + delta));
-  await loadCurrentQuestion();
+  await loadCurrentQuestion().catch((err) => toast(err.message));
 }
 
 function isSwipeIgnoredTarget(target) {
@@ -5852,7 +5862,7 @@ function clearExamDraft(courseId = state.currentCourse?.id) {
 
 function renderExamDraftCard(draft = examDraftForCurrentCourse()) {
   if (!draft) return "";
-  const leftMs = draft.pausedAt != null || draft.remainingMs != null
+  const leftMs = draft.pausedAt != null
     ? Math.max(0, Number(draft.remainingMs || 0))
     : Math.max(0, Number(draft.endsAt || 0) - Date.now());
   const expired = leftMs <= 0;
@@ -5915,7 +5925,7 @@ async function resumeExamDraft() {
     throw new Error("考试草稿中的题目已不存在");
   }
   state.currentIndex = Math.min(Math.max(0, Number(draft.currentIndex || 0)), state.questions.length - 1);
-  const remaining = draft.pausedAt != null || draft.remainingMs != null
+  const remaining = draft.pausedAt != null
     ? Math.max(0, Number(draft.remainingMs || 0))
     : Math.max(0, Number(draft.endsAt || 0) - Date.now());
   state.exam = {
@@ -5931,7 +5941,7 @@ async function resumeExamDraft() {
     draftId: draft.id || `${Date.now()}-${draft.courseId || 0}`,
   };
   renderAll();
-  await loadCurrentQuestion();
+  await loadCurrentQuestion().catch((err) => toast(err.message));
   if (remaining <= 0) {
     await submitPaper(true);
   } else {
@@ -6201,7 +6211,7 @@ async function startExamPaper() {
   saveExamDraft();
   startExamTimer();
   renderAll();
-  await loadCurrentQuestion();
+  await loadCurrentQuestion().catch((err) => toast(err.message));
   toast(`已生成模拟卷：${state.questions.length} 题`);
 }
 
@@ -6529,7 +6539,7 @@ async function handleWrongAction() {
   if (state.currentIndex >= state.questions.length) state.currentIndex = state.questions.length - 1;
   state.answerCardPage = Math.max(0, Math.floor(Math.max(0, state.currentIndex) / state.answerCardPageSize));
   renderAll();
-  if (state.currentIndex >= 0) await loadCurrentQuestion();
+  if (state.currentIndex >= 0) await loadCurrentQuestion().catch((err) => toast(err.message));
   toast("已移出错题本");
 }
 
