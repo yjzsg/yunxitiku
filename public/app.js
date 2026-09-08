@@ -15,7 +15,12 @@ const state = {
   currentIndex: -1,
   answers: {},
   submitted: false,
+  submitting: false,
   answerVisible: false,
+  questionRequestId: 0,
+  typeRequestId: 0,
+  modeTransitionId: 0,
+  submitToken: 0,
   zoom: 1,
   storage: {},
   storageRevision: "",
@@ -33,6 +38,7 @@ const state = {
   mobileActionsOpen: false,
   mobileToolsOpen: false,
   answerCardCollapsed: false,
+  answerCardUserTouched: false,
   mobileTagsOpen: false,
   tagPanelQuestionId: 0,
   wrongFilters: { status: "active", minCount: "1", period: "all" },
@@ -618,8 +624,10 @@ function ensureMobileControls() {
     btn.className = "mobile-tools-btn";
     btn.type = "button";
     btn.textContent = "工具";
-    const toolbar = document.querySelector(".toolbar");
-    toolbar?.appendChild(btn);
+    const menuBtn = $("mobileMenuBtn");
+    const nav = document.querySelector(".main-nav");
+    if (menuBtn && nav) menuBtn.parentNode.insertBefore(btn, menuBtn.nextSibling);
+    else nav?.appendChild(btn);
   }
 
   if (!$("answerCardCollapseBtn")) {
@@ -739,6 +747,19 @@ function setMobileTools(open) {
   }
 }
 
+function shouldAutoCollapseAnswerCard() {
+  const w = window.innerWidth || document.documentElement.clientWidth || 0;
+  const h = window.innerHeight || document.documentElement.clientHeight || 0;
+  return w <= 1280
+    || (w > 1280 && h < 900);
+}
+
+function applyResponsiveAnswerCard() {
+  if (!state.answerCardUserTouched) {
+    setAnswerCardCollapsed(shouldAutoCollapseAnswerCard());
+  }
+}
+
 function setAnswerCardCollapsed(collapsed) {
   state.answerCardCollapsed = !!collapsed;
   document.body.classList.toggle("answer-card-collapsed", state.answerCardCollapsed);
@@ -779,7 +800,10 @@ async function toggleFullscreen() {
 
 async function init() {
   ensureMobileControls();
-  setAnswerCardCollapsed(window.innerWidth >= 761 && window.innerHeight < 850);
+  const shouldCollapseCard = window.innerWidth <= 760
+    || (window.innerWidth >= 761 && window.innerWidth < 1280 && window.innerHeight < 950)
+    || (window.innerWidth >= 1280 && window.innerHeight < 900);
+  applyResponsiveAnswerCard();
   updateFullscreenState();
   await loadUsers();
   const sessionUser = localStorage.getItem(SESSION_USER_KEY);
@@ -910,6 +934,11 @@ async function logout() {
   state.storageDirty = false;
   setSaveStatus("idle");
   state.user = "";
+  state.questionRequestId = (state.questionRequestId || 0) + 1;
+  state.typeRequestId = (state.typeRequestId || 0) + 1;
+  state.modeTransitionId = (state.modeTransitionId || 0) + 1;
+  state.submitToken = (state.submitToken || 0) + 1;
+  state.submitting = false;
   state.currentCourse = null;
   state.questions = [];
   state.answers = {};
@@ -1241,6 +1270,8 @@ function renderCourses() {
 }
 
 async function selectCourse(course, options = {}) {
+  const transitionId = (state.modeTransitionId || 0) + 1;
+  state.modeTransitionId = transitionId;
   stopExamTimer();
   state.exam = null;
   if (state.currentCourse?.id !== course.id) {
@@ -1252,6 +1283,12 @@ async function selectCourse(course, options = {}) {
   }
   const restoreChapterId = options.restoreChapter ? Number(state.storage.profile.lastChapterId || 0) : 0;
   state.currentCourse = course;
+  state.questionRequestId = (state.questionRequestId || 0) + 1;
+  state.typeRequestId = (state.typeRequestId || 0) + 1;
+  state.modeTransitionId = transitionId;
+  state.submitToken = (state.submitToken || 0) + 1;
+  state.submitting = false;
+  state.answerCardUserTouched = false;
   if (state.storage.smartPractice && Number(state.storage.smartPractice.courseId || 0) !== Number(course.id)) {
     state.storage.smartPractice = null;
     state.smartPracticeFreshStart = false;
@@ -1271,13 +1308,16 @@ async function selectCourse(course, options = {}) {
   setText("courseMeta", `${courseLabel ? `${courseLabel} · ` : ""}${course.questionCount}题 · 更新 ${formatRelativeTime(course.changedAt)}`);
   renderCourses();
   await loadChapters();
+  if (transitionId !== state.modeTransitionId) return;
   if (restoreChapterId) {
     const chapter = state.chapters.find((item) => item.id === restoreChapterId);
     if (chapter) state.currentChapter = chapter;
     renderChapters();
   }
-  await loadTypes();
+  if (!await loadTypes()) return;
+  if (transitionId !== state.modeTransitionId) return;
   await loadQuestions();
+  if (transitionId !== state.modeTransitionId) return;
   if (!isAdmin() && options.closePicker) setCoursePicker(false);
   updatePickerHint();
   scheduleSave();
@@ -1414,6 +1454,11 @@ function renderChapterNodes(nodes, container) {
 }
 
 async function selectChapter(chapter) {
+  const transitionId = (state.modeTransitionId || 0) + 1;
+  state.modeTransitionId = transitionId;
+  state.questionRequestId = (state.questionRequestId || 0) + 1;
+  state.submitToken = (state.submitToken || 0) + 1;
+  state.submitting = false;
   if (state.mode === "smart") state.mode = "practice";
   state.currentChapter = chapter;
   state.currentIndex = -1;
@@ -1421,22 +1466,30 @@ async function selectChapter(chapter) {
   state.answerVisible = false;
   state.storage.profile.lastChapterId = chapter ? chapter.id : 0;
   renderChapters();
-  await loadTypes();
+  if (!await loadTypes()) return;
+  if (transitionId !== state.modeTransitionId) return;
   await loadQuestions();
+  if (transitionId !== state.modeTransitionId) return;
   updatePickerHint();
   scheduleSave();
 }
 
 async function loadTypes(options = {}) {
-  if (!state.currentCourse) return;
-  const params = new URLSearchParams({ courseId: state.currentCourse.id });
+  if (!state.currentCourse) return false;
+  const requestId = (state.typeRequestId || 0) + 1;
+  state.typeRequestId = requestId;
+  const courseId = Number(state.currentCourse.id);
+  const params = new URLSearchParams({ courseId });
   if (!options.ignoreChapter) applyChapterParams(params);
-  state.types = await api(`/api/types?${params}`);
+  const types = await api(`/api/types?${params}`);
+  if (requestId !== state.typeRequestId || Number(state.currentCourse?.id || 0) !== courseId) return false;
+  state.types = types;
   $("typeSelect").innerHTML = `<option value="">全部题型</option>` + state.types.map((t) =>
     `<option value="${t.id}">${escapeHtml(t.name || "题型")} (${t.questionCount})</option>`
   ).join("");
   ensureTagFilterControl();
   renderTagFilterOptions();
+  return true;
 }
 
 function ensureTagFilterControl() {
@@ -1452,6 +1505,8 @@ function ensureTagFilterControl() {
 }
 
 async function loadQuestions() {
+  const requestId = (state.questionRequestId || 0) + 1;
+  state.questionRequestId = requestId;
   if (!state.currentCourse) return;
   if (state.mode === "training") {
     setPanelPage(true);
@@ -1470,6 +1525,7 @@ async function loadQuestions() {
     state.answerVisible = false;
     state.answerCardPage = 0;
     await loadAnalysisQuestions();
+    if (requestId !== state.questionRequestId) return;
     renderAll();
     return;
   }
@@ -1481,7 +1537,6 @@ async function loadQuestions() {
   state.answerCardPage = 0;
   const orderValue = $("orderSelect").value;
   const courseStore = userCourseStore();
-  if (state.mode !== "exam") state.answers = { ...courseStore.answers };
   const effectiveLimit = effectiveQuestionLimit();
   const params = new URLSearchParams({
     courseId: state.currentCourse.id,
@@ -1493,6 +1548,7 @@ async function loadQuestions() {
   const q = $("questionSearch").value.trim();
   if (q) params.set("q", q);
   const idFilter = getModeQuestionIds(courseStore);
+  if (state.mode !== "exam") state.answers = { ...currentPracticeAnswerStore() };
   const tagIds = getTagFilterIds();
   const mergedIds = intersectIdFilters(idFilter, tagIds);
   if (mergedIds) {
@@ -1509,7 +1565,7 @@ async function loadQuestions() {
 
   const requestedCourseId = Number(state.currentCourse?.id);
   let items = await api(`/api/questions?${params}`);
-  if (Number(state.currentCourse?.id) !== requestedCourseId) return;
+  if (requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId) return;
   if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
   const shuffleKey = JSON.stringify({
@@ -1541,6 +1597,7 @@ async function loadQuestions() {
     state.shuffleKey = "";
   }
 
+  if (requestId !== state.questionRequestId) return;
   state.questions = items;
   const activeSession = activeTrainingSession();
   const sessionMatchesMode = activeSession && (state.mode === "smart" || activeSession.mode === state.mode);
@@ -1558,13 +1615,16 @@ async function loadQuestions() {
 
 async function loadAnalysisQuestions() {
   if (!state.currentCourse) return;
-  if (state.analysisCourseId === Number(state.currentCourse.id) && state.analysisQuestions.length) return;
+  const courseId = Number(state.currentCourse.id);
+  if (state.analysisCourseId === courseId && state.analysisQuestions.length) return;
   const params = new URLSearchParams({
-    courseId: state.currentCourse.id,
+    courseId,
     limit: "30000",
   });
-  state.analysisQuestions = await api(`/api/questions?${params}`);
-  state.analysisCourseId = Number(state.currentCourse.id);
+  const analysisQuestions = await api(`/api/questions?${params}`);
+  if (Number(state.currentCourse?.id || 0) !== Number(courseId)) return;
+  state.analysisQuestions = analysisQuestions;
+  state.analysisCourseId = Number(courseId);
 }
 
 function ensureAnalysisQuestionsInBackground() {
@@ -1630,7 +1690,7 @@ function getModeQuestionIds(courseStore) {
 
 function getSmartPracticeIds(courseStore = userCourseStore()) {
   const saved = state.storage.smartPractice;
-  if (saved && Number(saved.courseId || 0) === Number(state.currentCourse?.id || 0) && Array.isArray(saved.ids) && saved.ids.length) {
+  if (canContinueSmartPractice(saved)) {
     return saved.ids.map(Number).filter(Boolean);
   }
   const ids = buildSmartPracticeIds(courseStore);
@@ -1690,6 +1750,113 @@ function activeTrainingSession() {
   return (state.storage.trainingSessions || []).find((item) => item.id === id) || null;
 }
 
+function isBatchScopedTrainingSession(session) {
+  return !!session && session.mode === "smart" && Number(session.answerScopeVersion || 0) >= 1;
+}
+
+function ensureSmartTrainingSessionState(session, reset = false) {
+  if (!session || session.mode !== "smart") return session;
+  if (reset) {
+    session.answerScopeVersion = 1;
+    session.answers = {};
+    session.verifiedAnswers = {};
+    session.results = {};
+    session.currentIndex = 0;
+    session.lastSubjectId = 0;
+    session.status = "active";
+    session.completedAt = "";
+    return session;
+  }
+  if (!isBatchScopedTrainingSession(session)) {
+    // Completed/expired legacy sessions keep their historical aggregate fields.
+    // An unfinished legacy session is migrated only when it is resumed.
+    if (session.status === "completed" || session.status === "expired") return session;
+    const courseStore = peekCourseStore(session.courseId);
+    const ids = normalizeSessionIds(session.ids);
+    session.answers = {};
+    session.verifiedAnswers = {};
+    session.results = {};
+    ids.forEach((id) => {
+      const answer = courseStore.answers?.[id];
+      const verified = courseStore.verified?.[id];
+      if (normalizeAnswer(answer)) session.answers[id] = answer;
+      if (verified) session.verifiedAnswers[id] = verified;
+      if (verified && (courseStore.correct?.[id] || courseStore.wrong?.[id])) {
+        session.results[id] = {
+          answer: normalizeAnswer(answer),
+          correct: !!courseStore.correct?.[id],
+          at: verified.at || session.updatedAt || session.createdAt || nowText(),
+        };
+      }
+    });
+    session.answerScopeVersion = 1;
+    if (state.user) scheduleSave();
+  } else {
+    session.answers ||= {};
+    session.verifiedAnswers ||= {};
+    session.results ||= {};
+  }
+  return session;
+}
+
+function activeSmartTrainingSession() {
+  const session = activeTrainingSession();
+  if (!session || state.mode !== "smart" || Number(session.courseId || 0) !== Number(state.currentCourse?.id || 0)) return null;
+  const ensured = ensureSmartTrainingSessionState(session);
+  ensured.answers ||= {};
+  ensured.verifiedAnswers ||= {};
+  ensured.results ||= {};
+  return ensured;
+}
+
+function currentPracticeAnswerStore() {
+  const session = activeSmartTrainingSession();
+  if (session) return session.answers;
+  const courseStore = userCourseStore();
+  courseStore.answers ||= {};
+  return courseStore.answers;
+}
+
+function currentPracticeVerifiedStore() {
+  const session = activeSmartTrainingSession();
+  if (session) return session.verifiedAnswers;
+  const courseStore = userCourseStore();
+  courseStore.verified ||= {};
+  return courseStore.verified;
+}
+
+function savedSmartTrainingSession(smart = state.storage.smartPractice) {
+  if (!smart?.sessionId) return null;
+  const session = (state.storage.trainingSessions || []).find((item) => item.id === smart.sessionId) || null;
+  if (session) syncTrainingSessionStats(session);
+  return session;
+}
+
+function canContinueSmartPractice(smart = state.storage.smartPractice) {
+  if (!smart || Number(smart.courseId || 0) !== Number(state.currentCourse?.id || 0) || !Array.isArray(smart.ids) || !smart.ids.length) return false;
+  const smartDay = smart.dayKey || dateKey(parseDate(smart.createdAt) || new Date());
+  if (smartDay !== todayKey()) return false;
+  const session = savedSmartTrainingSession(smart);
+  return !session || (
+    session.mode === "smart"
+    && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0)
+    && session.status !== "completed"
+    && session.status !== "expired"
+  );
+}
+
+function resetExpiredSmartPracticeView() {
+  if (state.mode !== "smart") return;
+  state.mode = "training";
+  state.questions = [];
+  state.currentIndex = -1;
+  state.answers = {};
+  state.submitted = false;
+  state.answerVisible = false;
+  state.answerCardPage = 0;
+  state.smartPracticeFreshStart = false;
+}
+
 function sessionDayKey(session) {
   if (!session) return "";
   if (session.dayKey) return String(session.dayKey);
@@ -1708,16 +1875,18 @@ function findActiveTrainingSessionByType(type, courseId = state.currentCourse?.i
     if (session.type !== type) return false;
     if (onlyToday && !isSessionFromToday(session)) return false;
     syncTrainingSessionStats(session);
-    return session.status !== "completed" && normalizeSessionIds(session.ids).length;
+    return session.status !== "completed" && session.status !== "expired" && normalizeSessionIds(session.ids).length;
   }) || null;
 }
 
 function refreshDailyTrainingState() {
   const key = todayKey();
   let changed = false;
+  let expiredCurrentSmart = false;
   const active = activeTrainingSession();
   if (active && !isSessionFromToday(active)) {
     // Previous-day unfinished sessions stay in history, but must not block today's training.
+    expiredCurrentSmart = state.mode === "smart" && active.mode === "smart";
     if (active.status !== "completed") {
       active.status = "expired";
       active.expiredAt = active.expiredAt || nowText();
@@ -1729,11 +1898,18 @@ function refreshDailyTrainingState() {
   const smart = state.storage.smartPractice;
   if (smart) {
     const smartDay = smart.dayKey || dateKey(parseDate(smart.createdAt) || new Date());
-    if (smartDay !== key) {
+    const smartSession = smart.sessionId
+      ? (state.storage.trainingSessions || []).find((item) => item.id === smart.sessionId)
+      : null;
+    if (smartSession) syncTrainingSessionStats(smartSession);
+    if (smartDay !== key) expiredCurrentSmart = expiredCurrentSmart || state.mode === "smart";
+    if (smartDay !== key || smartSession?.status === "completed" || smartSession?.status === "expired") {
       state.storage.smartPractice = null;
+      if (smartSession && state.storage.activeTrainingSessionId === smartSession.id) state.storage.activeTrainingSessionId = "";
       changed = true;
     }
   }
+  if (expiredCurrentSmart) resetExpiredSmartPracticeView();
   // Keep dailyActivity keyed by date; ensure today bucket exists for stable UI.
   state.storage.dailyActivity ||= {};
   if (!state.storage.dailyActivity[key]) {
@@ -1770,19 +1946,37 @@ function upsertTrainingSession(session, activate = true) {
 
 function syncTrainingSessionStats(session = activeTrainingSession()) {
   if (!session) return null;
+  if (session.mode === "smart" && !isBatchScopedTrainingSession(session) && !["completed", "expired"].includes(session.status)) {
+    ensureSmartTrainingSessionState(session);
+  }
   const courseStore = peekCourseStore(session.courseId || state.currentCourse?.id);
   const ids = normalizeSessionIds(session.ids);
-  const done = ids.filter((id) => courseStore.done?.[id] || normalizeAnswer(courseStore.answers?.[id]).length).length;
-  const verified = ids.filter((id) => courseStore.verified?.[id]).length;
-  const correct = ids.filter((id) => courseStore.correct?.[id]).length;
-  const wrong = ids.filter((id) => courseStore.wrong?.[id] || state.storage.wrong?.[id]).length;
+  const batchScoped = isBatchScopedTrainingSession(session);
+  const answerStore = batchScoped ? (session.answers || {}) : (courseStore.answers || {});
+  const verifiedStore = batchScoped ? (session.verifiedAnswers || {}) : (courseStore.verified || {});
+  const resultStore = batchScoped ? (session.results || {}) : (courseStore.correct || {});
+  const done = ids.filter((id) => batchScoped
+    ? normalizeAnswer(answerStore[id]).length > 0
+    : courseStore.done?.[id] || normalizeAnswer(answerStore[id]).length > 0).length;
+  const verified = ids.filter((id) => {
+    const record = verifiedStore[id];
+    if (!record) return false;
+    return record === true || typeof record !== "object" || !("answer" in record)
+      || record.answer === normalizeAnswer(answerStore[id]);
+  }).length;
+  const correct = ids.filter((id) => batchScoped
+    ? resultStore[id] === true || resultStore[id]?.correct === true
+    : courseStore.correct?.[id]).length;
+  const wrong = ids.filter((id) => batchScoped
+    ? resultStore[id] === false || resultStore[id]?.correct === false
+    : courseStore.wrong?.[id] || state.storage.wrong?.[id]).length;
   session.total = ids.length;
   session.done = done;
   session.verified = verified;
   session.correct = correct;
   session.wrong = wrong;
   session.rate = verified ? Math.round((correct / verified) * 100) : 0;
-  if (verified >= ids.length && ids.length) {
+  if (!["completed", "expired"].includes(session.status) && verified >= ids.length && ids.length) {
     session.status = "completed";
     session.completedAt ||= nowText();
     if (session.type === "plan" && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0)) {
@@ -1796,9 +1990,6 @@ function syncTrainingSessionStats(session = activeTrainingSession()) {
         at: session.completedAt,
       };
     }
-  } else if (session.status === "completed" && verified < ids.length) {
-    session.status = "active";
-    session.completedAt = "";
   }
   return session;
 }
@@ -1807,6 +1998,7 @@ function syncCurrentTrainingSession(questionId = 0) {
   const session = activeTrainingSession();
   if (!session || Number(session.courseId || 0) !== Number(state.currentCourse?.id || 0)) return;
   session.updatedAt = nowText();
+  if (isBatchScopedTrainingSession(session) && state.mode === "smart") session.answers = { ...state.answers };
   if (questionId) session.lastSubjectId = Number(questionId);
   session.currentIndex = Math.max(0, state.currentIndex);
   syncTrainingSessionStats(session);
@@ -1827,7 +2019,15 @@ function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {
     courseId: state.currentCourse?.id || 0,
     courseName: state.currentCourse?.name || "",
     ids: cleanIds,
+    answerScopeVersion: 1,
+    answers: {},
+    verifiedAnswers: {},
+    results: {},
+    currentIndex: 0,
+    lastSubjectId: 0,
   });
+  ensureSmartTrainingSessionState(session, true);
+  syncTrainingSessionStats(session);
   state.storage.smartPractice = {
     sessionId: session.id,
     courseId: state.currentCourse?.id || 0,
@@ -1837,6 +2037,12 @@ function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {
     dayKey: session.dayKey || todayKey(),
     createdAt: session.createdAt,
   };
+  // A newly generated batch must never inherit the previous round's
+  // runtime reveal state, even when the user starts it immediately after submit.
+  state.answers = {};
+  state.submitted = false;
+  state.answerVisible = false;
+  state.answerCardPage = 0;
   state.smartPracticeFreshStart = true;
   scheduleSave();
   return session;
@@ -1861,12 +2067,29 @@ function findTrainingStartIndex(items, session, fallbackSubjectId = 0) {
 }
 
 async function loadCurrentQuestion() {
-  const item = state.questions[state.currentIndex];
+  const requestId = (state.questionRequestId || 0) + 1;
+  state.questionRequestId = requestId;
+  const questions = state.questions;
+  const index = state.currentIndex;
+  const mode = state.mode;
+  const courseId = Number(state.currentCourse?.id || 0);
+  const item = questions[index];
   if (!item) return;
-  if (!item.detail) item.detail = await api(`/api/question?id=${item.id}`);
-  if (Number(state.questions[state.currentIndex]?.id) !== Number(item.id)) return;
+  if (!item.detail) {
+    const detail = await api(`/api/question?id=${item.id}`);
+    if (requestId !== state.questionRequestId) return;
+    item.detail = detail;
+  }
+  if (
+    requestId !== state.questionRequestId
+    || state.questions !== questions
+    || state.currentIndex !== index
+    || state.mode !== mode
+    || Number(state.currentCourse?.id || 0) !== courseId
+    || Number(questions[index]?.id) !== Number(item.id)
+  ) return;
   if (!item.detail) return;
-  if (state.mode === "exam") saveExamDraft();
+  if (mode === "exam") saveExamDraft();
   else {
     userCourseStore().lastSubjectId = item.id;
     syncCurrentTrainingSession(item.id);
@@ -2275,7 +2498,9 @@ function renderPracticeContextPanel() {
 
 function isPracticeContextCollapsed() {
   if (state.practiceContextCollapsed === null) {
-    return window.matchMedia?.("(max-width: 760px)")?.matches || false;
+    const w = window.innerWidth || document.documentElement.clientWidth || 0;
+    const h = window.innerHeight || document.documentElement.clientHeight || 0;
+    return w <= 1280 || (w > 1280 && h < 900);
   }
   return !!state.practiceContextCollapsed;
 }
@@ -2512,6 +2737,9 @@ function saveSubjectiveAnswer(q, answer) {
     return;
   }
   const courseStore = userCourseStore();
+  const answerStore = currentPracticeAnswerStore();
+  answerStore[q.id] = answer;
+  courseStore.answers ||= {};
   courseStore.answers[q.id] = answer;
   resetQuestionVerification(q.id);
   if (normalizeAnswer(answer)) courseStore.done[q.id] = true;
@@ -2544,6 +2772,9 @@ function chooseOption(q, label) {
     return;
   }
   const courseStore = userCourseStore();
+  const answerStore = currentPracticeAnswerStore();
+  answerStore[q.id] = answer;
+  courseStore.answers ||= {};
   courseStore.answers[q.id] = answer;
   resetQuestionVerification(q.id);
   if (answer) courseStore.done[q.id] = true;
@@ -2562,6 +2793,14 @@ function chooseOption(q, label) {
 function markResult(q) {
   const courseStore = userCourseStore();
   const isRight = isAnswerCorrect(q);
+  const session = activeSmartTrainingSession();
+  if (session) {
+    session.results[q.id] = {
+      answer: currentAnswerSnapshot(q.id),
+      correct: isRight,
+      at: nowText(),
+    };
+  }
   if (isRight) {
     courseStore.correct[q.id] = true;
     delete courseStore.wrong[q.id];
@@ -2760,10 +2999,13 @@ function renderAnswerCardPage(options = {}) {
       else if (item.detail) btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
     }
     btn.onclick = async () => {
+      const transitionId = (state.modeTransitionId || 0) + 1;
+      state.modeTransitionId = transitionId;
       state.currentIndex = index;
       state.answerCardPage = Math.floor(index / state.answerCardPageSize);
       renderAnswerCardPage({ updateNav: false });
       await loadCurrentQuestion().catch((err) => toast(err.message));
+      if (transitionId !== state.modeTransitionId) return;
     };
     content.appendChild(btn);
   }
@@ -2841,7 +3083,7 @@ function currentVerifyMode() {
 
 function isQuestionVerified(questionId) {
   if (state.mode === "exam") return false;
-  const verified = userCourseStore().verified?.[questionId];
+  const verified = currentPracticeVerifiedStore()[questionId];
   if (!verified) return false;
   if (verified === true) return true;
   if (typeof verified === "object" && "answer" in verified) {
@@ -2892,6 +3134,7 @@ function renderVerifyModeControls() {
     submitBtn.title = state.mode === "exam"
       ? "交卷并计算模拟考试成绩"
       : "统一验证本次练习中的所有题目";
+    submitBtn.disabled = !!state.submitting;
   }
 }
 
@@ -2902,6 +3145,7 @@ function toggleVerifyMode() {
   const next = modes[(Math.max(0, modes.indexOf(current)) + 1) % modes.length];
   state.storage.settings.verifyMode = next;
   state.verifyMode = next;
+  if (next !== "review" && !state.submitted) state.answerVisible = false;
   scheduleSave();
   if (state.questions[state.currentIndex]?.detail) renderQuestion();
   else renderVerifyModeControls();
@@ -2920,15 +3164,25 @@ function changeZoom(delta) {
 function markQuestionVerified(q) {
   const courseStore = userCourseStore();
   courseStore.verified ||= {};
-  courseStore.verified[q.id] = {
+  const record = {
     answer: currentAnswerSnapshot(q.id),
     at: nowText(),
   };
+  const verifiedStore = currentPracticeVerifiedStore();
+  verifiedStore[q.id] = record;
+  // Keep long-term verification for ordinary practice while the active smart
+  // batch uses its own record to decide what it may reveal.
+  if (verifiedStore !== courseStore.verified) courseStore.verified[q.id] = record;
 }
 
 function resetQuestionVerification(questionId) {
   if (state.mode === "exam" || !questionId) return;
   const courseStore = userCourseStore();
+  const session = activeSmartTrainingSession();
+  if (session) {
+    delete session.verifiedAnswers[questionId];
+    delete session.results[questionId];
+  }
   if (courseStore.verified) delete courseStore.verified[questionId];
   if (!state.submitted) {
     delete courseStore.correct?.[questionId];
@@ -3020,14 +3274,7 @@ function renderTraining() {
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
   refreshDailyTrainingState();
   const smart = state.storage.smartPractice;
-  const smartDay = smart?.dayKey || dateKey(parseDate(smart?.createdAt) || new Date());
-  const canContinueSmart = !!(
-    smart
-    && Number(smart.courseId || 0) === Number(state.currentCourse?.id || 0)
-    && Array.isArray(smart.ids)
-    && smart.ids.length
-    && smartDay === todayKey()
-  );
+  const canContinueSmart = canContinueSmartPractice(smart);
   const analysisReady = state.analysisCourseId === Number(state.currentCourse?.id || 0) && state.analysisQuestions.length;
   const previewContext = { items, stats, due, weak, analysisReady };
   const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
@@ -3178,7 +3425,7 @@ function renderStudyDashboard(courseStore, stats, items) {
     ? `已记录快照：${report.done} 题 · 正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
     : buildStudyReportSummary(courseStore, stats, items).summary;
   const smart = state.storage.smartPractice;
-  const canContinueSmart = smart && Number(smart.courseId || 0) === Number(state.currentCourse?.id || 0) && Array.isArray(smart.ids) && smart.ids.length;
+  const canContinueSmart = canContinueSmartPractice(smart);
   return `
     <div class="study-dashboard">
       <div class="study-card">
@@ -3292,6 +3539,11 @@ async function continueTrainingSession(sessionId) {
     toast("训练记录没有题目");
     return;
   }
+  syncTrainingSessionStats(session);
+  if (session.status === "completed" || session.status === "expired") {
+    toast("该训练已结束，请开始新的智能训练");
+    return;
+  }
   state.storage.activeTrainingSessionId = session.id;
   resetGeneratedPracticeFilters();
   if (session.mode === "wrong") {
@@ -3302,6 +3554,7 @@ async function continueTrainingSession(sessionId) {
     toast(`已继续${session.sourceTitle || "错题复习"}`);
     return;
   }
+  ensureSmartTrainingSessionState(session);
   state.storage.smartPractice = {
     sessionId: session.id,
     courseId: session.courseId,
@@ -3311,8 +3564,12 @@ async function continueTrainingSession(sessionId) {
     createdAt: session.createdAt || nowText(),
     dayKey: session.dayKey || sessionDayKey(session),
   };
+  state.smartPracticeFreshStart = false;
   state.mode = "smart";
+  state.submitted = false;
+  state.answerVisible = false;
   setCoursePicker(false);
+  scheduleSave();
   await loadQuestions();
   toast(`已继续${session.sourceTitle || "智能训练"}`);
 }
@@ -3553,15 +3810,25 @@ async function continueSmartPractice() {
   if (!state.currentCourse) return;
   refreshDailyTrainingState();
   const smart = state.storage.smartPractice;
-  const smartDay = smart?.dayKey || dateKey(parseDate(smart?.createdAt) || new Date());
-  if (!smart || Number(smart.courseId || 0) !== Number(state.currentCourse.id) || !Array.isArray(smart.ids) || !smart.ids.length || smartDay !== todayKey()) {
+  if (!canContinueSmartPractice(smart)) {
     toast("没有可继续的今日智能练习，请开始今日强化");
     if (state.mode === "training") renderTraining();
     return;
   }
-  if (!smart.sessionId) {
-    const session = upsertTrainingSession({
-      id: trainingSessionId("smart"),
+  let session = smart.sessionId
+    ? (state.storage.trainingSessions || []).find((item) => item.id === smart.sessionId)
+    : null;
+  if (session && (session.status === "completed" || session.status === "expired")) {
+    state.storage.smartPractice = null;
+    if (state.storage.activeTrainingSessionId === session.id) state.storage.activeTrainingSessionId = "";
+    scheduleSave();
+    toast("上一轮智能训练已完成，请开始新的智能训练");
+    if (state.mode === "training") renderTraining();
+    return;
+  }
+  if (!session) {
+    session = upsertTrainingSession({
+      id: smart.sessionId || trainingSessionId("smart"),
       type: "smart",
       mode: "smart",
       sourceTitle: smart.sourceTitle || "智能训练",
@@ -3569,13 +3836,26 @@ async function continueSmartPractice() {
       courseName: state.currentCourse.name || "",
       ids: smart.ids,
       createdAt: smart.createdAt || nowText(),
+      dayKey: smart.dayKey || todayKey(),
+      answerScopeVersion: 1,
+      answers: {},
+      verifiedAnswers: {},
+      results: {},
+      currentIndex: 0,
+      lastSubjectId: 0,
     });
-    smart.sessionId = session.id;
+  } else {
+    ensureSmartTrainingSessionState(session);
   }
-  if (smart.sessionId) state.storage.activeTrainingSessionId = smart.sessionId;
+  smart.sessionId = session.id;
+  state.storage.activeTrainingSessionId = session.id;
   resetGeneratedPracticeFilters();
+  state.smartPracticeFreshStart = false;
   state.mode = "smart";
+  state.submitted = false;
+  state.answerVisible = false;
   setCoursePicker(false);
+  scheduleSave();
   await loadQuestions();
   toast("已继续上次智能练习");
 }
@@ -5560,7 +5840,7 @@ async function moveQuestion(delta) {
 
 function isSwipeIgnoredTarget(target) {
   if (!target?.closest) return false;
-  return !!target.closest("input, textarea, select, label, a, button.option, .option, .options, .answer-card-wrap, .question-tag-panel, .practice-context-panel, .question-actions, .toolbar, .main-nav, .modal");
+  return !!target.closest("input, textarea, select, label, a, button.option, .option, .options, .answer-card-wrap, .question-tag-panel, .practice-context-panel, .question-actions, .toolbar, .main-nav, .modal, [data-no-swipe]");
 }
 
 function canSwipeQuestions() {
@@ -5572,12 +5852,21 @@ function canSwipeQuestions() {
     && !$("questionBody")?.classList.contains("hidden");
 }
 
+function hasTextSelection() {
+  return !!String(window.getSelection?.()?.toString?.() || "").trim();
+}
+
+function isMousePointerEvent(event) {
+  return event?.pointerType === "mouse" || (!event?.pointerType && event?.type?.startsWith("mouse"));
+}
+
 function bindQuestionSwipe() {
   const view = $("questionView");
   if (!view || view.dataset.swipeBound) return;
   view.dataset.swipeBound = "1";
-  const startSwipe = (point, target) => {
-    if (!point || isSwipeIgnoredTarget(target) || !canSwipeQuestions()) {
+  const startSwipe = (point, target, event) => {
+    // On desktop, a mouse drag is text selection/copying, never navigation.
+    if (!point || isMousePointerEvent(event) || isSwipeIgnoredTarget(target) || !canSwipeQuestions()) {
       state.touchStart = null;
       return;
     }
@@ -5586,21 +5875,24 @@ function bindQuestionSwipe() {
       y: point.clientY,
       at: Date.now(),
       active: false,
+      pointerType: event?.pointerType || "touch",
+      selectionAtStart: hasTextSelection(),
     };
   };
-  const finishSwipe = (point) => {
+  const finishSwipe = (point, event) => {
     const start = state.touchStart;
     state.touchStart = null;
-    if (!start || !point || !canSwipeQuestions()) return;
+    if (!start || !point || isMousePointerEvent(event) || !start.active || !canSwipeQuestions()) return;
+    if (!start.selectionAtStart && hasTextSelection()) return;
     const dx = point.clientX - start.x;
     const dy = point.clientY - start.y;
     const elapsed = Date.now() - start.at;
     if (elapsed > 650 || Math.abs(dx) < 58 || Math.abs(dx) < Math.abs(dy) * 1.25 || Math.abs(dy) > 90) return;
     moveQuestion(dx < 0 ? 1 : -1).catch((err) => toast(err.message));
   };
-  const updateSwipe = (point, event) => {
+  const updateSwipe = (point, event, sourceEvent) => {
     const start = state.touchStart;
-    if (!start || !point) return;
+    if (!start || !point || isMousePointerEvent(sourceEvent)) return;
     const dx = point.clientX - start.x;
     const dy = point.clientY - start.y;
     if (Math.abs(dx) > 18 && Math.abs(dx) > Math.abs(dy) * 1.15) {
@@ -5608,111 +5900,163 @@ function bindQuestionSwipe() {
       event?.preventDefault?.();
     }
   };
+  const supportsPointerEvents = "PointerEvent" in window;
+  if (supportsPointerEvents) {
+    view.addEventListener("pointerdown", (event) => {
+      if (event.button && event.button !== 0) return;
+      startSwipe(event, event.target, event);
+      if (state.touchStart && event.pointerId != null) view.setPointerCapture?.(event.pointerId);
+    });
+    view.addEventListener("pointermove", (event) => {
+      updateSwipe(event, event, event);
+    });
+    view.addEventListener("pointerup", (event) => {
+      finishSwipe(event, event);
+      if (event.pointerId != null && view.hasPointerCapture?.(event.pointerId)) view.releasePointerCapture?.(event.pointerId);
+    });
+    view.addEventListener("pointercancel", (event) => {
+      state.touchStart = null;
+      if (event.pointerId != null && view.hasPointerCapture?.(event.pointerId)) view.releasePointerCapture?.(event.pointerId);
+    });
+    view.addEventListener("lostpointercapture", () => {
+      state.touchStart = null;
+    });
+    return;
+  }
+  // Older browsers without Pointer Events keep the touch-only fallback.
   view.addEventListener("touchstart", (event) => {
-    startSwipe(event.changedTouches?.[0], event.target);
+    startSwipe(event.changedTouches?.[0], event.target, event);
   }, { passive: true });
   view.addEventListener("touchmove", (event) => {
-    updateSwipe(event.changedTouches?.[0], event);
+    updateSwipe(event.changedTouches?.[0], event, event);
   }, { passive: false });
   view.addEventListener("touchend", (event) => {
-    finishSwipe(event.changedTouches?.[0]);
+    finishSwipe(event.changedTouches?.[0], event);
   }, { passive: true });
-  view.addEventListener("pointerdown", (event) => {
-    if (event.button && event.button !== 0) return;
-    startSwipe(event, event.target);
-  });
-  view.addEventListener("pointermove", (event) => {
-    updateSwipe(event, event);
-  });
-  view.addEventListener("pointerup", (event) => {
-    finishSwipe(event);
-  });
-  view.addEventListener("pointercancel", () => {
+  view.addEventListener("touchcancel", () => {
     state.touchStart = null;
-  });
+  }, { passive: true });
 }
-
 async function submitPaper(autoSubmit = false) {
+  if (state.submitting) {
+    toast("正在提交，请稍候");
+    return;
+  }
   if (state.mode === "exam" && state.submitted && state.exam?.result) {
     toast("已经交卷");
     return;
   }
-  state.submitted = true;
-  let correct = 0;
-  let checked = 0;
-  let score = 0;
-  let totalScore = 0;
-  let subjective = 0;
-  const examDetails = [];
-  for (const item of state.questions) {
-    item.detail = item.detail || await api(`/api/question?id=${item.id}`);
-    const itemScore = getQuestionScore(item.detail);
-    const itemSubjective = isSubjective(item.detail);
-    const answered = hasAnswer(item.id);
-    const itemCorrect = answered && !itemSubjective && isAnswerCorrect(item.detail);
-    const earnedScore = answered ? calculateQuestionScore(item.detail) : 0;
-    totalScore += itemScore;
-    if (itemSubjective) subjective++;
-    if (state.mode === "exam") {
-      examDetails.push({
-        id: item.detail.id,
-        no: examDetails.length + 1,
-        chapterId: item.detail.chapterId,
-        chapterName: item.detail.chapterName || "",
-        type: item.detail.type || "题目",
-        title: stripText(item.detail.stem || item.detail.title || "").slice(0, 120),
-        answer: normalizeAnswer(state.answers[item.detail.id]),
-        correctAnswer: normalizeAnswer(item.detail.answer),
-        answered,
-        correct: itemCorrect,
-        subjective: itemSubjective,
-        score: earnedScore,
-        maxScore: itemScore,
-      });
+  if (state.mode === "exam" && state.submitted) {
+    toast("正在提交，请稍候");
+    return;
+  }
+  const submitMode = state.mode;
+  const submitCourseId = Number(state.currentCourse?.id || 0);
+  const submitQuestions = state.questions;
+  const submitExam = state.exam;
+  if (submitMode !== "exam" && !submitQuestions.some((item) => hasAnswer(item.id))) {
+    toast("请先选择或填写答案");
+    return;
+  }
+  const submitToken = (state.submitToken || 0) + 1;
+  state.submitToken = submitToken;
+  state.submitting = true;
+  renderVerifyModeControls();
+  try {
+    // Resolve all details before mutating verification/result/history state. A
+    // failed request therefore cannot leave a half-submitted training round.
+    for (const item of submitQuestions) {
+      item.detail = item.detail || await api(`/api/question?id=${item.id}`);
     }
-    if (!answered) continue;
-    checked++;
-    if (itemCorrect) correct++;
-    score += earnedScore;
-    if (state.mode !== "exam") markQuestionVerified(item.detail);
-    if (!itemSubjective) markResult(item.detail);
-    if (state.mode !== "exam") recordPracticeActivity(item.detail, { verified: true });
-  }
-  const rate = checked ? Math.round((correct / checked) * 100) : 0;
-  const submittedAt = nowText();
-  if (state.mode === "exam" && state.exam) {
-    state.exam.submittedAt = Date.now();
-    state.exam.result = { score, totalScore, correct, checked, rate, subjective };
-    recordExamHistory({ score, totalScore, correct, checked, rate, subjective, autoSubmit, submittedAt }, examDetails);
-    clearExamDraft();
-    stopExamTimer();
-  }
-  state.storage.history.unshift({
-    user: state.user,
-    courseId: state.currentCourse?.id,
-    courseName: state.currentCourse?.name,
-    mode: state.mode,
-    total: state.questions.length,
-    done: checked,
-    correct,
-    score,
-    totalScore,
-    at: submittedAt,
-  });
-  state.storage.history = state.storage.history.slice(0, 200);
-  scheduleSave();
-  state.answerVisible = true;
-  renderQuestion();
-  renderPracticeContextPanel();
-  if (state.mode === "exam") {
-    const subjectiveHint = subjective ? `，主观题 ${subjective} 道未自动计分` : "";
-    toast(`${autoSubmit ? "时间到，已自动交卷" : "已交卷"}：${formatScore(score)}/${formatScore(totalScore)} 分${subjectiveHint}`);
-  } else {
-    const subjectiveHint = subjective ? `，主观题 ${subjective} 道需人工核对` : "";
-    toast(`已提交：${correct}/${checked} 题正确${subjectiveHint}`);
+    const contextStillCurrent = () => state.submitToken === submitToken
+      && state.questions === submitQuestions
+      && state.mode === submitMode
+      && Number(state.currentCourse?.id || 0) === submitCourseId;
+    if (!contextStillCurrent()) return;
+    if (submitMode !== "exam" && !submitQuestions.some((item) => hasAnswer(item.id))) {
+      toast("请先选择或填写答案");
+      return;
+    }
+    state.submitted = true;
+    let correct = 0;
+    let checked = 0;
+    let score = 0;
+    let totalScore = 0;
+    let subjective = 0;
+    const examDetails = [];
+    for (const item of submitQuestions) {
+      const itemScore = getQuestionScore(item.detail);
+      const itemSubjective = isSubjective(item.detail);
+      const answered = hasAnswer(item.id);
+      const itemCorrect = answered && !itemSubjective && isAnswerCorrect(item.detail);
+      const earnedScore = answered ? calculateQuestionScore(item.detail) : 0;
+      totalScore += itemScore;
+      if (itemSubjective) subjective++;
+      if (submitMode === "exam") {
+        examDetails.push({
+          id: item.detail.id,
+          no: examDetails.length + 1,
+          chapterId: item.detail.chapterId,
+          chapterName: item.detail.chapterName || "",
+          type: item.detail.type || "题目",
+          title: stripText(item.detail.stem || item.detail.title || "").slice(0, 120),
+          answer: normalizeAnswer(state.answers[item.detail.id]),
+          correctAnswer: normalizeAnswer(item.detail.answer),
+          answered,
+          correct: itemCorrect,
+          subjective: itemSubjective,
+          score: earnedScore,
+          maxScore: itemScore,
+        });
+      }
+      if (!answered) continue;
+      checked++;
+      if (itemCorrect) correct++;
+      score += earnedScore;
+      if (submitMode !== "exam") markQuestionVerified(item.detail);
+      if (!itemSubjective) markResult(item.detail);
+      if (submitMode !== "exam") recordPracticeActivity(item.detail, { verified: true });
+    }
+    const rate = checked ? Math.round((correct / checked) * 100) : 0;
+    const submittedAt = nowText();
+    if (submitMode === "exam" && submitExam) {
+      submitExam.submittedAt = Date.now();
+      submitExam.result = { score, totalScore, correct, checked, rate, subjective };
+      recordExamHistory({ score, totalScore, correct, checked, rate, subjective, autoSubmit, submittedAt }, examDetails);
+      clearExamDraft();
+      stopExamTimer();
+    }
+    state.storage.history.unshift({
+      user: state.user,
+      courseId: state.currentCourse?.id,
+      courseName: state.currentCourse?.name,
+      mode: submitMode,
+      total: submitQuestions.length,
+      done: checked,
+      correct,
+      score,
+      totalScore,
+      at: submittedAt,
+    });
+    state.storage.history = state.storage.history.slice(0, 200);
+    scheduleSave();
+    state.answerVisible = true;
+    renderQuestion();
+    renderPracticeContextPanel();
+    if (submitMode === "exam") {
+      const subjectiveHint = subjective ? `，主观题 ${subjective} 道未自动计分` : "";
+      toast(`${autoSubmit ? "时间到，已自动交卷" : "已交卷"}：${formatScore(score)}/${formatScore(totalScore)} 分${subjectiveHint}`);
+    } else {
+      const subjectiveHint = subjective ? `，主观题 ${subjective} 道需人工核对` : "";
+      toast(`已提交：${correct}/${checked} 题正确${subjectiveHint}`);
+    }
+  } finally {
+    if (state.submitToken === submitToken) {
+      state.submitting = false;
+      renderVerifyModeControls();
+    }
   }
 }
-
 function resetPractice() {
   stopExamTimer();
   const resettingExam = state.mode === "exam";
@@ -5742,7 +6086,19 @@ function resetPractice() {
   if (!confirm(`仅清空${scopeLabel}的作答记录，不会影响其他章节。\n\n确定继续？`)) return;
 
   const courseStore = userCourseStore();
+  const batchSession = activeSmartTrainingSession();
+  if (batchSession) {
+    batchSession.answers = {};
+    batchSession.verifiedAnswers = {};
+    batchSession.results = {};
+    batchSession.status = "active";
+    batchSession.completedAt = "";
+    batchSession.currentIndex = 0;
+    batchSession.lastSubjectId = 0;
+  }
   state.answers = {};
+  state.currentIndex = 0;
+  state.answerCardPage = 0;
   state.submitted = false;
   state.answerVisible = false;
   for (const id of ids) {
@@ -5907,6 +6263,10 @@ async function resumeExamDraft() {
   }
   setPanelPage(false);
   stopExamTimer();
+  state.typeRequestId = (state.typeRequestId || 0) + 1;
+  state.questionRequestId = (state.questionRequestId || 0) + 1;
+  state.submitToken = (state.submitToken || 0) + 1;
+  state.submitting = false;
   state.mode = "exam";
   state.questions = [];
   state.answers = { ...(draft.answers || {}) };
@@ -6618,7 +6978,8 @@ function hasOpenModal() {
 }
 
 function handleGlobalShortcuts(event) {
-  if (!state.user || isAdmin() || isTypingTarget(event.target) || hasOpenModal() || event.altKey || event.metaKey) return;
+  const focusedControl = event.target?.closest?.("button, a, [role=\"button\"]") || document.activeElement?.closest?.("button, a, [role=\"button\"]");
+  if (!state.user || isAdmin() || state.submitting || isTypingTarget(event.target) || focusedControl || hasTextSelection() || hasOpenModal() || event.altKey || event.metaKey) return;
   if (event.key === "ArrowLeft" && state.questions.length) {
     event.preventDefault();
     moveQuestion(-1).catch((err) => toast(err.message));
@@ -6693,6 +7054,11 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       return;
     }
     const nextMode = btn.dataset.mode;
+    const transitionId = (state.modeTransitionId || 0) + 1;
+    state.modeTransitionId = transitionId;
+    state.questionRequestId = (state.questionRequestId || 0) + 1;
+    state.submitToken = (state.submitToken || 0) + 1;
+    state.submitting = false;
     setPanelPage(nextMode === "exam" || nextMode === "progress" || nextMode === "training");
     if (nextMode === "practice" && state.mode === "practice") {
       setCoursePicker(!state.pickerOpen);
@@ -6719,6 +7085,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       state.submitted = false;
       state.answerVisible = false;
       await loadTypes({ ignoreChapter: true });
+      if (transitionId !== state.modeTransitionId) return;
       renderAnswerCard();
       updateStats();
       renderExamHome();
@@ -6731,8 +7098,12 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
         ? `<strong>正在生成智能训练</strong><span>正在读取错题、薄弱章节和今日练习建议。</span>`
         : `<strong>正在生成学习看板</strong><span>正在读取当前科目的进度、训练记录和学习信号。</span>`;
     }
-    if (!["exam", "progress", "training"].includes(state.mode)) await loadTypes();
+    if (!["exam", "progress", "training"].includes(state.mode)) {
+      await loadTypes();
+      if (transitionId !== state.modeTransitionId) return;
+    }
     await loadQuestions();
+    if (transitionId !== state.modeTransitionId) return;
   };
 });
 
@@ -6755,7 +7126,10 @@ $("confirmPassword").addEventListener("keydown", (e) => {
 $("logoutBtn").onclick = () => logout().catch((err) => toast(err.message));
 $("mobileMenuBtn").onclick = () => setMobileMenu(!state.mobileMenuOpen);
 $("mobileToolsBtn").onclick = () => setMobileTools(!state.mobileToolsOpen);
-$("answerCardCollapseBtn").onclick = () => setAnswerCardCollapsed(!state.answerCardCollapsed);
+$("answerCardCollapseBtn").onclick = () => {
+  state.answerCardUserTouched = true;
+  setAnswerCardCollapsed(!state.answerCardCollapsed);
+};
 $("pickerDoneBtn").onclick = () => {
   if (!state.currentCourse) {
     toast("请先选择题库");
@@ -6819,7 +7193,10 @@ $("zoomOutBtn").onclick = () => changeZoom(-0.1);
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
 document.addEventListener("fullscreenchange", updateFullscreenState);
 document.addEventListener("keydown", handleGlobalShortcuts);
-window.addEventListener("resize", debounce(scheduleNavIndicator, 120));
+window.addEventListener("resize", debounce(() => {
+  scheduleNavIndicator();
+  applyResponsiveAnswerCard();
+}, 120));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     if (state.mode === "exam" && state.exam && !state.submitted) {
