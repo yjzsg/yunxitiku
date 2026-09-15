@@ -339,27 +339,27 @@ body.is-admin .admin-only {
 }
 
 .nav-item[data-mode="practice"]::before {
-  content: "▣";
+  content: "▀";
 }
 
 .nav-item[data-mode="exam"]::before {
-  content: "◷";
+  content: "◀";
 }
 
 .nav-item[data-mode="wrong"]::before {
-  content: "△";
+  content: "▀";
 }
 
 .nav-item[data-mode="training"]::before {
-  content: "✦";
+  content: "✀";
 }
 
 .nav-item[data-mode="progress"]::before {
-  content: "▥";
+  content: "▀";
 }
 
 .nav-item[data-mode="favorite"]::before {
-  content: "☆";
+  content: "☀";
 }
 
 .nav-item::after {
@@ -531,21 +531,21 @@ body.is-admin .admin-only {
   line-height: 1;
 }
 
-#searchToggleBtn::before { content: "⌕"; }
-#filterBtn::before { content: "≡"; }
-#printBtn::before { content: "▤"; }
+#searchToggleBtn::before { content: "⌎"; }
+#filterBtn::before { content: "≀"; }
+#printBtn::before { content: "▀"; }
 #zoomInBtn::before { content: "+"; }
-#zoomOutBtn::before { content: "−"; }
-#fullscreenBtn::before { content: "⛶"; }
-#answerToggleBtn::before { content: "◉"; }
-#verifyModeBtn::before { content: "□"; }
-#submitBtn::before { content: "✓"; }
-#resetBtn::before { content: "↻"; }
-#prevBtn::before { content: "←"; }
-#nextBtn::after { content: "→"; }
-#noteBtn::before { content: "✎"; }
-#favoriteBtn::before { content: "★"; }
-#wrongBtn::before { content: "△"; }
+#zoomOutBtn::before { content: "∀"; }
+#fullscreenBtn::before { content: "⛀"; }
+#answerToggleBtn::before { content: "◀"; }
+#verifyModeBtn::before { content: "▀"; }
+#submitBtn::before { content: "✀"; }
+#resetBtn::before { content: "ↀ"; }
+#prevBtn::before { content: "ↀ"; }
+#nextBtn::after { content: "ↀ"; }
+#noteBtn::before { content: "✀"; }
+#favoriteBtn::before { content: "☀"; }
+#wrongBtn::before { content: "▀"; }
 
 .toolbar-spacer {
   flex: 1;
@@ -816,12 +816,12 @@ body.admin-view .workspace {
 }
 
 .chapter-row.has-children .chapter-item span::before {
-  content: "▰";
+  content: "▀";
   color: #f59e0b;
 }
 
 .chapter-row.leaf .chapter-item span::before {
-  content: "◇";
+  content: "◀";
 }
 
 .picker-done-btn {
@@ -3710,30 +3710,51 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     white-space: nowrap;
   }
 
-  #answerToggleBtn,
-  #verifyModeBtn,
-  #submitBtn,
-  #fullscreenBtn,
-  .mobile-tools-btn {
-    display: inline-flex;
-  }
-
-  #searchToggleBtn,
-  #resetBtn,
-  #filterBtn,
-  #printBtn,
-  #zoomInBtn,
-  #zoomOutBtn {
+  .toolbar > button:not(.mobile-tools-btn) {
     display: none;
   }
 
-  body.mobile-tools-open #searchToggleBtn,
-  body.mobile-tools-open #resetBtn,
-  body.mobile-tools-open #filterBtn,
-  body.mobile-tools-open #printBtn,
-  body.mobile-tools-open #zoomInBtn,
-  body.mobile-tools-open #zoomOutBtn {
+  .mobile-tools-btn {
+    grid-column: 1 / -1;
+    display: inline-flex !important;
+    min-height: 38px;
+    border-color: var(--primary);
+    background: var(--primary);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    box-shadow: 0 6px 14px rgba(79, 70, 229, 0.22);
+  }
+
+  .mobile-tools-btn::before {
+    content: "\2699";
+    font-family: var(--icon-font);
+    font-weight: 700;
+    font-size: 14px;
+    margin-right: 6px;
+  }
+
+  .mobile-tools-btn:hover {
+    background: var(--primary-600);
+    border-color: var(--primary-600);
+    color: #fff;
+  }
+
+  body.mobile-tools-open .toolbar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  body.mobile-tools-open .toolbar > button {
     display: inline-flex;
+  }
+
+  body.mobile-tools-open .mobile-tools-btn {
+    grid-column: 1 / -1;
+    background: var(--primary-50);
+    color: var(--primary-600);
+    border-color: #c7d2fe;
+    box-shadow: none;
   }
 
   body.mobile-tools-open .toolbar button {
@@ -4300,34 +4321,24 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-width: 0;
   }
 
-  body.mobile-tools-open .toolbar {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  #answerToggleBtn,
-  #verifyModeBtn,
-  #submitBtn,
-  #fullscreenBtn,
-  .mobile-tools-btn {
-    display: inline-flex;
-  }
-
-  #searchToggleBtn,
-  #resetBtn,
-  #filterBtn,
-  #printBtn,
-  #zoomInBtn,
-  #zoomOutBtn {
+  .toolbar > button:not(.mobile-tools-btn) {
     display: none;
   }
 
-  body.mobile-tools-open #searchToggleBtn,
-  body.mobile-tools-open #resetBtn,
-  body.mobile-tools-open #filterBtn,
-  body.mobile-tools-open #printBtn,
-  body.mobile-tools-open #zoomInBtn,
-  body.mobile-tools-open #zoomOutBtn {
+  .mobile-tools-btn {
+    grid-column: 1 / -1;
+  }
+
+  body.mobile-tools-open .toolbar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  body.mobile-tools-open .toolbar > button {
     display: inline-flex;
+  }
+
+  body.mobile-tools-open .mobile-tools-btn {
+    grid-column: 1 / -1;
   }
 
   body.mobile-tools-open .toolbar button {
@@ -5936,26 +5947,26 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(1)::before { content: "账号"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(2)::before { content: "状态"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(2)::before { content: "状怀"; }
   .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(3)::before { content: "做题"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(4)::before { content: "正确率"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(4)::before { content: "正确玀"; }
   .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(5)::before { content: "错题"; }
   .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(6)::before { content: "收藏"; }
   .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(7)::before { content: "笔记"; }
   .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(8)::before { content: "纠错"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(9)::before { content: "最近登录"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(10)::before { content: "最近题库"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(11)::before { content: "最近提交"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(9)::before { content: "最近登彀"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(10)::before { content: "最近题庀"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(11)::before { content: "最近提亀"; }
   .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(12)::before { content: "操作"; }
 
   .admin-bank-table td:nth-child(1)::before { content: "题库"; }
   .admin-bank-table td:nth-child(2)::before { content: "分类"; }
   .admin-bank-table td:nth-child(3)::before { content: "本地题量"; }
   .admin-bank-table td:nth-child(4)::before { content: "更新时间"; }
-  .admin-bank-table td:nth-child(5)::before { content: "状态"; }
+  .admin-bank-table td:nth-child(5)::before { content: "状怀"; }
   .admin-bank-table td:nth-child(6)::before { content: "操作"; }
 
-  .admin-correction-table td:nth-child(1)::before { content: "状态"; }
+  .admin-correction-table td:nth-child(1)::before { content: "状怀"; }
   .admin-correction-table td:nth-child(2)::before { content: "账号"; }
   .admin-correction-table td:nth-child(3)::before { content: "题库/章节"; }
   .admin-correction-table td:nth-child(4)::before { content: "题目"; }
@@ -6867,7 +6878,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   body.answer-card-collapsed .answer-card-collapse-btn::before {
-    content: "▤";
+    content: "\25A4";
     font-family: var(--icon-font);
     font-weight: 700;
     font-size: 14px;
@@ -6876,7 +6887,14 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 }
 
 @media screen and (max-width: 760px) {
-  .main-nav,
+  .main-nav {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 8px;
+  }
+
   body.mobile-menu-open .main-nav {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -7130,7 +7148,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   body.answer-card-collapsed .answer-card-collapse-btn::before {
-    content: "▤";
+    content: "\25A4";
     font-family: var(--icon-font);
     font-weight: 700;
     font-size: 12px;
@@ -7210,7 +7228,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   position: relative !important;
   display: inline-flex !important;
   align-items: center !important;
-  justify-content: center !important;
+  justify-content: center;
   width: 24px !important;
   min-width: 24px !important;
   height: 24px !important;
@@ -8576,7 +8594,6 @@ body.panel-page .answer-card-wrap,
 
 /* Fix: top/mobile icon vertical centering */
 .nav-item,
-.toolbar button,
 .question-actions button,
 .mobile-menu-btn,
 .mobile-tools-btn,
@@ -8641,16 +8658,21 @@ body.panel-page .answer-card-wrap,
     line-height: 0;
   }
 
-  .toolbar button,
+  .toolbar button:not(.mobile-tools-btn),
   .question-actions button,
   .mobile-menu-btn,
-  .mobile-tools-btn,
   .mobile-actions-btn {
-    display: inline-flex !important;
     align-items: center;
     justify-content: center;
     gap: 5px;
     line-height: 1;
+  }
+
+  .question-actions button,
+  .mobile-tools-btn,
+  .mobile-menu-btn,
+  .mobile-actions-btn {
+    display: inline-flex;
   }
 
   .toolbar button::before,
@@ -8689,3 +8711,1167 @@ body.panel-page .answer-card-wrap,
   }
 }
 
+/* Small screens: collapse top nav to current tab + menu + account by default. */
+@media screen and (max-width: 760px) {
+  .main-nav {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 7px !important;
+    padding: 7px 8px !important;
+    grid-template-columns: none !important;
+  }
+
+  .main-nav > .nav-item {
+    display: none !important;
+  }
+
+  .main-nav > .nav-item.active {
+    display: inline-flex !important;
+    min-width: 0 !important;
+    flex: 1 1 auto !important;
+    min-height: 36px !important;
+    padding-inline: 10px !important;
+  }
+
+  .main-nav > #mobileMenuBtn {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    min-height: 36px !important;
+  }
+
+  .main-nav > .account-box {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    margin-left: auto !important;
+    min-width: 0 !important;
+    gap: 6px !important;
+  }
+
+  body.mobile-menu-open .main-nav {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    padding: 6px 8px !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item {
+    display: inline-flex !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  body.mobile-menu-open .main-nav > .account-box {
+    grid-column: 1 / -1 !important;
+    width: 100% !important;
+    justify-content: space-between !important;
+    margin-left: 0 !important;
+  }
+}
+/* --- Final mobile top-bar override: normalize conflicting legacy grid rules. --- */
+@media screen and (max-width: 760px) {
+  .main-nav,
+  body.mobile-menu-open .main-nav {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    gap: 7px !important;
+    padding: 7px 9px !important;
+    min-height: 50px !important;
+    height: auto !important;
+    grid-template-columns: none !important;
+    grid-auto-rows: auto !important;
+    grid-area: auto !important;
+  }
+
+  .main-nav > .nav-item,
+  body.mobile-menu-open .main-nav > .nav-item {
+    display: none !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 0 !important;
+    min-width: 0 !important;
+    width: auto !important;
+  }
+
+  .main-nav > .nav-item.active {
+    display: inline-flex !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    padding: 0 10px !important;
+    justify-content: flex-start !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  .main-nav > #mobileMenuBtn {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 58px !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    padding: 0 12px !important;
+    margin: 0 !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 2 !important;
+    border-color: rgba(255, 255, 255, 0.28) !important;
+    background: rgba(255, 255, 255, 0.14) !important;
+    color: #fff !important;
+  }
+
+  .main-nav > .account-box,
+  body.mobile-menu-open .main-nav > .account-box {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    height: 34px !important;
+    min-height: 34px !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+    gap: 5px !important;
+    margin: 0 0 0 auto !important;
+    padding: 0 !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 3 !important;
+    background: transparent !important;
+    border: 0 !important;
+  }
+
+  .main-nav .save-status {
+    display: none !important;
+  }
+
+  #accountLabel {
+    display: inline-flex !important;
+    max-width: 88px !important;
+    min-width: 0 !important;
+    min-height: 30px !important;
+    height: 30px !important;
+    padding: 0 8px !important;
+    font-size: 12px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  .main-nav .account-box #logoutBtn {
+    display: inline-flex !important;
+    min-width: 48px !important;
+    min-height: 30px !important;
+    height: 30px !important;
+    padding: 0 9px !important;
+    font-size: 12px !important;
+  }
+
+  body.mobile-menu-open .main-nav {
+    flex-wrap: wrap !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item {
+    display: inline-flex !important;
+    flex: 0 0 calc(50% - 3.5px) !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    margin: 0 !important;
+    padding: 0 10px !important;
+    font-size: 12px !important;
+    justify-content: center !important;
+  }
+
+  body.mobile-menu-open .main-nav > .account-box {
+    flex: 0 0 auto !important;
+    justify-content: flex-end !important;
+    margin-left: auto !important;
+    order: 3 !important;
+  }
+}
+
+/* Mobile toolbar: compact single "tools" trigger, expanded as 4-column grid. */
+@media screen and (max-width: 760px) {
+  .toolbar {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 7px !important;
+    padding: 7px 9px !important;
+    grid-template-columns: none !important;
+  }
+
+  .toolbar-spacer {
+    display: none !important;
+  }
+
+  .toolbar > button:not(.mobile-tools-btn) {
+    display: none !important;
+    flex: 1 1 calc(50% - 7px) !important;
+    width: auto !important;
+    min-width: 0 !important;
+    min-height: 36px !important;
+    height: 36px !important;
+    margin: 0 !important;
+    padding: 0 8px !important;
+    font-size: 12px !important;
+    white-space: nowrap !important;
+  }
+
+  .toolbar > #mobileToolsBtn {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 78px !important;
+    min-height: 36px !important;
+    height: 36px !important;
+    margin: 0 !important;
+    padding: 0 14px !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 0 !important;
+    border-color: var(--primary) !important;
+    background: var(--primary) !important;
+    color: #fff !important;
+    font-size: 13px !important;
+    font-weight: 800 !important;
+    box-shadow: 0 5px 12px rgba(79, 70, 229, 0.2) !important;
+  }
+
+  body.mobile-tools-open .toolbar > button {
+    display: inline-flex !important;
+  }
+
+  body.mobile-tools-open .toolbar > #mobileToolsBtn {
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+    order: 9 !important;
+    background: var(--primary-50) !important;
+    color: var(--primary-600) !important;
+    border-color: #c7d2fe !important;
+    box-shadow: none !important;
+  }
+}
+
+/* Mobile: keep primary action row usable in narrow heights. */
+@media screen and (max-width: 760px) and (max-height: 700px) {
+  .main-nav {
+    min-height: 46px !important;
+    padding-top: 5px !important;
+    padding-bottom: 5px !important;
+  }
+
+  .toolbar {
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+  }
+}
+/* --- Adaptive answer card + maximal question area across screen sizes. --- */
+@media screen and (min-width: 761px) {
+  .answer-card-wrap {
+    max-height: clamp(112px, 24dvh, 260px);
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .answer-card-wrap .card-page-content {
+    max-height: calc(clamp(112px, 24dvh, 260px) - 76px);
+  }
+}
+
+@media screen and (min-width: 1280px) and (min-height: 900px) {
+  .answer-card-wrap {
+    max-height: clamp(128px, 22dvh, 280px);
+  }
+
+  .answer-card-wrap .card-page-content {
+    max-height: calc(clamp(128px, 22dvh, 280px) - 76px);
+  }
+}
+
+@media screen and (max-width: 760px) {
+  body:not(.admin-view) .answer-card-wrap {
+    max-height: min(180px, 24dvh);
+    min-height: 0;
+  }
+
+  body:not(.admin-view).answer-card-collapsed .answer-card-wrap {
+    max-height: 38px !important;
+    min-height: 38px !important;
+  }
+
+  body:not(.admin-view).answer-card-collapsed .answer-card-wrap .stats,
+  body:not(.admin-view).answer-card-collapsed .answer-card-wrap .answer-card {
+    display: none !important;
+  }
+}
+
+/* Maximize the question viewport: give the scroll area every spare pixel. */
+.question-view {
+  min-height: 0;
+}
+
+body:not(.admin-view) .question-pane {
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+}
+
+body:not(.admin-view).answer-card-collapsed .question-pane {
+  grid-template-rows: auto auto minmax(0, 1fr) auto 42px;
+}
+/* --- User feedback round 2: balanced nav, tighter top bars, 2-row answer card on mobile. --- */
+@media screen and (max-width: 760px) {
+  .main-nav,
+  body.mobile-menu-open .main-nav {
+    min-height: 44px !important;
+    padding: 5px 8px !important;
+    gap: 6px !important;
+  }
+
+  .main-nav > .nav-item.active {
+    flex: 0 0 auto !important;
+    min-width: 0 !important;
+    max-width: 42vw !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    padding: 0 10px !important;
+    font-size: 12px !important;
+    justify-content: flex-start !important;
+    border-radius: 10px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+  }
+
+  .main-nav > .nav-item.active::before {
+    flex: 0 0 auto !important;
+    width: 15px !important;
+    height: 15px !important;
+  }
+
+  .main-nav > #mobileMenuBtn {
+    flex: 0 0 auto !important;
+    min-width: 52px !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    padding: 0 10px !important;
+    font-size: 12px !important;
+    border-radius: 10px !important;
+  }
+
+  .main-nav > .account-box {
+    height: 32px !important;
+    min-height: 32px !important;
+    gap: 4px !important;
+  }
+
+  #accountLabel {
+    max-width: 74px !important;
+    min-height: 28px !important;
+    height: 28px !important;
+    padding: 0 7px !important;
+    font-size: 11px !important;
+  }
+
+  .main-nav .account-box #logoutBtn {
+    min-width: 44px !important;
+    min-height: 28px !important;
+    height: 28px !important;
+    padding: 0 8px !important;
+    font-size: 11px !important;
+  }
+
+  .toolbar {
+    min-height: 44px !important;
+    padding: 5px 8px !important;
+    gap: 6px !important;
+  }
+
+  .toolbar > #mobileToolsBtn {
+    min-height: 32px !important;
+    height: 32px !important;
+    min-width: 68px !important;
+    font-size: 12px !important;
+  }
+
+  .course-head {
+    min-height: 0 !important;
+    padding: 6px 10px !important;
+  }
+
+  .course-title {
+    font-size: 15px !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item {
+    flex: 0 0 calc(50% - 3px) !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    font-size: 12px !important;
+  }
+}
+
+/* Answer card: three visible rows on mobile when expanded, scroll for the rest. */
+@media screen and (max-width: 760px) {
+  .answer-card-wrap .card-page-content {
+    grid-template-columns: repeat(auto-fill, minmax(34px, 1fr)) !important;
+    grid-auto-rows: 32px !important;
+    max-height: 96px !important;
+    min-height: 0;
+  }
+
+  body:not(.admin-view) .answer-card-wrap {
+    max-height: min(178px, 30dvh) !important;
+  }
+
+  body:not(.admin-view).answer-card-collapsed .answer-card-wrap {
+    max-height: 38px !important;
+    min-height: 38px !important;
+  }
+
+  .answer-card-wrap .answer-card-collapse-btn {
+    min-height: 26px !important;
+    margin-bottom: 5px !important;
+  }
+
+  .answer-card-wrap .stats {
+    margin-bottom: 6px !important;
+    gap: 8px !important;
+    font-size: 12px !important;
+  }
+}
+/* --- Narrow tablet/desktop (<=880px): reuse compact mobile top bars to prevent overflow. --- */
+@media screen and (max-width: 1280px) {
+  .main-nav,
+  body.mobile-menu-open .main-nav {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    gap: 7px !important;
+    padding: 6px 9px !important;
+    min-height: 46px !important;
+    height: auto !important;
+    grid-template-columns: none !important;
+    grid-auto-rows: auto !important;
+    grid-area: auto !important;
+  }
+
+  .main-nav > .nav-item {
+    display: none !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 0 !important;
+    min-width: 0 !important;
+    width: auto !important;
+  }
+
+  .main-nav > .nav-item.active {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    min-width: 0 !important;
+    max-width: 40vw !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    padding: 0 11px !important;
+    justify-content: flex-start !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  .main-nav > #mobileMenuBtn {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 56px !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    padding: 0 12px !important;
+    margin: 0 !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 2 !important;
+    border-color: rgba(255, 255, 255, 0.28) !important;
+    background: rgba(255, 255, 255, 0.14) !important;
+    color: #fff !important;
+  }
+
+  .main-nav > .account-box {
+    display: inline-flex !important;
+    flex: 0 1 auto !important;
+    width: auto !important;
+    max-width: 46vw !important;
+    min-width: 0 !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+    gap: 6px !important;
+    margin: 0 0 0 auto !important;
+    padding: 0 !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 3 !important;
+  }
+
+  .main-nav .save-status {
+    display: none !important;
+  }
+
+  #accountLabel {
+    max-width: 110px !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    padding: 0 9px !important;
+    font-size: 12px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  .main-nav .account-box #logoutBtn {
+    display: inline-flex !important;
+    min-width: 48px !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    padding: 0 9px !important;
+    font-size: 12px !important;
+  }
+
+  body.mobile-menu-open .main-nav {
+    flex-wrap: wrap !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item {
+    display: inline-flex !important;
+    flex: 0 0 calc(33.333% - 5px) !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    min-height: 30px !important;
+    height: 30px !important;
+    margin: 0 !important;
+    padding: 0 8px !important;
+    font-size: 12px !important;
+    justify-content: center !important;
+    order: 4 !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item.active {
+    flex: 0 1 auto !important;
+    max-width: 26vw !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    justify-content: flex-start !important;
+    order: 1 !important;
+  }
+
+  body.mobile-menu-open .main-nav > #mobileMenuBtn {
+    order: 2 !important;
+  }
+
+  body.mobile-menu-open .main-nav > #mobileToolsBtn {
+    order: 2 !important;
+  }
+
+  body.mobile-menu-open .main-nav > .account-box {
+    flex: 0 0 auto !important;
+    justify-content: flex-end !important;
+    margin-left: auto !important;
+    order: 3 !important;
+  }
+
+  .toolbar {
+    display: none !important;
+  }
+
+  .main-nav > #mobileToolsBtn {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 56px !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    padding: 0 12px !important;
+    margin: 0 !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    order: 2 !important;
+    border-color: rgba(255, 255, 255, 0.28) !important;
+    background: rgba(255, 255, 255, 0.14) !important;
+    color: #fff !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+  }
+
+  .main-nav > #mobileToolsBtn:hover {
+    background: rgba(255, 255, 255, 0.24) !important;
+    color: #fff !important;
+  }
+
+  body.mobile-tools-open .toolbar {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 7px !important;
+    padding: 8px !important;
+    position: fixed !important;
+    left: 8px !important;
+    right: 8px !important;
+    top: 52px !important;
+    z-index: 60 !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 14px !important;
+    background: var(--card) !important;
+    box-shadow: var(--shadow-md) !important;
+  }
+
+  body.mobile-tools-open .toolbar > button {
+    display: inline-flex !important;
+    min-height: 36px !important;
+    height: 36px !important;
+    margin: 0 !important;
+    padding: 0 8px !important;
+    font-size: 12px !important;
+    white-space: nowrap !important;
+  }
+
+  body.mobile-tools-open .toolbar > #mobileToolsBtn {
+    grid-column: 1 / -1 !important;
+    order: 9 !important;
+    background: var(--primary-50) !important;
+    color: var(--primary-600) !important;
+    border-color: #c7d2fe !important;
+    box-shadow: none !important;
+  }
+}
+/* Desktop (wide): hide mobile-only menu/tools triggers in the nav. */
+@media screen and (min-width: 1281px) {
+  .main-nav > #mobileMenuBtn,
+  .main-nav > #mobileToolsBtn {
+    display: none !important;
+  }
+}
+/* --- Menu-open override: force all non-active nav items into a compact 3-column wrap. --- */
+@media screen and (max-width: 1280px) {
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(6),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1):not(.active),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2):not(.active),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3):not(.active),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4):not(.active),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5):not(.active),
+  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(6):not(.active) {
+    display: inline-flex !important;
+    flex: 0 0 calc(33.333% - 5px) !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    min-height: 30px !important;
+    height: 30px !important;
+    margin: 0 !important;
+    padding: 0 8px !important;
+    font-size: 12px !important;
+    justify-content: center !important;
+    order: 4 !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+    grid-area: auto !important;
+    width: auto !important;
+  }
+
+  body.mobile-menu-open .main-nav > .nav-item.active {
+    flex: 0 1 auto !important;
+    max-width: 26vw !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    justify-content: flex-start !important;
+    order: 1 !important;
+    grid-area: auto !important;
+  }
+
+  body.mobile-menu-open .main-nav > #mobileMenuBtn,
+  body.mobile-menu-open .main-nav > #mobileToolsBtn {
+    order: 2 !important;
+    grid-area: auto !important;
+  }
+
+  body.mobile-menu-open .main-nav > .account-box {
+    flex: 0 0 auto !important;
+    justify-content: flex-end !important;
+    margin-left: auto !important;
+    order: 3 !important;
+    grid-area: auto !important;
+  }
+}
+
+/* --- Compact screens: answer card becomes a floating drawer so the question
+   area keeps its full height while the card is open. --- */
+@media screen and (max-width: 1440px) {
+  .question-pane:has(.answer-card-wrap) {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+  }
+
+  .question-pane > .answer-card-wrap {
+    display: block;
+    position: fixed;
+    z-index: 90;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    max-height: 46vh;
+    padding: 10px 12px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+  }
+
+  body.answer-card-collapsed .question-pane > .answer-card-wrap {
+    min-height: 38px;
+    max-height: 38px;
+    padding: 0 10px;
+  }
+
+  .answer-card-wrap .answer-card-collapse-btn {
+    display: flex;
+    width: 100%;
+    justify-content: center;
+    margin-bottom: 8px;
+    font-weight: 700;
+  }
+
+  .answer-card-wrap .stats {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .answer-card-wrap .card-page-nav {
+    justify-content: center;
+    margin-bottom: 7px;
+  }
+
+  .answer-card-wrap .card-page-content {
+    grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
+    max-height: 30vh;
+    min-height: 74px;
+  }
+
+  .answer-card-wrap .card-cell {
+    min-height: 34px;
+    font-size: 13px;
+  }
+}
+
+/* --- Collapsed answer-card bar: make the restore button prominent. --- */
+body.answer-card-collapsed .answer-card-wrap {
+  cursor: pointer;
+  border-top: 2px solid var(--primary);
+  background: var(--primary-50);
+}
+
+body.answer-card-collapsed .answer-card-wrap::before {
+  color: var(--primary-700);
+  font-weight: 700;
+}
+
+body.answer-card-collapsed .answer-card-collapse-btn {
+  min-height: 30px !important;
+  padding: 5px 16px !important;
+  border: 1px solid var(--primary) !important;
+  border-radius: 999px !important;
+  background: var(--primary) !important;
+  color: #fff !important;
+  font-size: 13px !important;
+  font-weight: 800 !important;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.35) !important;
+}
+
+body.answer-card-collapsed .answer-card-collapse-btn::before {
+  content: "\25A4";
+  font-family: var(--icon-font);
+  font-weight: 700;
+  font-size: 15px;
+  margin-right: 7px;
+}
+
+body.answer-card-collapsed .answer-card-collapse-btn:hover {
+  background: var(--primary-600) !important;
+  border-color: var(--primary-600) !important;
+  box-shadow: 0 3px 12px rgba(79, 70, 229, 0.45) !important;
+}
+
+@media screen and (max-width: 760px) {
+  body:not(.admin-view).answer-card-collapsed .answer-card-wrap {
+    min-height: 44px !important;
+    max-height: 44px !important;
+  }
+
+  body.answer-card-collapsed .answer-card-collapse-btn {
+    min-height: 32px !important;
+    padding: 5px 14px !important;
+    font-size: 13px !important;
+  }
+}
+
+/* --- Compact collapsed practice-context bar: give the question area more room. --- */
+.practice-context-panel.collapsed {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.practice-context-panel.collapsed .practice-context-toggle {
+  min-height: 26px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+@media screen and (max-width: 760px) {
+  .practice-context-panel {
+    margin-top: 4px;
+    padding: 5px 9px;
+  }
+
+  .practice-context-panel.collapsed {
+    padding: 5px 9px;
+  }
+
+  .practice-context-panel.collapsed .practice-context-toggle {
+    min-height: 26px;
+    padding: 2px 8px;
+    font-size: 12px;
+  }
+
+  .practice-context-panel.collapsed > div:first-child b {
+    font-size: 12px;
+  }
+
+  .practice-context-panel.collapsed > div:first-child span {
+    font-size: 11px;
+  }
+}
+
+/* --- Tighten collapsed practice-context: hide subtitle, shrink text. --- */
+.practice-context-panel.collapsed small {
+  display: none !important;
+}
+
+.practice-context-panel.collapsed > div:first-child {
+  gap: 0;
+}
+
+.practice-context-panel.collapsed > div:first-child b {
+  font-size: 13px;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.practice-context-panel.collapsed .practice-context-toggle {
+  margin-left: 8px;
+}
+
+@media screen and (max-width: 760px) {
+  .practice-context-panel.collapsed > div:first-child b {
+    font-size: 12px;
+  }
+}
+
+/* --- Mobile nav: allow account label to truncate when space is tight. --- */
+@media screen and (max-width: 760px) {
+  .main-nav .account-box #accountLabel {
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+  }
+
+  .main-nav > .account-box {
+    flex: 0 1 auto !important;
+    max-width: 44vw !important;
+  }
+
+  .main-nav .account-box #logoutBtn {
+    flex: 0 0 auto !important;
+  }
+}
+
+
+/* --- Mobile smart-training context: keep today's training header compact. --- */
+@media screen and (max-width: 760px) {
+  .practice-context-panel {
+    width: calc(100% - 12px);
+    margin: 2px auto 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px;
+    padding: 4px 7px;
+    border-radius: 11px;
+  }
+
+  .practice-context-panel > div:first-child {
+    gap: 0;
+    min-width: 0;
+  }
+
+  .practice-context-panel > div:first-child span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    line-height: 1.15;
+  }
+
+  .practice-context-panel > div:first-child b {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    line-height: 1.2;
+  }
+
+  .practice-context-panel small {
+    display: none !important;
+  }
+
+  .practice-context-toggle {
+    min-height: 25px;
+    padding: 2px 7px;
+    border-radius: 8px;
+    font-size: 11px;
+  }
+
+  .practice-context-actions {
+    grid-column: 1 / -1;
+    gap: 5px;
+  }
+
+  .practice-context-actions button {
+    min-height: 29px;
+    padding: 3px 6px;
+    border-radius: 8px;
+    font-size: 11px;
+  }
+
+  .practice-context-panel.collapsed {
+    padding: 4px 7px;
+  }
+}
+
+
+/* --- Compact touch viewport practice context: one-line header by default. --- */
+@media screen and (max-width: 1280px) {
+  .practice-context-panel {
+    width: calc(100% - 12px);
+    margin: 2px auto 0;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    padding: 4px 7px;
+    border-radius: 11px;
+  }
+
+  .practice-context-panel > div:first-child {
+    min-width: 0;
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .practice-context-panel > div:first-child span {
+    flex: 0 0 auto;
+    max-width: 34%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    line-height: 1.2;
+  }
+
+  .practice-context-panel > div:first-child b {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    line-height: 1.2;
+  }
+
+  .practice-context-panel small {
+    display: none !important;
+  }
+
+  .practice-context-toggle {
+    display: inline-flex;
+    flex: 0 0 auto;
+    min-height: 25px;
+    padding: 2px 7px;
+    border-radius: 8px;
+    font-size: 11px;
+  }
+
+  .practice-context-actions {
+    flex: 1 0 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+  }
+
+  .practice-context-actions button {
+    min-height: 29px;
+    padding: 3px 7px;
+    border-radius: 8px;
+    font-size: 11px;
+  }
+
+  .practice-context-panel.collapsed {
+    padding: 4px 7px;
+  }
+
+  .practice-context-panel.collapsed .practice-context-actions {
+    display: none !important;
+  }
+}
+
+/* --- Force a compact smart-training header on touch/mobile layouts. --- */
+.practice-context-panel.compact-touch {
+  width: calc(100% - 12px);
+  margin: 2px auto 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  padding: 4px 7px;
+  border-radius: 11px;
+}
+
+.practice-context-panel.compact-touch > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.practice-context-panel.compact-touch > div:first-child span {
+  flex: 0 0 auto;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.practice-context-panel.compact-touch > div:first-child b {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.practice-context-panel.compact-touch small {
+  display: none !important;
+}
+
+.practice-context-panel.compact-touch .practice-context-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 25px;
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.practice-context-panel.compact-touch .practice-context-actions {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.practice-context-panel.compact-touch .practice-context-actions button {
+  min-height: 29px;
+  padding: 3px 7px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.practice-context-panel.compact-touch.collapsed {
+  padding: 4px 7px;
+}
+
+.practice-context-panel.compact-touch.collapsed .practice-context-actions {
+  display: none !important;
+}
+
+
+
+
+
+/* --- Device-audit fix: question pane could be stretched by its own content. --- */
+/* .question-pane is a grid with explicit rows but no explicit columns, so the
+   implicit column was sized to its content (max-content). On tablet portrait in
+   "考试题库" mode the left course pane leaves only ~400px, but the action row
+   needs ~567px, so the column grew past the pane and overflow:hidden clipped the
+   right-hand buttons. Pin the column to the pane width and let the action row
+   wrap when it cannot fit. */
+.question-pane {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.question-pane > * {
+  min-width: 0;
+}
+
+@media screen and (max-width: 1180px) {
+  .question-actions {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .question-actions button {
+    flex: 0 1 auto;
+  }
+}
+
+/* --- Device-audit fix: ".mobile-actions-btn" is a <=760px affordance. --- */
+/* On wider layouts the note/favorite/wrong buttons are shown directly, so the
+   wrapper is redundant; a later media-less "icon centering" block re-enabled it
+   with display:inline-flex, which also pushed the action row past the pane edge. */
+@media screen and (min-width: 761px) {
+  .question-actions .mobile-actions-btn {
+    display: none !important;
+  }
+}
+
+/* --- Device-audit fix: collapsed answer-card button geometry. --- */
+/* The collapse button is absolutely positioned and anchored with right:14px, but
+   the <=1440px drawer rules above also force width:100%, so its left edge lands
+   outside the card (and off-screen on 1281-1440px laptops). Anchor both edges so
+   the button stays inside the card in every state. */
+@media screen and (min-width: 761px) and (max-width: 1440px) {
+  .answer-card-wrap .answer-card-collapse-btn {
+    left: auto;
+    right: 14px;
+    width: auto;
+    margin-bottom: 0;
+  }
+}

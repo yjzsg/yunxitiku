@@ -2075,6 +2075,8 @@ async function loadCurrentQuestion() {
   const courseId = Number(state.currentCourse?.id || 0);
   const item = questions[index];
   if (!item) return;
+  const questionKey = `${courseId}:${mode}:${index}:${Number(item.id || 0)}`;
+  const questionChanged = state.lastLoadedQuestionKey !== questionKey || state.lastLoadedQuestions !== questions;
   if (!item.detail) {
     const detail = await api(`/api/question?id=${item.id}`);
     if (requestId !== state.questionRequestId) return;
@@ -2097,6 +2099,9 @@ async function loadCurrentQuestion() {
   scheduleSave();
   state.answerVisible = state.submitted || isQuestionVerified(item.id);
   renderQuestion();
+  state.lastLoadedQuestionKey = questionKey;
+  state.lastLoadedQuestions = questions;
+  if (questionChanged) scrollQuestionViewToTop();
 }
 
 function renderAll() {
@@ -2157,6 +2162,26 @@ function ensureQuestionSidePanel() {
   });
   panel.classList.remove("hidden");
   return panel;
+}
+
+function isMobileViewport() {
+  const width = window.innerWidth || document.documentElement.clientWidth || 0;
+  const coarsePointer = !!window.matchMedia?.("(pointer: coarse)")?.matches
+    || Number(window.navigator?.maxTouchPoints || 0) > 0;
+  return width <= 1280 || coarsePointer;
+}
+
+function scrollQuestionViewToTop(behavior = "auto") {
+  const view = $("questionView");
+  if (!isMobileViewport() || !view) return;
+  const reset = () => {
+    view.scrollTop = 0;
+    view.scrollLeft = 0;
+    view.scrollTo?.({ top: 0, left: 0, behavior });
+  };
+  reset();
+  window.requestAnimationFrame?.(reset);
+  window.setTimeout?.(reset, 0);
 }
 
 function renderQuestion() {
@@ -2488,6 +2513,7 @@ function renderPracticeContextPanel() {
     </div>
   `;
   panel.classList.toggle("collapsed", isPracticeContextCollapsed());
+  panel.classList.toggle("compact-touch", isMobileViewport());
   $("practiceContextToggleBtn").onclick = () => {
     state.practiceContextCollapsed = !isPracticeContextCollapsed();
     renderPracticeContextPanel();
@@ -2500,7 +2526,7 @@ function isPracticeContextCollapsed() {
   if (state.practiceContextCollapsed === null) {
     const w = window.innerWidth || document.documentElement.clientWidth || 0;
     const h = window.innerHeight || document.documentElement.clientHeight || 0;
-    return w <= 1280 || (w > 1280 && h < 900);
+    return isMobileViewport() || (w > 1280 && h < 900);
   }
   return !!state.practiceContextCollapsed;
 }

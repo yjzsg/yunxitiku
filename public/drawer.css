@@ -1,0 +1,71 @@
+/* Floating drawer for answer card on notebook screens */
+@media screen and (max-width: 1440px) {
+  .question-pane:has(.answer-card-wrap) {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+  }
+  .question-pane > .answer-card-wrap {
+    display: block;
+    position: fixed;
+    z-index: 90;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    max-height: 46vh;
+    padding: 10px 12px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+  }
+  body.answer-card-collapsed .question-pane > .answer-card-wrap {
+    min-height: 38px;
+    max-height: 38px;
+    padding: 0 10px;
+  }
+  .answer-card-wrap .answer-card-collapse-btn {
+    display: flex;
+    width: 100%;
+    justify-content: center;
+    margin-bottom: 8px;
+    font-weight: 700;
+  }
+  .answer-card-wrap .stats {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .answer-card-wrap .card-page-nav {
+    justify-content: center;
+    margin-bottom: 7px;
+  }
+  .answer-card-wrap .card-page-content {
+    grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
+    max-height: 30vh;
+    min-height: 74px;
+  }
+  .answer-card-wrap .card-cell {
+    min-height: 34px;
+    font-size: 13px;
+  }
+}
+
+/* From 761px up the collapse button is absolutely positioned in the card corner,
+   so the full-width box above would push its left edge outside the card (and off
+   screen on 1281-1440px laptops). Anchor it to the right edge instead. */
+@media screen and (min-width: 761px) and (max-width: 1440px) {
+  .answer-card-wrap .answer-card-collapse-btn {
+    left: auto;
+    right: 14px;
+    width: auto;
+    margin-bottom: 0;
+  }
+}
+
+/* Keep the main question column clear on narrow desktop viewports. */
+@media screen and (min-width: 761px) and (max-width: 1100px) {
+  .question-pane > .answer-card-wrap {
+    right: auto;
+    width: min(clamp(280px, 42vw, 520px), calc(100vw - 16px));
+    max-height: min(46vh, calc(100dvh - 16px));
+  }
+}
