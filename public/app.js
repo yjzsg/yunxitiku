@@ -52,12 +52,20 @@ const state = {
   adminFailedCount: 0,
   adminView: "users",
   adminBankQuery: "",
+  adminBankCategory: "",
+  adminBankSubcategory: "",
+  adminBankCollapsed: {},
+  adminBankStatus: "",
+  adminUpdateCheck: {},
+  adminCourseAssign: null,
   adminBankUpdateMode: "",
   adminBankUpdateModePromise: null,
+  adminBankLastReport: null,
+  adminBankLastReportAt: "",
+  // 正在进行的拉取：{courseId, courseName, startedAtLocal, stageLabel, current, total, detail, percent, indeterminate}
+  adminBankPull: null,
   adminDataStatus: null,
-  adminBankManagerCourseId: 0,
-  adminBankManagerReport: null,
-  adminBankManagerBusy: "",
+  adminCleanAdsResult: "",
   adminEditorCourseId: 0,
   adminEditorChapterId: 0,
   adminEditorChapters: [],
@@ -92,6 +100,64 @@ const REVIEW_INTERVAL_DAYS = [1, 2, 4, 7, 15, 30];
 const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "待复盘"];
 const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
 const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
+
+/* ── 配色模式：浅色 / 暗色 / 护眼 ──────────────────────────────────────
+   真正的调色在 style.css 的 [data-theme="dark"|"eye"] 令牌块里；这里只负责
+   读写偏好、同步按钮状态、通知需要重绘的地方。
+   首屏防白闪靠 index.html <head> 的内联脚本（必须排在样式表之前）。 */
+const THEME_KEY = "yunxi-theme";
+const THEME_NAMES = ["light", "dark", "eye"];
+
+function currentTheme() {
+  const theme = document.documentElement.getAttribute("data-theme");
+  return THEME_NAMES.includes(theme) ? theme : "light";
+}
+
+// 读取当前主题下的令牌值（画布绘图用：它拿不到 CSS 变量，只能算出来）
+function themeToken(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function applyTheme(name, options = {}) {
+  const next = THEME_NAMES.includes(name) ? name : "light";
+  document.documentElement.setAttribute("data-theme", next);
+  if (options.persist !== false) {
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch (err) {
+      // 隐私模式下写不了，忽略：本次会话仍然生效
+    }
+  }
+  syncThemeSwitchUi(next);
+  // 学习看板的折线图是 canvas 画的，主题换了必须重画
+  if (typeof renderProgressTrend === "function") {
+    try {
+      renderProgressTrend();
+    } catch (err) {
+      console.warn("trend redraw after theme change failed", err);
+    }
+  }
+  return next;
+}
+
+function syncThemeSwitchUi(theme = currentTheme()) {
+  document.querySelectorAll("[data-theme-set]").forEach((btn) => {
+    const on = btn.dataset.themeSet === theme;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+function initTheme() {
+  syncThemeSwitchUi();
+  document.querySelectorAll("[data-theme-set]").forEach((btn) => {
+    btn.onclick = () => applyTheme(btn.dataset.themeSet);
+  });
+  // 同一个浏览器开了多个标签页时保持一致
+  window.addEventListener("storage", (event) => {
+    if (event.key === THEME_KEY && event.newValue) applyTheme(event.newValue, { persist: false });
+  });
+}
 
 function setText(id, value) {
   const el = $(id);
@@ -799,6 +865,7 @@ async function toggleFullscreen() {
 }
 
 async function init() {
+  initTheme();
   ensureMobileControls();
   const shouldCollapseCard = window.innerWidth <= 760
     || (window.innerWidth >= 761 && window.innerWidth < 1280 && window.innerHeight < 950)
@@ -4571,10 +4638,17 @@ function renderProgressTrend() {
     .reverse();
   const w = canvas.width;
   const h = canvas.height;
+  // 颜色全部从主题令牌取，切换配色后重画即可跟上
+  const chartBg = themeToken("--bg") || "#f8fafc";
+  const chartGrid = themeToken("--border") || "#e2e8f0";
+  const chartMuted = themeToken("--muted") || "#64748b";
+  const chartLine = themeToken("--primary") || "#6265ef";
+  const chartPoint = themeToken("--card") || "#ffffff";
+  const chartLabel = themeToken("--text") || "#0f172a";
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#f8fafc";
+  ctx.fillStyle = chartBg;
   ctx.fillRect(0, 0, w, h);
-  ctx.strokeStyle = "#e2e8f0";
+  ctx.strokeStyle = chartGrid;
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = 18 + i * ((h - 44) / 4);
@@ -4583,12 +4657,12 @@ function renderProgressTrend() {
     ctx.lineTo(w - 18, y);
     ctx.stroke();
   }
-  ctx.fillStyle = "#64748b";
+  ctx.fillStyle = chartMuted;
   ctx.font = "13px Inter, Noto Sans SC, Microsoft YaHei, sans-serif";
   ctx.fillText("100%", 4, 22);
   ctx.fillText("0%", 14, h - 24);
   if (!history.length) {
-    ctx.fillStyle = "#64748b";
+    ctx.fillStyle = chartMuted;
     ctx.fillText("暂无提交记录", Math.max(36, w / 2 - 42), h / 2 + 4);
     return;
   }
@@ -4599,7 +4673,7 @@ function renderProgressTrend() {
     const y = 18 + (100 - rate) * ((h - 44) / 100);
     return { x, y, rate };
   });
-  ctx.strokeStyle = "#6366f1";
+  ctx.strokeStyle = chartLine;
   ctx.lineWidth = 3;
   ctx.beginPath();
   points.forEach((point, index) => {
@@ -4609,15 +4683,15 @@ function renderProgressTrend() {
   ctx.stroke();
   points.forEach((point) => {
     ctx.beginPath();
-    ctx.fillStyle = "#fff";
+    ctx.fillStyle = chartPoint;
     ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = "#6366f1";
+    ctx.strokeStyle = chartLine;
     ctx.lineWidth = 2;
     ctx.stroke();
   });
   const last = points[points.length - 1];
-  ctx.fillStyle = "#0f172a";
+  ctx.fillStyle = chartLabel;
   ctx.fillText(`${last.rate}%`, Math.min(w - 54, last.x + 8), Math.max(16, last.y - 8));
 }
 
@@ -4642,7 +4716,15 @@ async function renderAdminDashboard() {
       const res = await api(`/api/user/load?user=${encodeURIComponent(item.name)}`);
       const data = normalizeStorage(res.data || {});
       const meta = state.users.find((user) => user.name.toLowerCase() === res.user.toLowerCase()) || {};
-      return buildUserSummary(res.user, data, meta);
+      const summary = buildUserSummary(res.user, data, meta);
+      // 该用户被分配的题库（null = 全部可见）
+      try {
+        const scope = await api(`/api/admin/user-courses?user=${encodeURIComponent(state.user)}&target=${encodeURIComponent(item.name)}`);
+        summary.assignedCourses = scope.assigned === null || scope.assigned === undefined ? null : scope.assigned;
+      } catch (err) {
+        summary.assignedCourses = undefined;
+      }
+      return summary;
     } catch (err) {
       console.warn("admin dashboard user load failed", item.name, err);
       return null;
@@ -4712,8 +4794,7 @@ function renderAdminRows(rows, failedCount = 0) {
     users: { title: "账号管理", desc: "查看进度、停用账号、重置密码" },
     courses: { title: "课程进度", desc: "按课程横向查看学习情况" },
     corrections: { title: "纠错反馈", desc: "处理用户提交的题目问题" },
-    banks: { title: "题库更新", desc: "按课程上传更新包" },
-    bankManager: { title: "题库管理器", desc: "预览、发布与回滚课程题库" },
+    banks: { title: "题库更新", desc: "按课程拉取或上传更新" },
     bankEditor: { title: "题库编辑", desc: "在线修改题干、选项与解析" },
     data: { title: "数据管理", desc: "整包上传下载题库和用户数据" },
   };
@@ -4730,7 +4811,6 @@ function renderAdminRows(rows, failedCount = 0) {
           <button class="admin-view-btn ${state.adminView === "courses" ? "active" : ""}" data-admin-view="courses" type="button">课程</button>
           <button class="admin-view-btn ${state.adminView === "corrections" ? "active" : ""}" data-admin-view="corrections" type="button">纠错</button>
           <button class="admin-view-btn ${state.adminView === "banks" ? "active" : ""}" data-admin-view="banks" type="button">更新</button>
-          <button class="admin-view-btn ${state.adminView === "bankManager" ? "active" : ""}" data-admin-view="bankManager" type="button">管理器</button>
           <button class="admin-view-btn ${state.adminView === "bankEditor" ? "active" : ""}" data-admin-view="bankEditor" type="button">编辑</button>
           <button class="admin-view-btn ${state.adminView === "data" ? "active" : ""}" data-admin-view="data" type="button">数据</button>
         </div>
@@ -4747,7 +4827,7 @@ function renderAdminRows(rows, failedCount = 0) {
         </div>
       </div>
       <div class="admin-view-body">
-        ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "bankManager" ? renderAdminBankManagerPanel() : state.adminView === "bankEditor" ? renderAdminBankEditorPanel() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
+        ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "bankEditor" ? renderAdminBankEditorPanel() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
       </div>
     </div>
   `;
@@ -4767,11 +4847,56 @@ function renderAdminRows(rows, failedCount = 0) {
       refreshAdminBankTableDebounced();
     };
   }
+  if ($("adminBankCategory")) {
+    $("adminBankCategory").onchange = () => {
+      state.adminBankCategory = $("adminBankCategory").value;
+      const options = courseFilterOptions(state.adminCourses || []);
+      // 换了一级分类，二级分类若不在新范围里就清掉
+      if (state.adminBankSubcategory && state.adminBankCategory
+          && !options.subsOf(state.adminBankCategory).includes(state.adminBankSubcategory)) {
+        state.adminBankSubcategory = "";
+      }
+      // 就地重建二级下拉（不整块重渲染，免得把搜索框里的输入法组字打断）
+      const subSelect = $("adminBankSubcategory");
+      if (subSelect) {
+        subSelect.innerHTML = `<option value="">全部二级分类</option>`
+          + categorySubOptionsHtml(options, state.adminBankCategory, state.adminBankSubcategory);
+        subSelect.value = state.adminBankSubcategory;
+      }
+      refreshAdminBankTable();
+    };
+  }
+  if ($("adminBankSubcategory")) {
+    $("adminBankSubcategory").onchange = () => {
+      state.adminBankSubcategory = $("adminBankSubcategory").value;
+      refreshAdminBankTable();
+    };
+  }
+  if ($("adminBankStatus")) {
+    $("adminBankStatus").onchange = () => {
+      state.adminBankStatus = $("adminBankStatus").value;
+      refreshAdminBankTable();
+    };
+  }
+  if ($("adminBankToggleAll")) {
+    $("adminBankToggleAll").onclick = () => {
+      const tops = courseFilterOptions(state.adminCourses || []).tops;
+      const anyCollapsed = tops.some((name) => state.adminBankCollapsed[name]);
+      state.adminBankCollapsed = {};
+      if (!anyCollapsed) tops.forEach((name) => { state.adminBankCollapsed[name] = true; });
+      refreshAdminBankTable();
+    };
+  }
+  if ($("adminBankCheckUpdate")) {
+    $("adminBankCheckUpdate").onclick = (event) => checkVisibleCourseUpdates(event.target).catch((err) => toast(err.message));
+  }
   bindAdminBankUpdateButtons();
-  bindAdminBankManagerActions();
   bindAdminBankEditorActions();
   document.querySelectorAll("[data-admin-action]").forEach((btn) => {
     btn.onclick = () => adminUserAction(btn.dataset.user, btn.dataset.adminAction).catch((err) => toast(err.message));
+  });
+  document.querySelectorAll("[data-admin-assign]").forEach((btn) => {
+    btn.onclick = () => openCourseAssign(btn.dataset.adminAssign);
   });
   document.querySelectorAll("[data-correction-action]").forEach((btn) => {
     btn.onclick = () => adminCorrectionAction(btn.dataset.user, btn.dataset.correctionId, btn.dataset.correctionAction).catch((err) => toast(err.message));
@@ -4781,6 +4906,23 @@ function renderAdminRows(rows, failedCount = 0) {
 
 function bindAdminBankUpdateButtons() {
   ensureAdminBankUpdateMode().catch(() => {});
+  // 一级分类表头可折叠：点一下收起/展开该分类下的课
+  document.querySelectorAll("[data-bank-group]").forEach((row) => {
+    row.onclick = () => {
+      const name = row.dataset.bankGroup;
+      if (state.adminBankCollapsed[name]) delete state.adminBankCollapsed[name];
+      else state.adminBankCollapsed[name] = true;
+      refreshAdminBankTable();
+    };
+  });
+  const closeReport = document.querySelector("[data-bank-report-close]");
+  if (closeReport) {
+    closeReport.onclick = () => {
+      state.adminBankLastReport = null;
+      state.adminBankLastReportAt = "";
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+    };
+  }
   document.querySelectorAll("[data-update-course]").forEach((btn) => {
     btn.onclick = () => {
       updateQuestionBank(Number(btn.dataset.updateCourse || 0), btn).catch((err) => {
@@ -4800,8 +4942,7 @@ async function ensureAdminBankUpdateMode() {
     const query = new URLSearchParams({ user: state.user, courseId: String(sample.id), dryRun: "true" });
     const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
     state.adminBankUpdateMode = result.reserved || result.mode === "upload" ? "upload" : "pull";
-    if (state.adminView === "bankManager") renderAdminRows(state.adminRows, state.adminFailedCount);
-    else refreshAdminBankTable();
+    refreshAdminBankTable();
     return state.adminBankUpdateMode;
   })();
   try {
@@ -4809,6 +4950,213 @@ async function ensureAdminBankUpdateMode() {
   } finally {
     state.adminBankUpdateModePromise = null;
   }
+}
+
+// ---- 按用户分配题库 --------------------------------------------------------
+
+function openCourseAssign(user) {
+  state.adminCourseAssign = { user, selected: new Set(), query: "", category: "", subcategory: "", all: false };
+  api(`/api/admin/user-courses?user=${encodeURIComponent(state.user)}&target=${encodeURIComponent(user)}`)
+    .then((scope) => {
+      const assign = state.adminCourseAssign;
+      if (!assign || assign.user !== user) return;
+      assign.all = scope.assigned === null || scope.assigned === undefined;
+      (scope.assigned || []).forEach((id) => assign.selected.add(Number(id)));
+      renderCourseAssignOverlay();
+    })
+    .catch((err) => toast(err.message));
+}
+
+function closeCourseAssign() {
+  state.adminCourseAssign = null;
+  const overlay = $("courseAssignOverlay");
+  if (overlay) overlay.remove();
+}
+
+const ASSIGN_LIST_CAP = 400;
+
+function assignFilteredCourses(assign) {
+  const courses = state.adminCourses || [];
+  const query = (assign.query || "").trim().toLowerCase();
+  const top = assign.category || "";
+  return courses.filter((course) => {
+    if (top && course.category !== top) return false;
+    if (assign.subcategory && course.subcategory !== assign.subcategory) return false;
+    if (!query) return true;
+    return [course.name, course.category, course.subcategory, course.id]
+      .some((value) => String(value || "").toLowerCase().includes(query));
+  });
+}
+
+// 两级分组渲染；最多渲染 ASSIGN_LIST_CAP 门，避免一次插上万条 DOM
+function assignGroupedHtml(list) {
+  const assign = state.adminCourseAssign;
+  let budget = ASSIGN_LIST_CAP;
+  const renderItem = (course) => `
+    <label class="assign-item">
+      <input type="checkbox" data-assign-course="${course.id}" ${assign.selected.has(Number(course.id)) ? "checked" : ""}>
+      <span>${escapeHtml(course.name)}</span>
+      <small>${Number(course.questionCount || 0)} 题</small>
+    </label>`;
+  return groupCoursesByCategory(list).map((group) => {
+    if (budget <= 0) return "";
+    const subsHtml = group.subs.map((sub) => {
+      if (budget <= 0) return "";
+      const items = sub.list.slice(0, budget);
+      budget -= items.length;
+      return `<div class="assign-subgroup"><span>${escapeHtml(sub.name)}</span><small>${sub.list.length} 门</small></div>`
+        + items.map(renderItem).join("");
+    }).join("");
+    return `<div class="assign-group"><span>${escapeHtml(group.name)}</span><small>${group.count} 门</small></div>${subsHtml}`;
+  }).join("");
+}
+
+function assignFootText(assign, listCount) {
+  return assign.all
+    ? "保存后该用户可见全部有内容的题库"
+    : `共选中 ${assign.selected.size} 门（筛选结果 ${listCount} 门，列表最多显示 ${ASSIGN_LIST_CAP} 门）`;
+}
+
+// 只刷新列表/统计，**不重建浮层**——整块重建会把输入框换掉，中文输入法的组字就被打断了
+function refreshAssignList() {
+  const assign = state.adminCourseAssign;
+  if (!assign) return;
+  const list = assignFilteredCourses(assign);
+  const box = $("assignList");
+  if (box) box.innerHTML = assignGroupedHtml(list) || `<div class="admin-empty">没有匹配的题库</div>`;
+  const foot = $("assignFootText");
+  if (foot) foot.textContent = assignFootText(assign, list.length);
+  const scope = $("assignHeadScope");
+  if (scope) scope.textContent = assign.all ? "当前：全部可见" : `当前：${assign.selected.size} 门`;
+  bindAssignCheckboxes();
+}
+
+const refreshAssignListDebounced = debounce(() => refreshAssignList(), 160);
+
+function bindAssignCheckboxes() {
+  const overlay = $("courseAssignOverlay");
+  if (!overlay) return;
+  overlay.querySelectorAll("[data-assign-course]").forEach((box) => {
+    box.onchange = () => {
+      const assign = state.adminCourseAssign;
+      if (!assign) return;
+      const id = Number(box.dataset.assignCourse);
+      if (box.checked) assign.selected.add(id); else assign.selected.delete(id);
+      assign.all = false;
+      const foot = $("assignFootText");
+      if (foot) foot.textContent = assignFootText(assign, assignFilteredCourses(assign).length);
+      const scope = $("assignHeadScope");
+      if (scope) scope.textContent = `当前：${assign.selected.size} 门`;
+    };
+  });
+}
+
+function renderCourseAssignOverlay() {
+  const assign = state.adminCourseAssign;
+  if (!assign) return;
+  let overlay = $("courseAssignOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "courseAssignOverlay";
+    overlay.className = "assign-overlay";
+    document.body.appendChild(overlay);
+  }
+  const options = courseFilterOptions(state.adminCourses || []);
+  const top = assign.category || "";
+  const list = assignFilteredCourses(assign);
+  overlay.innerHTML = `
+    <div class="assign-card">
+      <div class="assign-head">
+        <div>
+          <b>给「${escapeHtml(assign.user)}」分配题库</b>
+          <span id="assignHeadScope">${assign.all ? "当前：全部可见" : `当前：${assign.selected.size} 门`}</span>
+        </div>
+        <button id="assignClose" type="button">×</button>
+      </div>
+      <div class="assign-tools">
+        <input id="assignSearch" value="${escapeHtml(assign.query || "")}" placeholder="搜索题库名称、分类或ID">
+        <select id="assignCategory" title="一级分类">
+          <option value="">全部一级分类</option>
+          ${options.tops.map((name) => `<option value="${escapeHtml(name)}" ${top === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}
+        </select>
+        <select id="assignSubcategory" title="二级分类">
+          <option value="">全部二级分类</option>
+          ${categorySubOptionsHtml(options, top, assign.subcategory)}
+        </select>
+        <button id="assignPickFiltered" type="button">选中当前筛选</button>
+        <button id="assignAll" type="button">全部可见</button>
+        <button id="assignNone" type="button">全不选</button>
+      </div>
+      <div class="assign-list" id="assignList">
+        ${assignGroupedHtml(list) || `<div class="admin-empty">没有匹配的题库</div>`}
+      </div>
+      <div class="assign-foot">
+        <span id="assignFootText">${assignFootText(assign, list.length)}</span>
+        <button id="assignSave" class="primary-action" type="button">保存</button>
+        <button id="assignCancel" type="button">取消</button>
+      </div>
+    </div>
+  `;
+
+  // 搜索框：中文输入法组字期间不碰 DOM，组字结束再刷新列表
+  const search = $("assignSearch");
+  let composing = false;
+  search.addEventListener("compositionstart", () => { composing = true; });
+  search.addEventListener("compositionend", () => {
+    composing = false;
+    assign.query = search.value;
+    refreshAssignList();
+  });
+  search.oninput = () => {
+    assign.query = search.value;
+    if (composing) return;   // 组字中：动了 DOM 中文就打不出来
+    refreshAssignListDebounced();
+  };
+
+  // 级联下拉：只重建二级选项 + 刷新列表，不整块重渲染
+  $("assignCategory").onchange = () => {
+    assign.category = $("assignCategory").value;
+    if (assign.subcategory && assign.category && !options.subsOf(assign.category).includes(assign.subcategory)) {
+      assign.subcategory = "";
+    }
+    const sub = $("assignSubcategory");
+    if (sub) {
+      sub.innerHTML = `<option value="">全部二级分类</option>`
+        + categorySubOptionsHtml(options, assign.category, assign.subcategory);
+      sub.value = assign.subcategory;
+    }
+    refreshAssignList();
+  };
+  $("assignSubcategory").onchange = () => {
+    assign.subcategory = $("assignSubcategory").value;
+    refreshAssignList();
+  };
+  $("assignPickFiltered").onclick = () => {
+    assign.all = false;
+    assignFilteredCourses(assign).forEach((course) => assign.selected.add(Number(course.id)));
+    refreshAssignList();
+  };
+  $("assignAll").onclick = () => { assign.all = true; assign.selected.clear(); refreshAssignList(); };
+  $("assignNone").onclick = () => { assign.all = false; assign.selected.clear(); refreshAssignList(); };
+  $("assignClose").onclick = closeCourseAssign;
+  $("assignCancel").onclick = closeCourseAssign;
+  bindAssignCheckboxes();
+  $("assignSave").onclick = () => saveCourseAssign().catch((err) => toast(err.message));
+}
+
+async function saveCourseAssign() {
+  const assign = state.adminCourseAssign;
+  if (!assign) return;
+  const result = await api("/api/admin/user-courses", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user: assign.user, courses: assign.all ? null : [...assign.selected] }),
+  });
+  toast(result.assigned === null
+    ? `「${assign.user}」现在可见全部题库`
+    : `已给「${assign.user}」分配 ${result.assigned.length} 门题库`);
+  closeCourseAssign();
+  await renderAdminDashboard();
 }
 
 function renderAdminUserTable(rows) {
@@ -4827,9 +5175,11 @@ function renderAdminUserTable(rows) {
                 <span>最近登录：${escapeHtml(row.lastLoginAt)}</span>
                 <span>最近题库：${escapeHtml(row.lastCourseName)}</span>
                 <span>最近提交：${escapeHtml(row.lastPracticeAt)}</span>
+                <span>题库：${row.assignedCourses === null || row.assignedCourses === undefined ? "全部" : `${row.assignedCourses.length} 门`}</span>
               </div>
             </div>
             <div class="admin-actions admin-user-actions">
+              <button data-admin-assign="${escapeHtml(row.user)}">分配题库</button>
               <button data-admin-action="${row.disabled ? "enable" : "disable"}" data-user="${escapeHtml(row.user)}">${row.disabled ? "启用" : "停用"}</button>
               <button data-admin-action="reset-password" data-user="${escapeHtml(row.user)}">重置密码</button>
               <button data-admin-action="clear-data" data-user="${escapeHtml(row.user)}">清空数据</button>
@@ -4946,15 +5296,199 @@ function collectAdminCourses(rows) {
   return [...map.values()].sort((a, b) => a.id - b.id);
 }
 
+// 拉取后立刻给出对比报告（原「题库管理器」的预检并入这里）：新增/消失题数 + 本地改动受影响情况
+function renderAdminBankReport(report) {
+  if (!report || !report.after) return "";
+  const before = report.before || {};
+  const after = report.after || {};
+  const edits = report.localEdits || {};
+  const courseName = report.courseName || "";
+  const targetText = report.target === "pulled" ? "拉取库（未购课程）" : "主库";
+  const chips = [
+    `<span class="bank-report-chip added">新增 ${Number(report.addedSubjects || 0)} 题</span>`,
+    `<span class="bank-report-chip removed">消失 ${Number(report.removedSubjects || 0)} 题</span>`,
+    Number(report.addedChapters || 0) || Number(report.removedChapters || 0)
+      ? `<span class="bank-report-chip">章节 +${Number(report.addedChapters || 0)} / -${Number(report.removedChapters || 0)}</span>`
+      : "",
+    `<span class="bank-report-chip">题量 ${Number(before.subjects || 0)} → ${Number(after.subjects || 0)}</span>`,
+  ].filter(Boolean).join("");
+  const editLine = Number(edits.subjects || 0) || Number(edits.chapters || 0) || Number(edits.orphans || 0)
+    ? `<p class="bank-report-edit">本地改动：重贴 ${Number(edits.subjects || 0)} 题 / ${Number(edits.chapters || 0)} 个章节${
+        Number(edits.orphans || 0) ? `；${Number(edits.orphans || 0)} 处对应的题目已不在新题库里（记录保留）` : ""}</p>`
+    : `<p class="bank-report-edit muted">本地改动：无</p>`;
+  return `
+    <div class="bank-report">
+      <div class="bank-report-head">
+        <b>更新报告${courseName ? `：${escapeHtml(courseName)}` : ""}</b>
+        <span>写入 ${escapeHtml(targetText)} · ${escapeHtml(state.adminBankLastReportAt || "")}</span>
+        <button type="button" class="bank-report-close" data-bank-report-close="1">关闭</button>
+      </div>
+      <div class="bank-report-chips">${chips}</div>
+      ${editLine}
+    </div>
+  `;
+}
+
+// 二级分类下拉的选项：选定一级时只列它的二级，否则按一级用 optgroup 分组列全
+function categorySubOptionsHtml(options, top, selected) {
+  if (top) {
+    return options.subsOf(top)
+      .map((name) => `<option value="${escapeHtml(name)}" ${selected === name ? "selected" : ""}>${escapeHtml(name)}</option>`)
+      .join("");
+  }
+  return options.allSubs().map(({ top: groupName, subs }) =>
+    `<optgroup label="${escapeHtml(groupName)}">${subs
+      .map((name) => `<option value="${escapeHtml(name)}" ${selected === name ? "selected" : ""}>${escapeHtml(name)}</option>`)
+      .join("")}</optgroup>`).join("");
+}
+
+/* ── 拉取进度条 ───────────────────────────────────────────────────────
+   拉取的 POST 本身是同步的（要几分钟），所以进度另走一个只读端点：
+   POST 在飞行中时每 700ms 轮询 /api/admin/update-bank/progress。
+   阶段名与计数是服务端上报的精确值；百分比是按阶段权重折算的**估算**
+   （题多的课与图多的课，两个大头占比差很多，没法预先算准），界面上如实标注。 */
+const BANK_PULL_POLL_MS = 700;
+let bankPullPollTimer = null;
+
+function formatElapsed(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total} 秒`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return s ? `${m} 分 ${s} 秒` : `${m} 分`;
+}
+
+function renderBankPullProgress() {
+  const pull = state.adminBankPull;
+  if (!pull) return "";
+  const pct = Math.max(0, Math.min(100, Number(pull.percent) || 0));
+  const elapsed = (Date.now() - pull.startedAtLocal) / 1000;
+  const bits = [pull.stageLabel || "准备中"];
+  if (pull.total > 0) bits.push(`${pull.current} / ${pull.total}`);
+  if (pull.detail) bits.push(pull.detail);
+  bits.push(`已用 ${formatElapsed(elapsed)}`);
+  // 刚发起那 1~2 秒服务端还没登记，属于正常竞态，别说成"接口没数据"吓人
+  const hint = pull.indeterminate
+    ? (elapsed < 4 ? "正在连接服务器…" : "进度接口暂时没数据，正在重试")
+    : "百分比为估算，阶段与计数是实际值";
+  return `
+    <div class="bank-progress${pull.indeterminate ? " indeterminate" : ""}" id="bankProgress">
+      <div class="bank-progress-head">
+        <b>正在更新：${escapeHtml(pull.courseName || `课程 ${pull.courseId}`)}</b>
+        <span>${pull.indeterminate ? "等待服务器上报进度…" : `约 ${pct}%`}</span>
+      </div>
+      <div class="bank-progress-track"><i style="width:${pull.indeterminate ? 100 : pct}%"></i></div>
+      <div class="bank-progress-meta">
+        <span>${escapeHtml(bits.join(" · "))}</span>
+        <span class="bank-progress-hint">${hint}</span>
+      </div>
+    </div>
+  `;
+}
+
+// 只替换进度条这一个节点，不整块重渲染表格（否则会打断用户的滚动/筛选）
+function refreshBankPullProgressUi() {
+  const existing = $("bankProgress");
+  if (!state.adminBankPull) {
+    if (existing) existing.remove();
+    return;
+  }
+  const html = renderBankPullProgress();
+  if (existing) {
+    existing.outerHTML = html;
+    return;
+  }
+  const tools = document.querySelector(".admin-bank-tools");
+  if (tools) tools.insertAdjacentHTML("afterend", html);
+}
+
+async function pollBankPullProgress(courseId) {
+  const pull = state.adminBankPull;
+  if (!pull || pull.courseId !== courseId) return;
+  try {
+    const res = await api(`/api/admin/update-bank/progress?user=${encodeURIComponent(state.user)}&courseId=${courseId}`);
+    const snapshot = res && res.snapshot;
+    if (!state.adminBankPull || state.adminBankPull.courseId !== courseId) return;
+    if (snapshot) {
+      state.adminBankPull.stageLabel = snapshot.stageLabel || state.adminBankPull.stageLabel;
+      state.adminBankPull.current = Number(snapshot.current || 0);
+      state.adminBankPull.total = Number(snapshot.total || 0);
+      state.adminBankPull.detail = snapshot.detail || "";
+      state.adminBankPull.percent = Number(snapshot.percent || 0);
+      if (snapshot.label) state.adminBankPull.courseName = snapshot.label;
+      state.adminBankPull.indeterminate = false;
+    } else {
+      // 服务端还没有这门课的记录（刚发起时的竞态，或进程重启过）
+      state.adminBankPull.indeterminate = true;
+    }
+  } catch (err) {
+    // 轮询失败不该打断拉取：标成不确定态，下个周期再试
+    if (state.adminBankPull) state.adminBankPull.indeterminate = true;
+  }
+  refreshBankPullProgressUi();
+}
+
+function stopBankPullPolling() {
+  if (bankPullPollTimer) {
+    clearInterval(bankPullPollTimer);
+    bankPullPollTimer = null;
+  }
+}
+
+function startBankPullProgress(courseId) {
+  const course = (state.adminCourses || []).find((item) => Number(item.id) === Number(courseId));
+  state.adminBankPull = {
+    courseId,
+    courseName: course?.name || `课程 ${courseId}`,
+    startedAtLocal: Date.now(),
+    stageLabel: "准备中",
+    current: 0,
+    total: 0,
+    detail: "",
+    percent: 0,
+    indeterminate: true,
+  };
+  refreshBankPullProgressUi();
+  stopBankPullPolling();
+  bankPullPollTimer = setInterval(() => pollBankPullProgress(courseId), BANK_PULL_POLL_MS);
+  pollBankPullProgress(courseId);   // 立刻先探一次，别干等一个周期
+}
+
+function stopBankPullProgress() {
+  stopBankPullPolling();
+  state.adminBankPull = null;
+  refreshBankPullProgressUi();
+}
+
 function renderAdminBankTable() {
   const courses = state.adminCourses || [];
   if (!courses.length) return `<div class="admin-empty">暂无题库数据</div>`;
   const visibleCourses = getFilteredAdminCourses();
+  const options = courseFilterOptions(courses);
+  const top = state.adminBankCategory || "";
+  const collapsedCount = options.tops.filter((name) => state.adminBankCollapsed[name]).length;
   return `
     <div class="admin-bank-tools">
       <input id="adminBankSearch" value="${escapeHtml(state.adminBankQuery || "")}" placeholder="搜索题库名称、分类或ID">
+      <select id="adminBankCategory" title="一级分类">
+        <option value="">全部一级分类</option>
+        ${options.tops.map((name) => `<option value="${escapeHtml(name)}" ${top === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}
+      </select>
+      <select id="adminBankSubcategory" title="二级分类">
+        <option value="">全部二级分类</option>
+        ${categorySubOptionsHtml(options, top, state.adminBankSubcategory)}
+      </select>
+      <select id="adminBankStatus">
+        ${[["", "全部状态"], ["downloaded", "已下载"], ["missing", "未下载"]]
+          .map(([value, label]) => `<option value="${value}" ${state.adminBankStatus === value ? "selected" : ""}>${label}</option>`)
+          .join("")}
+      </select>
+      <button id="adminBankCheckUpdate" type="button">检查可更新</button>
+      <button id="adminBankToggleAll" type="button">${collapsedCount ? "全部展开" : "全部收起"}</button>
       <span id="adminBankSummary">${renderAdminBankSummary(visibleCourses.length)}</span>
     </div>
+    ${renderBankPullProgress()}
+    ${renderAdminBankReport(state.adminBankLastReport)}
     <div class="admin-table-wrap">
       <table class="admin-table admin-bank-table">
         <thead>
@@ -4975,40 +5509,182 @@ function renderAdminBankTable() {
   `;
 }
 
+// 排序：已下载优先 → 课程 ID（组内排序；组间按分类 iindex，见 groupCoursesByCategory）
+function byDownloadedThenId(a, b) {
+  const byDownloaded = (Number(b.questionCount || 0) > 0 ? 1 : 0) - (Number(a.questionCount || 0) > 0 ? 1 : 0);
+  if (byDownloaded !== 0) return byDownloaded;
+  return Number(a.id || 0) - Number(b.id || 0);
+}
+
+// 课程按「一级分类 → 二级分类」两级归组；组间用后端的分类 iindex（categoryOrder / subcategoryOrder）排序，
+// 这样顺序跟客户端里的分类顺序一致，而不是拼音序。
+function groupCoursesByCategory(courses) {
+  const groups = new Map();
+  (courses || []).forEach((course) => {
+    const top = course.category || "未分类";
+    const sub = course.subcategory || "未分类";
+    if (!groups.has(top)) {
+      groups.set(top, { name: top, order: Number(course.categoryOrder || 0), count: 0, subs: new Map() });
+    }
+    const group = groups.get(top);
+    group.count += 1;
+    if (!group.subs.has(sub)) {
+      group.subs.set(sub, { name: sub, order: Number(course.subcategoryOrder || 0), list: [] });
+    }
+    group.subs.get(sub).list.push(course);
+  });
+  const byOrderThenName = (a, b) => a.order - b.order || String(a.name).localeCompare(String(b.name), "zh-Hans-CN");
+  return [...groups.values()].sort(byOrderThenName).map((group) => ({
+    ...group,
+    subs: [...group.subs.values()].sort(byOrderThenName)
+      .map((sub) => ({ ...sub, list: sub.list.slice().sort(byDownloadedThenId) })),
+  }));
+}
+
+// 级联筛选用的选项：一级分类列表 + 「某一级下的二级分类」查询
+function courseFilterOptions(courses) {
+  const tops = new Map();
+  const subs = new Map();
+  (courses || []).forEach((course) => {
+    const top = course.category || "未分类";
+    const sub = course.subcategory || "未分类";
+    if (!tops.has(top)) tops.set(top, Number(course.categoryOrder || 0));
+    if (!subs.has(top)) subs.set(top, new Map());
+    if (!subs.get(top).has(sub)) subs.get(top).set(sub, Number(course.subcategoryOrder || 0));
+  });
+  const names = (map) => [...map.entries()]
+    .sort((a, b) => a[1] - b[1] || String(a[0]).localeCompare(String(b[0]), "zh-Hans-CN"))
+    .map(([name]) => name);
+  return {
+    tops: names(tops),
+    subsOf: (top) => (subs.has(top) ? names(subs.get(top)) : []),
+    allSubs: () => [...subs.entries()].map(([top, map]) => ({ top, subs: names(map) })),
+  };
+}
+
+// 排序：已下载优先 → 一级分类 → 二级分类 → 课程 ID（列表很长时，常用的课排前面）
 function getFilteredAdminCourses() {
   const courses = state.adminCourses || [];
   const query = (state.adminBankQuery || "").trim().toLowerCase();
-  if (!query) return courses;
-  return courses.filter((course) => [course.name, course.category, course.subcategory, course.id]
-    .some((value) => String(value || "").toLowerCase().includes(query)));
+  const category = state.adminBankCategory || "";
+  const subcategory = state.adminBankSubcategory || "";
+  const status = state.adminBankStatus || "";
+  const filtered = courses.filter((course) => {
+    if (category && course.category !== category) return false;
+    if (subcategory && course.subcategory !== subcategory) return false;
+    const hasLocal = Number(course.questionCount || 0) > 0;
+    if (status === "downloaded" && !hasLocal) return false;
+    if (status === "missing" && hasLocal) return false;
+    if (!query) return true;
+    return [course.name, course.category, course.subcategory, course.id]
+      .some((value) => String(value || "").toLowerCase().includes(query));
+  });
+  return filtered.sort((a, b) => {
+    const byCategory = Number(a.categoryOrder || 0) - Number(b.categoryOrder || 0);
+    if (byCategory !== 0) return byCategory;
+    const bySubcategory = Number(a.subcategoryOrder || 0) - Number(b.subcategoryOrder || 0);
+    if (bySubcategory !== 0) return bySubcategory;
+    return byDownloadedThenId(a, b);
+  });
+}
+
+// 拉取模式不校验授权：能出现在这个列表里的课程，库里都有它的 course 行，直接拉即可
+// （上游服务端本身也不校验购买权限，未购课程同样能拉到）。上传模式仍要求课程已有本地
+// 数据，避免上传包按 ID 匹配到一门空课程。
+function canUpdateAdminCourse(course) {
+  if (state.adminBankUpdateMode === "pull") return true;
+  return !!course.owned && Number(course.questionCount || 0) > 0;
 }
 
 function renderAdminBankSummary(visibleCount = getFilteredAdminCourses().length) {
   const courses = state.adminCourses || [];
-  const canUpdateCount = courses.filter((course) => !!course.owned && Number(course.questionCount || 0) > 0).length;
-  const modeText = state.adminBankUpdateMode === "upload" ? "上传更新" : state.adminBankUpdateMode === "pull" ? "拉取更新" : "可更新";
-  return `共 ${courses.length} 门 · ${modeText} ${canUpdateCount} 门 · 当前显示 ${visibleCount} 门`;
+  const downloaded = courses.filter((course) => Number(course.questionCount || 0) > 0).length;
+  const updatable = courses.filter((course) => state.adminUpdateCheck[course.id] === true).length;
+  const groups = groupCoursesByCategory(getFilteredAdminCourses()).length;
+  return `共 ${courses.length} 门 · 已下载 ${downloaded} 门 · 当前显示 ${visibleCount} 门 / ${groups} 个一级分类`
+    + (updatable ? ` · 可更新 ${updatable} 门` : "");
 }
 
+// 单门课的一行（分组渲染时复用）
+function renderAdminBankCourseRow(course) {
+  const hasLocal = Number(course.questionCount || 0) > 0;
+  const canUpdate = canUpdateAdminCourse(course);
+  // 状态只说"本地有没有这门课的题库"，不再区分已购/未购（对管理没有意义）
+  const status = hasLocal ? "已下载" : "未下载";
+  const updateFlag = state.adminUpdateCheck[course.id];
+  const updateBadge = updateFlag === true
+    ? ` <span class="status-pill active">可更新</span>`
+    : updateFlag === false
+      ? ` <span class="status-pill disabled">已最新</span>`
+      : "";
+  const updateText = state.adminBankUpdateMode === "upload" ? "上传更新" : state.adminBankUpdateMode === "pull" ? "拉取更新" : "更新题库";
+  return `
+    <tr class="${canUpdate ? "" : "muted-row"}">
+      <td><b>${escapeHtml(course.name)}</b><span class="admin-course-id">ID ${course.id}</span></td>
+      <td>${escapeHtml(course.category || "")}<span>${escapeHtml(course.subcategory || "")}</span></td>
+      <td>${Number(course.questionCount || 0)} 题</td>
+      <td>${escapeHtml(formatRelativeTime(course.changedAt))}<span>${escapeHtml(course.changedAt || "未记录")}</span></td>
+      <td><span class="status-pill ${hasLocal ? "active" : "disabled"}">${escapeHtml(status)}</span>${updateBadge}</td>
+      <td>
+        <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? updateText : "不可更新"}</button>
+      </td>
+    </tr>
+  `;
+}
+
+// 按「一级分类 → 二级分类」两级渲染：一级可折叠，二级带小标题，避免一千多门课平铺在一个维度上
 function renderAdminBankRows(visibleCourses) {
-  return visibleCourses.map((course) => {
-    const hasLocal = Number(course.questionCount || 0) > 0;
-    const canUpdate = !!course.owned && hasLocal;
-    const status = !course.owned ? "未授权" : hasLocal ? "已授权 / 已下载" : "已授权 / 无本地题库";
-    const updateText = state.adminBankUpdateMode === "upload" ? "上传更新" : state.adminBankUpdateMode === "pull" ? "拉取更新" : "更新题库";
-    return `
-      <tr class="${canUpdate ? "" : "muted-row"}">
-        <td><b>${escapeHtml(course.name)}</b><span class="admin-course-id">ID ${course.id}</span></td>
-        <td>${escapeHtml(course.category || "")}<span>${escapeHtml(course.subcategory || "")}</span></td>
-        <td>${Number(course.questionCount || 0)} 题</td>
-        <td>${escapeHtml(formatRelativeTime(course.changedAt))}<span>${escapeHtml(course.changedAt || "未记录")}</span></td>
-        <td><span class="status-pill ${canUpdate ? "active" : "disabled"}">${escapeHtml(status)}</span></td>
-        <td>
-          <button class="primary-action secondary compact" data-update-course="${course.id}" ${canUpdate ? "" : "disabled"}>${canUpdate ? updateText : "不可更新"}</button>
+  const groups = groupCoursesByCategory(visibleCourses);
+  if (!groups.length) return `<tr><td colspan="6">没有匹配的题库</td></tr>`;
+  const rows = [];
+  groups.forEach((group) => {
+    const collapsed = !!state.adminBankCollapsed[group.name];
+    rows.push(`
+      <tr class="bank-group-row" data-bank-group="${escapeHtml(group.name)}">
+        <td colspan="6">
+          <span class="bank-group-toggle">${collapsed ? "▸" : "▾"}</span>
+          <b>${escapeHtml(group.name)}</b>
+          <small>${group.count} 门 · ${group.subs.length} 个二级分类</small>
         </td>
       </tr>
-    `;
-  }).join("") || `<tr><td colspan="6">没有匹配的题库</td></tr>`;
+    `);
+    if (collapsed) return;
+    group.subs.forEach((sub) => {
+      rows.push(`
+        <tr class="bank-subgroup-row">
+          <td colspan="6"><span>${escapeHtml(sub.name)}</span><small>${sub.list.length} 门</small></td>
+        </tr>
+      `);
+      sub.list.forEach((course) => rows.push(renderAdminBankCourseRow(course)));
+    });
+  });
+  return rows.join("");
+}
+
+// 「检查可更新」：只探当前可见的前 60 门（避免一次探上千门），结果缓存到 state.adminUpdateCheck
+async function checkVisibleCourseUpdates(btn = null) {
+  const courses = getFilteredAdminCourses().slice(0, 60);
+  if (!courses.length) {
+    toast("当前列表没有可检查的题库");
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = "检查中..."; }
+  try {
+    const result = await api("/api/admin/course-update-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ courseIds: courses.map((course) => Number(course.id)) }),
+    });
+    const items = result.results || [];
+    items.forEach((item) => {
+      state.adminUpdateCheck[item.courseId] = !!item.hasUpdate;
+    });
+    refreshAdminBankTable();
+    const updatable = items.filter((item) => item.hasUpdate).length;
+    toast(`已检查 ${items.length} 门题库，其中 ${updatable} 门可更新`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "检查可更新"; }
+  }
 }
 
 function refreshAdminBankTable() {
@@ -5018,274 +5694,6 @@ function refreshAdminBankTable() {
   if (summary) summary.textContent = renderAdminBankSummary(visibleCourses.length);
   if (rows) rows.innerHTML = renderAdminBankRows(visibleCourses);
   bindAdminBankUpdateButtons();
-}
-
-function renderAdminBankManagerPanel() {
-  if (!state.adminBankUpdateMode) {
-    ensureAdminBankUpdateMode().catch((err) => toast(err.message));
-    return `
-      <div class="admin-data-card bank-manager-card">
-        <div class="admin-data-card-head">
-          <div>
-            <b>题库管理器</b>
-            <span>正在识别当前部署的题库更新方式...</span>
-          </div>
-          <span class="status-pill disabled">检测中</span>
-        </div>
-      </div>
-    `;
-  }
-  if (state.adminBankUpdateMode === "upload") {
-    return `
-      <div class="admin-data-card bank-manager-card">
-        <div class="admin-data-card-head">
-          <div>
-            <b>Docker 版题库更新</b>
-            <span>Docker 只接收已经在本地服务器版校验过的题库包。</span>
-          </div>
-          <span class="status-pill disabled">上传版</span>
-        </div>
-        <div class="admin-empty bank-manager-empty">
-          请先在 Windows 本地服务器版使用题库管理器拉取/上传到临时区，完成对比校验并导出 Docker 包；确认无 ID 大幅变动、答案异常和图片缺失后，再回到 Docker 的“题库更新”或“数据管理”上传。
-        </div>
-        <div class="admin-data-actions">
-          <button class="primary-action" data-admin-jump-view="banks" type="button">去题库更新</button>
-          <button data-admin-jump-view="data" type="button">去数据管理</button>
-        </div>
-      </div>
-    `;
-  }
-
-  const courses = getBankManagerCourses();
-  if (!courses.length) {
-    return `<div class="admin-empty">暂无可管理题库，请先确认服务器版已加载课程数据。</div>`;
-  }
-  const selected = getBankManagerCourse(courses);
-  const report = Number(state.adminBankManagerReport?.courseId || 0) === Number(selected.id)
-    ? state.adminBankManagerReport
-    : null;
-  const busy = state.adminBankManagerBusy;
-  return `
-    <div class="bank-manager-panel">
-      <section class="admin-data-card bank-manager-card">
-        <div class="admin-data-card-head">
-          <div>
-            <b>题库管理器</b>
-            <span>先拉取或上传到临时区，对比校验通过后再发布正式题库，并导出 Docker 包。</span>
-          </div>
-          <span class="status-pill active">服务器版</span>
-        </div>
-        <div class="bank-manager-picker">
-          <label>
-            <span>选择题库</span>
-            <select id="bankManagerCourseSelect">
-              ${courses.map((course) => `<option value="${course.id}" ${Number(course.id) === Number(selected.id) ? "selected" : ""}>${escapeHtml(course.name)} · ID ${course.id} · ${Number(course.questionCount || 0)}题</option>`).join("")}
-            </select>
-          </label>
-          <div class="bank-manager-course-meta">
-            <b>${escapeHtml(selected.name || "")}</b>
-            <span>${escapeHtml(selected.category || "未分类")} ${selected.subcategory ? "· " + escapeHtml(selected.subcategory) : ""}</span>
-            <span>本地题量 ${Number(selected.questionCount || 0)} 题 · 更新 ${escapeHtml(formatRelativeTime(selected.changedAt))}</span>
-          </div>
-        </div>
-        <div class="admin-data-actions bank-manager-actions">
-          <button class="primary-action" data-bank-manager-action="pull" type="button" ${busy ? "disabled" : ""}>${busy === "pull" ? "拉取中..." : "拉取到临时区"}</button>
-          <button data-bank-manager-action="upload" type="button" ${busy ? "disabled" : ""}>${busy === "upload" ? "上传中..." : "上传到临时区"}</button>
-          <button data-bank-manager-action="report" type="button" ${busy ? "disabled" : ""}>${busy === "report" ? "生成中..." : "生成/刷新报告"}</button>
-          <button class="primary-action secondary" data-bank-manager-action="publish" type="button" ${busy || !report?.stagingExists ? "disabled" : ""}>发布正式题库</button>
-          <button class="danger" data-bank-manager-action="force" type="button" ${busy || !report?.stagingExists ? "disabled" : ""}>强制发布</button>
-          <button data-bank-manager-action="export" type="button" ${busy || !report?.stagingExists ? "disabled" : ""}>导出 Docker 包</button>
-        </div>
-        <small>临时区不会影响当前正式题库；发布前会自动备份正式数据库和图片。若报告提示 ID 大幅变动，错题、收藏、笔记、训练计划可能无法准确映射。</small>
-      </section>
-      ${renderBankManagerReport(report)}
-    </div>
-  `;
-}
-
-function getBankManagerCourses() {
-  const courses = state.adminCourses || [];
-  const preferred = courses.filter((course) => !!course.owned || Number(course.questionCount || 0) > 0);
-  return (preferred.length ? preferred : courses).slice().sort((a, b) => {
-    const localDiff = Number(b.questionCount || 0) - Number(a.questionCount || 0);
-    if (localDiff !== 0) return localDiff;
-    return Number(a.id || 0) - Number(b.id || 0);
-  });
-}
-
-function getBankManagerCourse(courses = getBankManagerCourses()) {
-  const current = courses.find((course) => Number(course.id) === Number(state.adminBankManagerCourseId));
-  const selected = current || courses[0] || {};
-  state.adminBankManagerCourseId = Number(selected.id || 0);
-  return selected;
-}
-
-function renderBankManagerReport(report) {
-  if (!report) {
-    return `
-      <section class="admin-data-card bank-manager-card">
-        <div class="admin-data-card-head">
-          <div>
-            <b>校验报告</b>
-            <span>点击“拉取到临时区”“上传到临时区”或“生成/刷新报告”后显示。</span>
-          </div>
-          <span class="status-pill disabled">暂无报告</span>
-        </div>
-      </section>
-    `;
-  }
-  if (report.ok === false) {
-    return `<section class="admin-data-card bank-manager-card"><div class="admin-empty">报告生成失败：${escapeHtml(report.error || "未知错误")}</div></section>`;
-  }
-  const summary = report.summary || {};
-  const warnings = Array.isArray(report.warnings) ? report.warnings : [];
-  const samples = report.samples || {};
-  const risk = report.riskLevel || "none";
-  return `
-    <section class="admin-data-card bank-manager-card">
-      <div class="admin-data-card-head">
-        <div>
-          <b>校验报告</b>
-          <span>${escapeHtml(report.generatedAt || "")}</span>
-        </div>
-        <span class="risk-pill risk-${escapeHtml(risk)}">${escapeHtml(report.riskText || risk)}</span>
-      </div>
-      <div class="admin-data-metrics bank-manager-metrics">
-        <div><b>${Number(summary.currentSubjects || 0)}</b><span>当前题量</span></div>
-        <div><b>${Number(summary.stagingSubjects || 0)}</b><span>临时题量</span></div>
-        <div><b>${Number(summary.added || 0)}</b><span>新增</span></div>
-        <div><b>${Number(summary.deleted || 0)}</b><span>删除</span></div>
-        <div><b>${Number(summary.modified || 0)}</b><span>内容变化</span></div>
-        <div><b>${Number(summary.answerChanged || 0)}</b><span>答案变化</span></div>
-        <div><b>${Number(summary.possibleIdChanged || 0)}</b><span>疑似ID变动</span></div>
-        <div><b>${Number(summary.missingAssets || 0)}</b><span>缺图</span></div>
-      </div>
-      <div class="bank-manager-report-grid">
-        <div>
-          <b>ID / 题量波动</b>
-          <span>ID 疑似变动 ${Number(summary.idChangePercent || 0).toFixed(1)}% · 新旧题量波动 ${Number(summary.churnPercent || 0).toFixed(1)}%</span>
-        </div>
-        <div>
-          <b>章节变化</b>
-          <span>当前 ${Number(summary.currentChapters || 0)} 章 · 临时 ${Number(summary.stagingChapters || 0)} 章</span>
-        </div>
-      </div>
-      ${warnings.length ? `<div class="bank-manager-warnings">${warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>` : `<div class="bank-manager-ok">未发现阻塞问题。仍建议抽查答案变化和图片显示后再发布。</div>`}
-      ${renderBankManagerSamples(samples)}
-    </section>
-  `;
-}
-
-function renderBankManagerSamples(samples) {
-  const rows = [
-    ["新增样例", samples.added],
-    ["删除样例", samples.deleted],
-    ["修改样例", samples.modified],
-  ].map(([label, values]) => {
-    const list = Array.isArray(values) ? values : [];
-    return `<div><b>${label}</b><span>${list.length ? list.map((id) => `#${escapeHtml(String(id))}`).join("、") : "无"}</span></div>`;
-  }).join("");
-  return `<div class="bank-manager-samples">${rows}</div>`;
-}
-
-function bindAdminBankManagerActions() {
-  document.querySelectorAll("[data-admin-jump-view]").forEach((btn) => {
-    btn.onclick = () => {
-      state.adminView = btn.dataset.adminJumpView || "banks";
-      renderAdminRows(state.adminRows, state.adminFailedCount);
-    };
-  });
-  const select = $("bankManagerCourseSelect");
-  if (select) {
-    select.onchange = () => {
-      state.adminBankManagerCourseId = Number(select.value || 0);
-      state.adminBankManagerReport = null;
-      renderAdminRows(state.adminRows, state.adminFailedCount);
-    };
-  }
-  document.querySelectorAll("[data-bank-manager-action]").forEach((btn) => {
-    btn.onclick = () => runBankManagerAction(btn.dataset.bankManagerAction, btn).catch((err) => {
-      state.adminBankManagerBusy = "";
-      renderAdminRows(state.adminRows, state.adminFailedCount);
-      toast(err.message);
-    });
-  });
-}
-
-async function runBankManagerAction(action, btn = null) {
-  const courseId = Number(state.adminBankManagerCourseId || getBankManagerCourse().id || 0);
-  if (!courseId) {
-    toast("请选择题库");
-    return;
-  }
-  if (action === "export") {
-    window.location.href = `/api/admin/bank-manager/export?user=${encodeURIComponent(state.user)}&courseId=${courseId}`;
-    return;
-  }
-  if (action === "upload") {
-    await uploadBankManagerStaging(courseId);
-    return;
-  }
-  if (action === "pull" && !confirm("确定拉取该题库到临时区吗？这不会影响当前正式题库。")) return;
-  if (action === "publish" && !confirm("确定发布临时题库到正式题库吗？发布前会自动备份当前题库。")) return;
-  if (action === "force" && !confirm("风险报告可能提示 ID 大幅变动。确定强制发布吗？错题、收藏、笔记和训练计划可能受影响。")) return;
-
-  state.adminBankManagerBusy = action || "report";
-  renderAdminRows(state.adminRows, state.adminFailedCount);
-  try {
-    let result;
-    if (action === "pull") {
-      result = await api(`/api/admin/bank-manager/pull-staging?user=${encodeURIComponent(state.user)}&courseId=${courseId}`, { method: "POST" });
-    } else if (action === "publish" || action === "force") {
-      result = await api(`/api/admin/bank-manager/publish?user=${encodeURIComponent(state.user)}&courseId=${courseId}&force=${action === "force" ? "true" : "false"}`, { method: "POST" });
-    } else {
-      result = await api(`/api/admin/bank-manager/report?user=${encodeURIComponent(state.user)}&courseId=${courseId}`);
-    }
-    state.adminBankManagerReport = result.report || result;
-    toast(result.message || "题库管理器操作完成");
-    if (action === "publish" || action === "force") {
-      state.adminCourses = [];
-      state.courses = [];
-      state.chapters = [];
-      state.types = [];
-      state.questions = [];
-      await loadCourses();
-      await loadAdminCourses().catch(() => {});
-    }
-  } finally {
-    state.adminBankManagerBusy = "";
-    renderAdminRows(state.adminRows, state.adminFailedCount);
-  }
-}
-
-async function uploadBankManagerStaging(courseId) {
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = ".zip";
-  input.className = "hidden";
-  document.body.appendChild(input);
-  try {
-    const file = await new Promise((resolve) => {
-      input.onchange = () => resolve(input.files?.[0] || null);
-      input.click();
-    });
-    if (!file) return;
-    if (!confirm("确定上传该题库包到临时区吗？上传后只生成校验报告，不会立即发布正式题库。")) return;
-    state.adminBankManagerBusy = "upload";
-    renderAdminRows(state.adminRows, state.adminFailedCount);
-    const form = new FormData();
-    form.append("file", file);
-    const result = await api(`/api/admin/bank-manager/upload-staging?user=${encodeURIComponent(state.user)}&courseId=${courseId}`, {
-      method: "POST",
-      body: form,
-    });
-    state.adminBankManagerReport = result.report || result;
-    toast(result.message || "题库包已上传到临时区");
-  } finally {
-    input.remove();
-    state.adminBankManagerBusy = "";
-    renderAdminRows(state.adminRows, state.adminFailedCount);
-  }
 }
 
 function renderAdminBankEditorPanel() {
@@ -5381,7 +5789,7 @@ function renderBankEditorResults() {
   return state.adminEditorResults.map((item) => `
     <button class="bank-editor-result ${Number(item.id) === Number(state.adminEditorSelectedId) ? "active" : ""}" data-bank-editor-open="${item.id}" data-editor-course="${item.courseId}" type="button">
       <b>#${item.id} ${escapeHtml(item.type || "题目")}</b>
-      <span>${escapeHtml(item.chapterName || "")}${correctionIds.has(Number(item.id)) ? " · 有纠错反馈" : ""}</span>
+      <span>${escapeHtml(item.chapterName || "")}${correctionIds.has(Number(item.id)) ? " · 有纠错反馈" : ""}${item.localEdited ? " · 本地已改" : ""}</span>
       <small>${escapeHtml((item.title || "").slice(0, 180))}</small>
     </button>
   `).join("");
@@ -5402,13 +5810,17 @@ function renderBankEditorDetail() {
     `;
   }
   const path = Array.isArray(detail.chapterPath) ? detail.chapterPath : [];
+  const localEdit = detail.localEdit;
   return `
     <div class="admin-data-card-head">
       <div>
         <b>#${detail.id} ${escapeHtml(detail.type || "题目")}</b>
-        <span>${escapeHtml(detail.courseName || "")} · ${escapeHtml(detail.updatedAt || "未记录")}</span>
+        <span>${escapeHtml(detail.courseName || "")} · ${escapeHtml(detail.updatedAt || "未记录")}${localEdit ? ` · <span class="local-edit-pill">本地已改${localEdit.editedAt ? ` ${escapeHtml(localEdit.editedAt)}` : ""}${localEdit.editor ? ` by ${escapeHtml(localEdit.editor)}` : ""}</span>` : ""}</span>
       </div>
-      <button class="primary-action" id="bankEditorSaveBtn" type="button">${state.adminEditorBusy === "save" ? "保存中..." : "保存修改"}</button>
+      <div class="bank-editor-detail-actions">
+        ${localEdit ? `<button class="danger" id="bankEditorRestoreBtn" type="button">${state.adminEditorBusy === "restore" ? "还原中..." : "还原为服务端版本"}</button>` : ""}
+        <button class="primary-action" id="bankEditorSaveBtn" type="button">${state.adminEditorBusy === "save" ? "保存中..." : "保存修改"}</button>
+      </div>
     </div>
     <div class="bank-editor-form">
       <div class="bank-editor-chapter-fields">
@@ -5466,6 +5878,8 @@ function bindAdminBankEditorActions() {
   if (searchBtn) searchBtn.onclick = () => loadBankEditorQuestions().catch((err) => toast(err.message));
   const saveBtn = $("bankEditorSaveBtn");
   if (saveBtn) saveBtn.onclick = () => saveBankEditorQuestion().catch((err) => toast(err.message));
+  const restoreBtn = $("bankEditorRestoreBtn");
+  if (restoreBtn) restoreBtn.onclick = () => restoreBankEditorQuestion().catch((err) => toast(err.message));
   maybeAutoLoadBankEditor();
 }
 
@@ -5615,6 +6029,23 @@ async function saveBankEditorQuestion() {
   }
 }
 
+async function restoreBankEditorQuestion() {
+  const detail = state.adminEditorDetail;
+  if (!detail?.id) return;
+  if (!confirm("确定把这道题还原成服务端版本吗？本地改动记录会一并删除。")) return;
+  state.adminEditorBusy = "restore";
+  renderAdminRows(state.adminRows, state.adminFailedCount);
+  try {
+    const result = await api(`/api/admin/bank-editor/restore?user=${encodeURIComponent(state.user)}&id=${detail.id}`, { method: "POST" });
+    state.adminEditorDetail = result.question || state.adminEditorDetail;
+    await loadBankEditorQuestions().catch(() => {});
+    toast(result.message || (result.ok ? "已还原为服务端版本" : "还原失败"));
+  } finally {
+    state.adminEditorBusy = "";
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
+}
+
 function renderAdminDataPanel() {
   const status = state.adminDataStatus;
   if (!status) {
@@ -5671,6 +6102,22 @@ function renderAdminDataPanel() {
         </div>
         <small>用户数据只上传/下载 zip 包，包含 accounts.dat 和各账号 json；替换前会自动备份。</small>
       </section>
+
+      <section class="admin-data-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>题库内容清洗</b>
+            <span>清除上游塞进解析里的推广文字（金考典、押题、下载链接等）</span>
+          </div>
+          <span class="status-pill ${state.adminCleanAdsResult ? "active" : "disabled"}">${state.adminCleanAdsResult ? "已执行" : "未执行"}</span>
+        </div>
+        <div class="admin-data-actions">
+          <button data-admin-clean-ads="all" type="button">清洗全部题库</button>
+        </div>
+        <small>${state.adminCleanAdsResult
+          ? escapeHtml(state.adminCleanAdsResult)
+          : "拉取题库时会自动清洗；此处用于清理库中已经存在的历史广告。执行前会自动备份数据库，只改动命中广告的题目。"}</small>
+      </section>
     </div>
   `;
 }
@@ -5690,6 +6137,33 @@ function bindAdminDataActions() {
   document.querySelectorAll("[data-admin-upload]").forEach((btn) => {
     btn.onclick = () => uploadAdminData(btn.dataset.adminUpload, btn).catch((err) => toast(err.message));
   });
+  document.querySelectorAll("[data-admin-clean-ads]").forEach((btn) => {
+    btn.onclick = () => cleanAdsInBank(btn).catch((err) => toast(err.message));
+  });
+}
+
+async function cleanAdsInBank(btn) {
+  if (!isAdmin()) return;
+  if (!confirm("确定清洗题库中的历史广告内容吗？系统会先自动备份数据库。")) return;
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "清洗中...";
+  try {
+    const result = await api(`/api/admin/clean-ads?user=${encodeURIComponent(state.user)}`, { method: "POST" });
+    state.adminCleanAdsResult = result.message || "清洗完成";
+    toast(state.adminCleanAdsResult);
+    state.adminDataStatus = null;
+    state.adminCourses = [];
+    state.courses = [];
+    state.chapters = [];
+    state.types = [];
+    state.questions = [];
+    state.currentCourse = null;
+    if (state.adminView === "data") renderAdminRows(state.adminRows, state.adminFailedCount);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText || "清洗全部题库";
+  }
 }
 
 function downloadAdminData(type) {
@@ -6825,23 +7299,29 @@ async function updateQuestionBank(courseId = 0, btn = null) {
   }
   const query = new URLSearchParams({ user: state.user });
   query.set("courseId", String(courseId));
-  if (!confirm("确定从服务器拉取并更新该题库吗？更新完成后会重新导出题库数据。")) return;
+  if (!confirm("确定从服务器拉取并更新该题库吗？会先自动备份当前数据。")) return;
   await pullQuestionBankUpdate(query, btn);
 }
 
 async function pullQuestionBankUpdate(query, btn = null) {
   const oldText = btn?.textContent || "";
+  const courseId = Number(query.get("courseId") || 0);
   if (btn) {
     btn.disabled = true;
     btn.textContent = "更新中...";
   }
-  const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" })
-    .finally(() => {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = oldText || "更新题库";
-      }
-    });
+  startBankPullProgress(courseId);
+  let result;
+  try {
+    // POST 是同步的（要几分钟），进度靠轮询另一个端点，见 startBankPullProgress
+    result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
+  } finally {
+    stopBankPullProgress();
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = oldText || "更新题库";
+    }
+  }
   await handleQuestionBankUpdateResult(result);
 }
 
@@ -6887,6 +7367,10 @@ async function handleQuestionBankUpdateResult(result) {
     return;
   }
   if (result.ok && Array.isArray(result.results)) {
+    if (result.report && result.report.after) {
+      state.adminBankLastReport = { ...result.report, courseName: result.courseName || "" };
+      state.adminBankLastReportAt = new Date().toLocaleString("zh-CN", { hour12: false });
+    }
     const updated = result.results.filter((r) => Number(r.chapters || 0) > 0 || Number(r.subjects || 0) > 0);
     if (updated.length) {
       toast(`更新完成：${updated.map((r) => `课程${r.courseId}(${r.chapters || 0}章${r.subjects || 0}题)`).join("、")}`);

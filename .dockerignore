@@ -5,6 +5,8 @@ data/**
 userdata/**
 !userdata/.gitkeep
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 *.dat
@@ -14,3 +16,12 @@ userdata/**
 *.log
 .env
 .env.*
+
+# ---- 题库与用户数据不进构建上下文（2026-09-17）----
+# 这些只是本地运行时数据，进上下文只会拖慢 build，镜像里也不需要
+src/data/**
+assets/
+assets-pulled/
+_backups/
+local-edits.json
+

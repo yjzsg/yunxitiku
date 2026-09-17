@@ -12,6 +12,7 @@ using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
+using Puller = JkdWeb.BankPuller;
 using static AppHelpers;
 
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -169,6 +170,8 @@ app.MapGet("/api/health", () => Results.Json(new
 app.MapGet("/api/users", () =>
 {
     var users = Directory.GetFiles(paths.UserDataRoot, "*.json")
+        // 排除会话存储：它不是用户（否则界面会一直冒出一个叫 sessions 的账号）
+        .Where(path => !SessionStore.IsSessionFile(path))
         .Select(Path.GetFileNameWithoutExtension)
         .Where(name => !string.IsNullOrWhiteSpace(name))
         .Select(name => CleanUserName(name!))
@@ -222,6 +225,8 @@ app.MapPost("/api/auth/change-password", async (HttpContext context, AuthStore a
     next["mustChangePassword"] = false;
     auth.Set(user, next);
     auth.Save();
+    // 管理员口令已不再是初始口令，初始口令文件（若还在）就是过期信息。
+    if (user.Equals("admin", StringComparison.OrdinalIgnoreCase)) paths.DeleteInitialAdminPasswordFile();
     sessionStore.SignIn(context, user);
     return Results.Json(new { ok = true, user });
 }).RequireRateLimiting("login");
@@ -284,6 +289,11 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
     {
         return Results.Json(new { ok = false, error = "不能操作管理员账号" }, statusCode: 400);
     }
+    // 保留名（sessions.json 是登录会话存储，不是用户）：建/删都会破坏会话文件
+    if (IsReservedUserName(target))
+    {
+        return Results.Json(new { ok = false, error = $"「{target}」是系统保留名称，不能作为账号" }, statusCode: 400);
+    }
 
     Directory.CreateDirectory(paths.UserDataRoot);
     var profile = auth.Get(target);
@@ -323,10 +333,20 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
     }
     if (action == "reset-password")
     {
-        profile = auth.CreateProfile(paths.DefaultLoginPassword);
-        profile["mustChangePassword"] = true;
-        profile["resetAt"] = NowText();
-        auth.Set(target, profile);
+        var fresh = auth.CreateProfile(paths.DefaultLoginPassword);
+        // 重置口令只该换凭据：把「题库分配」这类设置保留下来，
+        // 否则管理员一按重置，这个用户就被改成「可见全部题库」了。
+        if (profile is not null)
+        {
+            foreach (var pair in profile)
+            {
+                if (pair.Key is "salt" or "hash" or "hashAlgo" or "changedAt") continue;
+                fresh[pair.Key] = pair.Value;
+            }
+        }
+        fresh["mustChangePassword"] = true;
+        fresh["resetAt"] = NowText();
+        auth.Set(target, fresh);
         auth.Save();
         return Results.Json(new { ok = true, user = target, resetPassword = true });
     }
@@ -346,7 +366,75 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
     return Results.Json(new { ok = false, error = "unknown action" }, statusCode: 400);
 });
 
-app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, int? courseId) =>
+// 按用户分配题库：读（assigned=null 表示"全部可见"）/ 写（courses=null 恢复全部）
+app.MapGet("/api/admin/user-courses", (AuthStore auth, string? user, string? target) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    var name = CleanUserName(target);
+    if (name.Length == 0) return Results.Json(new { ok = false, error = "缺少用户名" }, statusCode: 400);
+    var allowed = UserCourses.AllowedIds(auth, name);
+    return Results.Json(new { ok = true, user = name, assigned = allowed is null ? null : allowed.OrderBy(id => id).ToList() });
+});
+
+app.MapPost("/api/admin/user-courses", async (HttpRequest request, AuthStore auth, string? user) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        var body = await ReadJsonBody(request);
+        var target = CleanUserName(GetBodyString(body, "user"));
+        if (target.Length == 0) return Results.Json(new { ok = false, error = "缺少用户名" }, statusCode: 400);
+        if (IsReservedUserName(target))
+        {
+            return Results.Json(new { ok = false, error = $"「{target}」是系统保留名称，不能作为账号" }, statusCode: 400);
+        }
+        List<int>? ids = null;
+        if (body.TryGetValue("courses", out var value) && value is not null)
+        {
+            ids = new List<int>();
+            if (value is JsonElement element && element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var n)) ids.Add(n);
+                    else if (item.ValueKind == JsonValueKind.String && int.TryParse(item.GetString(), out var s)) ids.Add(s);
+                }
+            }
+        }
+        UserCourses.Save(auth, target, ids);
+        return Results.Json(new { ok = true, user = target, assigned = ids is null ? null : ids.OrderBy(id => id).ToList() });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
+    }
+});
+
+// 检查这些课程在上游有没有更新（按增量水位各探一次章节与题目；不做整表探测）
+app.MapPost("/api/admin/course-update-check", async (HttpRequest request, QuestionBank bank, IConfiguration configuration, string? user) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        var body = await ReadJsonBody(request);
+        var ids = new List<int>();
+        if (body.TryGetValue("courseIds", out var value) && value is JsonElement element && element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var n) && n > 0) ids.Add(n);
+            }
+        }
+        ids = ids.Distinct().Take(200).ToList();
+        return Results.Json(new { ok = true, results = await CourseUpdateChecker.CheckAsync(bank, ids, configuration) });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
+    }
+});
+
+app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, int? courseId, bool? dryRun) =>
 {
     var admin = CleanUserName(user);
     if (!admin.Equals("admin", StringComparison.OrdinalIgnoreCase))
@@ -359,13 +447,27 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, 
     }
     if (!request.HasFormContentType)
     {
-        return Results.Json(new
+        // The admin page probes this endpoint with ?dryRun=true to decide whether the deployment
+        // pulls or uploads. Answering "pull" is what turns the button into 拉取更新.
+        if (dryRun == true)
         {
-            ok = true,
-            reserved = true,
-            mode = "upload",
-            message = "请上传题库 zip。系统会匹配压缩包内相同 ID 的题库，并只更新该题库。"
-        });
+            return Results.Json(new
+            {
+                ok = true,
+                mode = "pull",
+                dryRun = true,
+                message = "Docker 版已启用直连拉取；dryRun 未执行实际更新。",
+            });
+        }
+        try
+        {
+            SqliteConnection.ClearAllPools();
+            return Results.Json(ServerBankPuller.PullCourseIntoBank(paths, app.Configuration, courseId.Value));
+        }
+        catch (Exception ex)
+        {
+            return Results.Json(new { ok = false, mode = "pull", error = SafeError(ex) }, statusCode: 500);
+        }
     }
     var form = await request.ReadFormAsync();
     var file = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
@@ -391,6 +493,64 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, 
     finally
     {
         TryDeleteFile(tempFile);
+    }
+});
+
+// 拉取进度：POST /api/admin/update-bank 仍是同步返回最终结果，管理页在它进行期间轮询这里。
+// 没有记录（没拉过 / 进程重启过 / 已过期）时 active=false，前端据此降级成不确定态。
+app.MapGet("/api/admin/update-bank/progress", (string? user, int? courseId) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!courseId.HasValue || courseId.Value <= 0)
+    {
+        return Results.Json(new { ok = false, error = "缺少课程 ID" }, statusCode: 400);
+    }
+    var snapshot = Puller.PullProgressTracker.Shared.Read(courseId.Value);
+    return Results.Json(snapshot is null
+        ? new { ok = true, courseId = courseId.Value, active = false, known = false }
+        : new { ok = true, known = true, snapshot });
+});
+
+app.MapPost("/api/admin/clean-ads", (string? user, int? courseId) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        SqliteConnection.ClearAllPools();
+        var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
+        var backupRoot = Path.Combine(dataRoot, "_backups");
+        var backupDir = Path.Combine(backupRoot, "clean-ads-" + Timestamp());
+        var result = Puller.AdCleaner.CleanDatabase(paths.SqlitePath, courseId ?? 0, backupDir);
+        // 未购课程的正文在拉取库，也要一起清
+        var pulled = File.Exists(paths.PulledSqlitePath)
+            ? Puller.AdCleaner.CleanDatabase(paths.PulledSqlitePath, courseId ?? 0,
+                Path.Combine(backupRoot, "clean-ads-pulled-" + Timestamp()))
+            : null;
+        BackupRetention.Prune(backupRoot);
+        var courses = result.Courses + (pulled?.Courses ?? 0);
+        var scanned = result.SubjectsScanned + (pulled?.SubjectsScanned ?? 0);
+        var cleanedSubjects = result.SubjectsCleaned + (pulled?.SubjectsCleaned ?? 0);
+        var adHits = result.AdHits + (pulled?.AdHits ?? 0);
+        var charsRemoved = result.CharsRemoved + (pulled?.CharsRemoved ?? 0);
+        return Results.Json(new
+        {
+            ok = true,
+            mode = "clean-ads",
+            courses,
+            subjectsScanned = scanned,
+            subjectsCleaned = cleanedSubjects,
+            adHits,
+            charsRemoved,
+            backup = result.BackupPath,
+            backupPulled = pulled?.BackupPath,
+            message = adHits == 0
+                ? "未发现需要清洗的广告内容"
+                : $"已清洗 {cleanedSubjects} 道题中的 {adHits} 处广告（涉及 {courses} 门课程）",
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(SafeError(ex), statusCode: 400);
     }
 });
 
@@ -493,7 +653,7 @@ app.MapPost("/api/admin/bank-editor/question", async (HttpRequest request, Quest
     try
     {
         var body = await ReadJsonBody(request);
-        return Results.Json(bank.SaveEditorQuestion(body));
+        return Results.Json(bank.SaveEditorQuestion(body, user));
     }
     catch (Exception ex)
     {
@@ -501,32 +661,62 @@ app.MapPost("/api/admin/bank-editor/question", async (HttpRequest request, Quest
     }
 });
 
-app.MapGet("/api/courses", (QuestionBank bank, string? q, string? available) =>
-    Results.Json(bank.GetCourses(q ?? "", IsTruthy(available))));
+// 把本地改过的题还原成服务端版本（本地改动叠层里的记录随之删除）
+app.MapPost("/api/admin/bank-editor/restore", (QuestionBank bank, string? user, int? id) =>
+{
+    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        SqliteConnection.ClearAllPools();
+        return Results.Json(bank.RestoreEditorQuestion(id ?? 0));
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(SafeError(ex), statusCode: 400);
+    }
+});
 
-app.MapGet("/api/chapters", (QuestionBank bank, int courseId) =>
-    Results.Json(bank.GetChapters(courseId)));
+// 前台题库读取一律按"该用户被分配的题库"过滤（admin / 未分配 = 全部可见）
+app.MapGet("/api/courses", (HttpContext context, QuestionBank bank, AuthStore auth, IConfiguration configuration, string? q, string? available) =>
+    Results.Json(bank.GetCourses(q ?? "", IsTruthy(available), UserCourses.AllowedIds(auth, SessionUser(context)),
+        AppHelpers.ExcludedCourseClasses(configuration))));
 
-app.MapGet("/api/types", (QuestionBank bank, int courseId, int? chapterId, string? chapterIds) =>
-    Results.Json(bank.GetTypes(courseId, chapterId, ParseIdList(chapterIds))));
+app.MapGet("/api/chapters", (HttpContext context, QuestionBank bank, AuthStore auth, int courseId) =>
+    UserCourses.IsAllowed(auth, SessionUser(context), courseId)
+        ? Results.Json(bank.GetChapters(courseId))
+        : Results.Json(new { ok = false, error = "未分配该题库" }, statusCode: 403));
 
-app.MapGet("/api/questions", (QuestionBank bank, int courseId, int? chapterId, string? chapterIds, int? typeId, string? q, string? order, int? limit, string? ids) =>
-    Results.Json(bank.GetQuestions(courseId, chapterId, ParseIdList(chapterIds), typeId, q ?? "", order ?? "", limit, ParseIdList(ids))));
+app.MapGet("/api/types", (HttpContext context, QuestionBank bank, AuthStore auth, int courseId, int? chapterId, string? chapterIds) =>
+    UserCourses.IsAllowed(auth, SessionUser(context), courseId)
+        ? Results.Json(bank.GetTypes(courseId, chapterId, ParseIdList(chapterIds)))
+        : Results.Json(new { ok = false, error = "未分配该题库" }, statusCode: 403));
 
-app.MapGet("/api/question", (QuestionBank bank, int id) =>
+app.MapGet("/api/questions", (HttpContext context, QuestionBank bank, AuthStore auth, int courseId, int? chapterId, string? chapterIds, int? typeId, string? q, string? order, int? limit, string? ids) =>
+    UserCourses.IsAllowed(auth, SessionUser(context), courseId)
+        ? Results.Json(bank.GetQuestions(courseId, chapterId, ParseIdList(chapterIds), typeId, q ?? "", order ?? "", limit, ParseIdList(ids)))
+        : Results.Json(new { ok = false, error = "未分配该题库" }, statusCode: 403));
+
+app.MapGet("/api/question", (HttpContext context, QuestionBank bank, AuthStore auth, int id) =>
 {
     var question = bank.GetQuestion(id);
-    return question is null ? Results.Json(new { error = "question not found" }, statusCode: 404) : Results.Json(question);
+    if (question is null) return Results.Json(new { error = "question not found" }, statusCode: 404);
+    return UserCourses.IsAllowed(auth, SessionUser(context), bank.CourseIdOfSubject(id))
+        ? Results.Json(question)
+        : Results.Json(new { ok = false, error = "未分配该题库" }, statusCode: 403);
 });
 
 app.MapGet("/assets/{**relative}", (string relative) =>
 {
     relative = Uri.UnescapeDataString(relative).Replace('/', Path.DirectorySeparatorChar);
-    var root = Path.GetFullPath(paths.DataAssetsRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-    var path = Path.GetFullPath(Path.Combine(root, relative));
-    if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return Results.Json(new { error = "bad path" }, statusCode: 400);
-    if (!File.Exists(path)) return Results.Json(new { error = "asset not found" }, statusCode: 404);
-    return Results.File(path, ContentType(path));
+    // 先查主库图片目录，再查拉取库图片目录（未购课程的题图落在 assets-pulled/ 下）。
+    foreach (var rootPath in new[] { paths.DataAssetsRoot, paths.PulledAssetsRoot })
+    {
+        var root = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(Path.Combine(root, relative));
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return Results.Json(new { error = "bad path" }, statusCode: 400);
+        if (File.Exists(path)) return Results.File(path, ContentType(path));
+    }
+    return Results.Json(new { error = "asset not found" }, statusCode: 404);
 });
 
 app.MapFallback(() => Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8"));
@@ -541,6 +731,10 @@ internal static async Task<Dictionary<string, object?>> ReadJsonBody(HttpRequest
     var data = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(request.Body);
     return data ?? new Dictionary<string, object?>();
 }
+
+/// <summary>当前会话的用户名（中间件已把会话用户放进 Items；取不到返回空串）。</summary>
+internal static string SessionUser(HttpContext context)
+    => Convert.ToString(context.Items[SessionStore.UserItemKey], CultureInfo.InvariantCulture) ?? "";
 
 internal static string GetBodyString(Dictionary<string, object?> body, string name)
 {
@@ -581,6 +775,130 @@ internal static bool ScalarBool(object? value)
     return bool.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), out var result) && result;
 }
 
+/// <summary>
+/// 整类不展示的课程分类（默认「合作专区」——里面是 5210 / 会计365 / 钟辉芳 这类杂项，不是正式题库）。
+/// 配置键 <c>App:ExcludedCourseClasses</c>，逗号分隔可覆盖；留空字符串表示不排除任何分类。
+/// </summary>
+internal static List<string> ExcludedCourseClasses(IConfiguration configuration)
+{
+    var raw = configuration["App:ExcludedCourseClasses"] ?? DefaultExcludedCourseClasses;
+    if (string.IsNullOrWhiteSpace(raw)) return new List<string>();
+    return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Distinct(StringComparer.Ordinal)
+        .ToList();
+}
+
+/// <summary>默认排除的分类。</summary>
+internal const string DefaultExcludedCourseClasses = "合作专区";
+
+/// <summary>
+/// 不能用作账号的保留名：与用户数据目录里的系统文件同名。
+/// 例如 sessions → sessions.json 是登录会话存储，当成账号建/删会破坏会话。
+/// </summary>
+internal static bool IsReservedUserName(string name)
+    => name.Equals("sessions", StringComparison.OrdinalIgnoreCase)
+    || name.Equals("accounts", StringComparison.OrdinalIgnoreCase);
+
+/// <summary>
+/// 打开题库连接，并把「拉取库」（未购课程的题库）ATTACH 进来、建同名 TEMP VIEW 遮蔽主表。
+/// 不带库名的读查询会透明地走视图（主库优先，拉取库补主库没有的课程），所以读路径不用改；
+/// **写入必须显式带 <c>main.</c> / <c>pulled.</c> 库名**——TEMP VIEW 不可写。
+/// </summary>
+internal static SqliteConnection OpenBank(string mainDbPath, string? pulledDbPath = null, bool readOnly = true)
+{
+    var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+    {
+        DataSource = mainDbPath,
+        Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWriteCreate,
+        DefaultTimeout = 30,
+    }.ToString());
+    conn.Open();
+    AttachPulledBank(conn, pulledDbPath);
+    return conn;
+}
+
+/// <summary>把拉取库挂到 <c>pulled</c> 并建遮蔽视图；库不存在就什么都不做（行为与拆库前一致）。</summary>
+internal static void AttachPulledBank(SqliteConnection conn, string? pulledDbPath)
+{
+    if (string.IsNullOrWhiteSpace(pulledDbPath) || !File.Exists(pulledDbPath)) return;
+    if (string.Equals(Path.GetFullPath(pulledDbPath), Path.GetFullPath(conn.DataSource ?? ""), StringComparison.Ordinal)) return;
+
+    // 连接来自连接池：底层句柄可能已经附加过 pulled，重复 ATTACH 会报 "database pulled is already in use"
+    var attached = false;
+    using (var probe = conn.CreateCommand())
+    {
+        probe.CommandText = "select count(*) from pragma_database_list where name = 'pulled'";
+        attached = Convert.ToInt32(probe.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
+    }
+    if (!attached)
+    {
+        using var attach = conn.CreateCommand();
+        // 拉取库本来就是"拉取写入"的目标，必须是可写目录；这里按普通路径附加即可。
+        attach.CommandText = "attach database $p as pulled";
+        attach.Parameters.AddWithValue("$p", pulledDbPath);
+        attach.ExecuteNonQuery();
+    }
+
+    // 课程级优先：主库有正文（coursesubject 有行）的课整门用主库，其余整门用拉取库；
+    // 两边都没有正文的课仍从主库取 course 行，否则管理页的课程列表会缺课。
+    string[] statements =
+    {
+        "create temp view if not exists _bank_main_courses as select distinct icourseid from main.coursesubject",
+        """
+        create temp view if not exists course as
+            select * from main.course where icourseid in (select icourseid from _bank_main_courses)
+            union all
+            select * from pulled.course where icourseid not in (select icourseid from _bank_main_courses)
+            union all
+            select * from main.course where icourseid not in (select icourseid from _bank_main_courses)
+                                        and icourseid not in (select icourseid from pulled.course)
+        """,
+        """
+        create temp view if not exists coursechapter as
+            select * from main.coursechapter where icourseid in (select icourseid from _bank_main_courses)
+            union all
+            select * from pulled.coursechapter where icourseid not in (select icourseid from _bank_main_courses)
+        """,
+        """
+        create temp view if not exists coursesubject as
+            select * from main.coursesubject where icourseid in (select icourseid from _bank_main_courses)
+            union all
+            select * from pulled.coursesubject where icourseid not in (select icourseid from _bank_main_courses)
+        """,
+        """
+        create temp view if not exists courseclass as
+            select * from main.courseclass
+            union all
+            select * from pulled.courseclass where iclassid not in (select iclassid from main.courseclass)
+        """,
+        """
+        create temp view if not exists coursesubclass as
+            select * from main.coursesubclass
+            union all
+            select * from pulled.coursesubclass where isubclassid not in (select isubclassid from main.coursesubclass)
+        """,
+        """
+        create temp view if not exists coursesubjecttype as
+            select * from main.coursesubjecttype
+            union all
+            select * from pulled.coursesubjecttype where isubjecttype not in (select isubjecttype from main.coursesubjecttype)
+        """,
+    };
+    foreach (var sql in statements)
+    {
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+        catch (SqliteException)
+        {
+            // 视图已存在之类：忽略（连接是短生命周期，正常不会走到）。
+        }
+    }
+}
+
 internal static List<int> ParseIdList(string? value)
 {
     if (string.IsNullOrWhiteSpace(value)) return new List<int>();
@@ -601,11 +919,14 @@ internal static bool IsTruthy(string? value)
 
 internal static bool IsAdmin(string? value) => CleanUserName(value).Equals("admin", StringComparison.OrdinalIgnoreCase);
 
-internal static object SafeError(Exception ex)
+internal static object SafeError(Exception ex) => new { ok = false, error = SafeErrorText(ex) };
+
+/// <summary>只取错误文案（进度登记等处用，不能直接塞对象）。</summary>
+internal static string SafeErrorText(Exception ex)
 {
     Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR: {ex}");
-    if (ex is InvalidOperationException || ex is UserDataConflictException) return new { ok = false, error = ex.Message };
-    return new { ok = false, error = "操作失败，请稍后重试" };
+    if (ex is InvalidOperationException || ex is UserDataConflictException) return ex.Message;
+    return "操作失败，请稍后重试";
 }
 
 internal static string ResolveRequestedUser(HttpContext context, string? requested)
@@ -662,6 +983,234 @@ internal static string ContentType(string path)
 }
 }
 
+/// <summary>
+/// Pulls one course straight from the upstream ExamClientService into the live bank.
+/// Cross-platform: no Access/Jet, no client DLLs, no PowerShell — which is what makes
+/// 拉取更新 usable on the Docker/NAS deployment, not just on the Windows server build.
+/// </summary>
+static class ServerBankPuller
+{
+    public static object PullCourseIntoBank(AppPaths paths, IConfiguration configuration, int courseId)
+    {
+        if (courseId <= 0) throw new InvalidOperationException("请选择要更新的题库");
+
+        // 课程内容在主库（导出产物里有正文）→ 就地更新主库；否则（未购课程）→ 写**拉取库**。
+        // 拉取库不在"整包上传题库"的替换范围内，所以拉来的内容不会被那条链路清掉。
+        var live = Path.GetFullPath(paths.SqlitePath);
+        var intoPulled = !MainHoldsCourseContent(live, courseId);
+        var target = intoPulled ? Path.GetFullPath(paths.PulledSqlitePath) : live;
+        var assetsRoot = intoPulled ? paths.PulledAssetsRoot : paths.DataAssetsRoot;
+
+        var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
+        var backupRoot = Path.Combine(dataRoot, "_backups");
+        var backupDir = Path.Combine(backupRoot, "pull-course-" + courseId + "-" + Timestamp());
+        Directory.CreateDirectory(backupDir);
+        if (File.Exists(target))
+        {
+            File.Copy(target, Path.Combine(backupDir, Path.GetFileName(target)), true);
+        }
+        // Only this course's images are rewritten by a pull, so only those are snapshotted —
+        // copying the whole assets tree (every course) would be needlessly expensive.
+        var courseAssets = Path.Combine(assetsRoot, courseId.ToString(CultureInfo.InvariantCulture));
+        if (Directory.Exists(courseAssets))
+        {
+            CopyTree(courseAssets, Path.Combine(backupDir, "assets", courseId.ToString(CultureInfo.InvariantCulture)));
+        }
+        BackupRetention.Prune(backupRoot);
+
+        QuestionBank.EnsureDatabase(paths.SqlitePath);
+
+        // 覆盖前记下这门课的章节/题号，拉完做"新增 / 消失"对比（原"题库管理器"的预检并入这里）
+        var before = ReadCourseIds(target, courseId);
+
+        // 写拉取库时要把课程行与三张字典表从主库拷过去（SQLite 不能 ATTACH 自己，所以主库就地更新时 metaDb 为 null）。
+        var options = Puller.BankPull.CourseOptions(
+            courseId,
+            target,
+            assetsRoot,
+            metaDb: intoPulled ? (File.Exists(live) ? live : null) : null,
+            serviceUrl: configuration["App:BankServiceUrl"],
+            user: configuration["App:BankServiceUser"],
+            password: configuration["App:BankServicePassword"]);
+
+        // 进度登记：管理页在 POST 进行期间轮询 /api/admin/update-bank/progress 读这里。
+        // POST 本身仍是同步返回最终结果（前端契约不变）。
+        var progressScope = Puller.PullProgressTracker.Shared.Begin(courseId, ReadCourseName(live, courseId));
+        Puller.PullSummary summary;
+        try
+        {
+            summary = Puller.BankPull
+                .PullCourseAsync(options,
+                    line => Console.WriteLine($"[bankpull] {line}"),
+                    point => Puller.PullProgressTracker.Shared.Report(courseId, point))
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception ex)
+        {
+            Puller.PullProgressTracker.Shared.Fail(courseId, SafeErrorText(ex));
+            throw;
+        }
+
+        // 本地改动（题库编辑器改过的题干/解析/章节名）重贴回去：本地优先
+        var localEdits = Puller.LocalEdits.Reapply(paths.SqlitePath, target, courseId);
+
+        // 拉完再读一次，得出"新增 / 消失"的题号
+        var after = ReadCourseIds(target, courseId);
+        var added = after.Subjects.Except(before.Subjects).ToList();
+        var removed = before.Subjects.Except(after.Subjects).ToList();
+
+        var courseName = ReadCourseName(target, courseId);
+        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 题库拉取完成：课程 {courseId} " +
+                          $"{summary.Chapters}章/{summary.Subjects}题/{summary.Images}图，" +
+                          $"清洗广告 {summary.AdHits} 处，{localEdits.Describe()}，" +
+                          $"新增 {added.Count} 题 / 消失 {removed.Count} 题，" +
+                          $"用时 {summary.ElapsedSeconds}s，写入 {(intoPulled ? "拉取库" : "主库")}");
+
+        progressScope.Complete();
+
+        return new
+        {
+            ok = true,
+            type = "course-bank",
+            mode = "pull",
+            courseId,
+            courseName,
+            target = intoPulled ? "pulled" : "main",
+            chapters = summary.Chapters,
+            subjects = summary.Subjects,
+            images = summary.Images,
+            imagesFailed = summary.ImagesFailed,
+            ads = new
+            {
+                subjects = summary.AdSubjectsCleaned,
+                hits = summary.AdHits,
+                charsRemoved = summary.AdCharsRemoved,
+            },
+            soapCalls = summary.SoapCalls,
+            elapsedSeconds = summary.ElapsedSeconds,
+            localEditsReapplied = localEdits.Subjects + localEdits.Chapters,
+            message = summary.Describe(),
+            backup = backupDir,
+            results = new[] { new { courseId, chapters = summary.Chapters, subjects = summary.Subjects } },
+            // 对比报告（原"题库管理器"的预检）：新增/消失的题与章节，以及本地改动受影响的情况
+            report = new
+            {
+                before = new { chapters = before.Chapters.Count, subjects = before.Subjects.Count },
+                after = new { chapters = after.Chapters.Count, subjects = after.Subjects.Count },
+                addedSubjects = added.Count,
+                removedSubjects = removed.Count,
+                addedSubjectSample = added.Take(8).ToList(),
+                removedSubjectSample = removed.Take(8).ToList(),
+                addedChapters = after.Chapters.Except(before.Chapters).Count(),
+                removedChapters = before.Chapters.Except(after.Chapters).Count(),
+                localEdits = new
+                {
+                    subjects = localEdits.Subjects,
+                    chapters = localEdits.Chapters,
+                    orphans = localEdits.Orphans,
+                    text = localEdits.Describe(),
+                },
+            },
+            status = AdminDataTransfer.GetStatus(paths),
+        };
+    }
+
+    /// <summary>读出一门课当前的章节号与题号（拉取前后各读一次，用于"新增/消失"对比）。</summary>
+    private static (HashSet<int> Chapters, HashSet<int> Subjects) ReadCourseIds(string dbPath, int courseId)
+    {
+        var chapters = new HashSet<int>();
+        var subjects = new HashSet<int>();
+        if (!File.Exists(dbPath)) return (chapters, subjects);
+        try
+        {
+            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = dbPath,
+                Mode = SqliteOpenMode.ReadOnly,
+                DefaultTimeout = 30,
+            }.ToString());
+            conn.Open();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "select ichapterid from coursechapter where icourseid=@c";
+                cmd.Parameters.AddWithValue("@c", courseId);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read()) chapters.Add(reader.GetInt32(0));
+            }
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "select isubjectid from coursesubject where icourseid=@c";
+                cmd.Parameters.AddWithValue("@c", courseId);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read()) subjects.Add(reader.GetInt32(0));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 读取课程题号失败（对比报告将为空）: {ex.Message}");
+        }
+        return (chapters, subjects);
+    }
+
+    /// <summary>这门课在主库里有没有正文（= 导出产物里包含它）。读不出来时按"有"处理，保持原行为。</summary>
+    internal static bool MainHoldsCourseContent(string mainDbPath, int courseId)
+    {
+        try
+        {
+            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = mainDbPath,
+                Mode = SqliteOpenMode.ReadOnly,
+                DefaultTimeout = 30,
+            }.ToString());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "select count(*) from coursesubject where icourseid=@c";
+            cmd.Parameters.AddWithValue("@c", courseId);
+            return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private static string ReadCourseName(string dbPath, int courseId)
+    {
+        try
+        {
+            using var cn = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.GetFullPath(dbPath),
+                Mode = SqliteOpenMode.ReadOnly,
+            }.ToString());
+            cn.Open();
+            using var cmd = cn.CreateCommand();
+            cmd.CommandText = "SELECT ccoursename FROM course WHERE icourseid = $c";
+            cmd.Parameters.AddWithValue("$c", courseId);
+            return cmd.ExecuteScalar() as string ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static void CopyTree(string source, string target)
+    {
+        Directory.CreateDirectory(target);
+        foreach (var file in Directory.GetFiles(source))
+        {
+            File.Copy(file, Path.Combine(target, Path.GetFileName(file)), true);
+        }
+        foreach (var dir in Directory.GetDirectories(source))
+        {
+            CopyTree(dir, Path.Combine(target, Path.GetFileName(dir)));
+        }
+    }
+}
+
 static class BackupRetention
 {
     public static void Prune(string root, int keepLatest = 20, int keepDays = 30)
@@ -716,7 +1265,8 @@ static class AdminDataTransfer
                 path = paths.UserDataRoot,
                 files = userRoot is null ? 0 : CountFiles(userRoot.FullName, path => !IsUnderBackup(path, userBackupRoot)),
                 size = userRoot is null ? 0 : DirectorySize(userRoot.FullName, path => !IsUnderBackup(path, userBackupRoot)),
-                users = userRoot is null ? 0 : Directory.EnumerateFiles(userRoot.FullName, "*.json", SearchOption.TopDirectoryOnly).Count(),
+                users = userRoot is null ? 0 : Directory.EnumerateFiles(userRoot.FullName, "*.json", SearchOption.TopDirectoryOnly)
+                    .Count(path => !SessionStore.IsSessionFile(path)),
                 auth = File.Exists(paths.AuthDataPath),
                 updatedAt = LatestWriteTime(paths.UserDataRoot, path => !IsUnderBackup(path, userBackupRoot))
             },
@@ -750,7 +1300,7 @@ static class AdminDataTransfer
         using var zip = ZipFile.Open(tempZip, ZipArchiveMode.Create);
         foreach (var file in Directory.EnumerateFiles(paths.UserDataRoot, "*", SearchOption.AllDirectories)
                      .Where(path => !IsUnderBackup(path, backupRoot))
-                     .Where(path => !string.Equals(Path.GetFileName(path), "sessions.json", StringComparison.OrdinalIgnoreCase))
+                     .Where(path => !SessionStore.IsSessionFile(path))
                      .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             var relative = Path.GetRelativePath(paths.UserDataRoot, file).Replace('\\', '/');
@@ -1248,6 +1798,15 @@ sealed class UserDataConflictException : Exception
 sealed class SessionStore
 {
     public const string UserItemKey = "yunxi.session.user";
+
+    /// <summary>会话存储文件名。放在用户数据目录里，但它**不是用户**——
+    /// 用户列表/计数/增删用户都要把它排除，否则会冒出一个叫 sessions 的假账号，
+    /// 删掉它还会把所有人的登录状态清空。</summary>
+    public const string FileName = "sessions.json";
+
+    public static bool IsSessionFile(string pathOrName)
+        => string.Equals(Path.GetFileName(pathOrName), FileName, StringComparison.OrdinalIgnoreCase);
+
     private const string CookieName = "yunxi_session";
     private static readonly TimeSpan Lifetime = TimeSpan.FromDays(7);
     private readonly ConcurrentDictionary<string, SessionRecord> _sessions = new(StringComparer.Ordinal);
@@ -1373,7 +1932,7 @@ sealed class SessionStore
         }
     }
 
-    private string SessionFilePath() => Path.Combine(_paths.UserDataRoot, "sessions.json");
+    private string SessionFilePath() => Path.Combine(_paths.UserDataRoot, FileName);
 
     private sealed record SessionRecord(string User, DateTimeOffset ExpiresAt);
 
@@ -1403,8 +1962,21 @@ sealed class AppPaths
         else
         {
             DefaultLoginPassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(6));
-            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [INIT] 未配置 App:DefaultLoginPassword，本次启动生成的默认登录口令（管理员首次登录用）: {DefaultLoginPassword}");
-            TryWriteInitialAdminPassword(UserDataRoot, DefaultLoginPassword);
+            // 本次生成的口令只有在「管理员账号还不存在」时才是有效的首次登录口令。
+            // 管理员已存在时再写这个文件会误导——文件里是刚生成的随机串，而管理员的口令是
+            // 早先那次生成（或用户改过的）那个，照文件输是登不进去的。
+            var adminProfile = ReadAdminProfile(UserDataRoot);
+            if (adminProfile is null)
+            {
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [INIT] 未配置 App:DefaultLoginPassword，本次启动生成的默认登录口令（管理员首次登录用）: {DefaultLoginPassword}");
+                TryWriteInitialAdminPassword(UserDataRoot, DefaultLoginPassword);
+            }
+            else
+            {
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [INIT] 未配置 App:DefaultLoginPassword；管理员账号已存在，跳过初始口令文件。");
+                // 管理员已改过密码 → 残留的初始口令文件一定是过期信息，顺手清掉。
+                if (!MustChangePassword(adminProfile)) TryDeleteInitialAdminPassword(UserDataRoot);
+            }
         }
     }
 
@@ -1422,6 +1994,49 @@ sealed class AppPaths
         }
     }
 
+    /// <summary>
+    /// 读 accounts.dat 里的管理员档案，只用来判断「该不该写初始口令文件」，不做鉴权。
+    /// 返回 null 表示还没有管理员账号（首次部署）；解析失败按「已存在」处理，宁可不写也不误删。
+    /// </summary>
+    private static Dictionary<string, object?>? ReadAdminProfile(string userDataRoot)
+    {
+        try
+        {
+            var path = Path.Combine(userDataRoot, "accounts.dat");
+            if (!File.Exists(path)) return null;
+            var raw = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, object?>>>(File.ReadAllText(path, Encoding.UTF8));
+            if (raw is null) return null;
+            foreach (var pair in raw)
+            {
+                if (pair.Key.Equals("admin", StringComparison.OrdinalIgnoreCase)) return pair.Value;
+            }
+            return null;
+        }
+        catch
+        {
+            return new Dictionary<string, object?>();
+        }
+    }
+
+    private static bool MustChangePassword(Dictionary<string, object?> profile)
+        => profile.TryGetValue("mustChangePassword", out var value) && ScalarBool(value);
+
+    /// <summary>管理员改过密码后调用：初始口令文件已过期，清掉避免误导。</summary>
+    public void DeleteInitialAdminPasswordFile() => TryDeleteInitialAdminPassword(UserDataRoot);
+
+    private static void TryDeleteInitialAdminPassword(string userDataRoot)
+    {
+        try
+        {
+            var path = Path.Combine(userDataRoot, "admin-init-password.txt");
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch
+        {
+            // Best-effort: 删不掉不影响服务启动。
+        }
+    }
+
     public string BaseRoot { get; }
     public string PublicRoot { get; }
     public string SqlitePath { get; }
@@ -1429,6 +2044,24 @@ sealed class AppPaths
     public string UserDataRoot { get; }
     public string AuthDataPath => Path.Combine(UserDataRoot, "accounts.dat");
     public string DefaultLoginPassword { get; }
+
+    /// <summary>
+    /// 拉取库：与主库同目录、文件名加 <c>-pulled</c> 后缀的独立 SQLite。
+    /// 主库是导出产物（整包上传会替换它），拉取来的课程一律写这里，两边互不影响。
+    /// </summary>
+    public string PulledSqlitePath
+    {
+        get
+        {
+            var full = Path.GetFullPath(SqlitePath);
+            var dir = Path.GetDirectoryName(full) ?? BaseRoot;
+            return Path.Combine(dir, Path.GetFileNameWithoutExtension(full) + "-pulled.db");
+        }
+    }
+
+    /// <summary>拉取来的题图目录（主图片目录加 <c>-pulled</c> 后缀），避免被整包上传替换掉。</summary>
+    public string PulledAssetsRoot =>
+        DataAssetsRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + "-pulled";
 
     public string FindAssetSample()
     {
@@ -1564,6 +2197,124 @@ sealed class AuthStore
     }
 }
 
+/// <summary>
+/// 检查课程在上游有没有更新：用"增量水位"接口各探一次章节与题目（1~2 次 SOAP/课）。
+/// 已知盲区：上游章节改名不更新 <c>dchangedate</c>，这类改动探不出来（客户端同样有这个问题）。
+/// </summary>
+static class CourseUpdateChecker
+{
+    public static async Task<List<object>> CheckAsync(QuestionBank bank, List<int> courseIds, IConfiguration configuration)
+    {
+        var results = new List<object>();
+        if (courseIds.Count == 0) return results;
+        // 账号从配置/环境变量来（不再内置在代码里）
+        var user = Puller.BankCredentials.ResolveUser(configuration["App:BankServiceUser"]);
+        var password = Puller.BankCredentials.ResolvePassword(configuration["App:BankServicePassword"]);
+        Puller.BankCredentials.EnsureConfigured(user, password);
+        using var soap = new Puller.SoapClient(
+            Puller.BankCredentials.ResolveUrl(configuration["App:BankServiceUrl"]), user, password, 30000);
+        foreach (var courseId in courseIds)
+        {
+            try
+            {
+                var marks = bank.CourseWatermarks(courseId);
+                var chapterSince = string.IsNullOrWhiteSpace(marks.Chapter) ? "1900-01-01 00:00:00.999" : marks.Chapter!;
+                var subjectSince = string.IsNullOrWhiteSpace(marks.Subject) ? "1900-01-01 00:00:00.999" : marks.Subject!;
+                var chapterResp = await soap.InvokeAsync("LoadNewCourseChapter_HadDistrice",
+                    $"<courseId>{courseId}</courseId><courseType>11</courseType><district /><lastUpdateDate>{chapterSince}</lastUpdateDate>");
+                var chapterRows = CountRows(chapterResp.Primary);
+                var subjectResp = await soap.InvokeAsync("LoadNewCourseSubjectGroup_HadDistrict",
+                    $"<courseId>{courseId}</courseId><courseType>1</courseType><district /><lastUpdateDate>{subjectSince}</lastUpdateDate>");
+                var subjectRows = CountRows(subjectResp.Primary);
+                results.Add(new { courseId, hasUpdate = chapterRows > 0 || subjectRows > 0, chapters = chapterRows, subjects = subjectRows });
+            }
+            catch (Exception ex)
+            {
+                results.Add(new { courseId, hasUpdate = false, error = SafeError(ex) });
+            }
+        }
+        return results;
+    }
+
+    /// <summary>"没有更新"时上游不返回 DataTable（载荷为空），这里当成 0 行而不是报错。</summary>
+    private static int CountRows(string? payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload)) return 0;
+        try
+        {
+            return Puller.JkdParsers.ParseDataTable(payload).Count;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+}
+
+/// <summary>
+/// 按用户分配题库：账号档案里的 <c>courses</c> 字段。
+/// 缺省（键不存在）= 该用户可见**全部有内容的课程**（兼容旧数据）；数组 = 只可见列出的课程；
+/// admin 永远不受限。放 accounts.dat 而不是用户数据文件里——后者用户自己能上传下载，权限放那儿会被改掉。
+/// </summary>
+static class UserCourses
+{
+    public const string Field = "courses";
+
+    /// <summary>该用户被允许的课程 id；null = 不限制。</summary>
+    public static HashSet<int>? AllowedIds(AuthStore auth, string? user)
+    {
+        var name = CleanUserName(user);
+        if (name.Length == 0 || name.Equals("admin", StringComparison.OrdinalIgnoreCase)) return null;
+        var profile = auth.Get(name);
+        if (profile is null || !profile.TryGetValue(Field, out var value) || value is null) return null;
+        var ids = new HashSet<int>();
+        if (value is JsonElement element && element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var n)) ids.Add(n);
+                else if (item.ValueKind == JsonValueKind.String && int.TryParse(item.GetString(), out var s)) ids.Add(s);
+            }
+        }
+        else if (value is System.Collections.IEnumerable sequence && value is not string)
+        {
+            // 注意：List<int> 不实现 IEnumerable<object?>（值类型无协变），必须用非泛型 IEnumerable
+            foreach (var item in sequence)
+            {
+                if (item is null or DBNull) continue;
+                if (int.TryParse(Convert.ToString(item, CultureInfo.InvariantCulture), out var n) && n > 0) ids.Add(n);
+            }
+        }
+        return ids;
+    }
+
+    /// <summary>该用户是否能看到这门课（admin / 未分配 → 全部可见）。</summary>
+    public static bool IsAllowed(AuthStore auth, string? user, int courseId)
+    {
+        var allowed = AllowedIds(auth, user);
+        return allowed is null || allowed.Contains(courseId);
+    }
+
+    /// <summary>保存分配；<paramref name="ids"/> 为 null 表示恢复"全部可见"。</summary>
+    public static void Save(AuthStore auth, string user, List<int>? ids)
+    {
+        var name = CleanUserName(user);
+        if (name.Length == 0) throw new InvalidOperationException("缺少用户名");
+        if (name.Equals("admin", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("管理员不需要分配题库");
+        var profile = auth.Get(name);
+        if (profile is null)
+        {
+            // 账号还不在 accounts.dat 里（只在用户数据里）：建一个随机口令的档案，绝不留空口令
+            profile = auth.CreateProfile(Convert.ToHexString(RandomNumberGenerator.GetBytes(12)));
+            profile["mustChangePassword"] = true;
+        }
+        if (ids is null) profile.Remove(Field);
+        else profile[Field] = ids.Where(id => id > 0).Distinct().OrderBy(id => id).ToList();
+        auth.Set(name, profile);
+        auth.Save();
+    }
+}
+
 sealed class QuestionBank
 {
     private readonly AppPaths _paths;
@@ -1644,19 +2395,34 @@ sealed class QuestionBank
         cmd.ExecuteNonQuery();
     }
 
-    public IEnumerable<object> GetCourses(string search, bool availableOnly)
+    public IEnumerable<object> GetCourses(string search, bool availableOnly, HashSet<int>? allowed = null,
+        IReadOnlyCollection<string>? excludedClasses = null)
     {
+        // 按用户分配的题库范围过滤：null = 不限制；空集合 = 一门都看不到
+        var allowedClause = allowed is null
+            ? ""
+            : allowed.Count == 0
+                ? " and 1=0"
+                : " and c.icourseid in (" + string.Join(",", allowed) + ")";
+        // 非常规分类（默认「合作专区」）整类不展示——那些不是正式题库
+        var excludedClause = "";
+        if (excludedClasses is { Count: > 0 })
+        {
+            excludedClause = " and (cl.ccoursecname is null or cl.ccoursecname not in (" +
+                             string.Join(",", excludedClasses.Select(n => "'" + n.Replace("'", "''") + "'")) + "))";
+        }
         var rows = Query(@"
             select c.icourseid, c.ccoursename, c.ihadbuy, c.dchangedate, c.dchapterchange, c.dsubjectchange,
-                   cl.ccoursecname, sc.csubclassname,
+                   cl.ccoursecname, cl.iindex as class_index, sc.csubclassname, sc.iindex as subclass_index,
                    (select count(*) from coursesubject s where s.icourseid = c.icourseid and coalesce(s.bstopflag, 0)=0) as subject_count
             from course c
             left join courseclass cl on c.iclassid=cl.iclassid
             left join coursesubclass sc on c.isubclassid=sc.isubclassid
             where coalesce(c.bstopflag, 0)=0
-              and (@available = 0 or ((select count(*) from coursesubject s where s.icourseid = c.icourseid and coalesce(s.bstopflag, 0)=0) > 0))
+              and (@available = 0 or ((select count(*) from coursesubject s where s.icourseid = c.icourseid and coalesce(s.bstopflag, 0)=0) > 0))"
+            + allowedClause + excludedClause + @"
               and (@search = '' or c.ccoursename like @like or cl.ccoursecname like @like or sc.csubclassname like @like)
-            order by c.ihadbuy desc, cl.iindex, sc.iindex, c.iindex",
+            order by cl.iindex, sc.iindex, c.ihadbuy desc, c.iindex",
             new Dictionary<string, object?> { ["@available"] = availableOnly ? 1 : 0, ["@search"] = search, ["@like"] = "%" + search + "%" });
         return rows.Select(r => new
         {
@@ -1664,10 +2430,35 @@ sealed class QuestionBank
             name = ToStr(r["ccoursename"]),
             category = ToStr(r["ccoursecname"]),
             subcategory = ToStr(r["csubclassname"]),
+            // 分类序号：前端按它做「一级 → 二级」分组排序（跟客户端里的 iindex 一致）
+            categoryOrder = ToInt(r["class_index"]),
+            subcategoryOrder = ToInt(r["subclass_index"]),
             owned = ToInt(r["ihadbuy"]) > 0,
             questionCount = ToInt(r["subject_count"]),
             changedAt = MaxDateString(r["dchangedate"], r["dchapterchange"], r["dsubjectchange"])
         }).ToList();
+    }
+
+    /// <summary>这道题属于哪门课（用于按用户分配题库的越权校验；找不到返回 0）。</summary>
+    public int CourseIdOfSubject(int subjectId)
+    {
+        var row = Query("select icourseid from coursesubject where isubjectid=@id",
+            new Dictionary<string, object?> { ["@id"] = subjectId }).FirstOrDefault();
+        return row is null ? 0 : ToInt(row["icourseid"]);
+    }
+
+    /// <summary>这门课在库里的章节/题目增量水位（没有则 null）——用于"可更新"探测。</summary>
+    public (string? Chapter, string? Subject) CourseWatermarks(int courseId)
+    {
+        var row = Query("select dchapterchange, dsubjectchange from course where icourseid=@id",
+            new Dictionary<string, object?> { ["@id"] = courseId }).FirstOrDefault();
+        if (row is null) return (null, null);
+        string? Clean(object? value)
+        {
+            var text = ToStr(value);
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        return (Clean(row["dchapterchange"]), Clean(row["dsubjectchange"]));
     }
 
     public static object TryReadTableCounts(string sqlitePath)
@@ -1851,6 +2642,18 @@ sealed class QuestionBank
         sql += " order by s.ichaptertype, ch.cchaptercode, s.iindex, s.isubjectid limit " + queryLimit.ToString(CultureInfo.InvariantCulture);
 
         var keyword = search.Trim();
+        // 本地改动叠层里有记录的题，在列表里标「本地已改」（按课程缓存，避免逐题读文件）
+        var editCache = new Dictionary<int, HashSet<int>>();
+        bool HasLocalEdit(int cid, int sid)
+        {
+            if (cid <= 0) return false;
+            if (!editCache.TryGetValue(cid, out var set))
+            {
+                set = Puller.LocalEdits.EditedSubjectIds(_paths.SqlitePath, cid);
+                editCache[cid] = set;
+            }
+            return set.Contains(sid);
+        }
         var rows = Query(sql, parameters)
             .Select(r =>
             {
@@ -1875,7 +2678,8 @@ sealed class QuestionBank
                     rawAnswer = answer,
                     rawDescription = description,
                     answer = StripHtml(answer),
-                    answerCount = ToInt(r["ianswercount"])
+                    answerCount = ToInt(r["ianswercount"]),
+                    localEdited = HasLocalEdit(ToInt(r["icourseid"]), ToInt(r["isubjectid"]))
                 };
             });
         if (keyword.Length > 0)
@@ -1925,11 +2729,13 @@ sealed class QuestionBank
             description = TextForEdit(r["cdescription"], r["dupdatedate"]),
             answerCount = ToInt(r["ianswercount"]),
             score = ToStr(r["iscore"]),
-            updatedAt = ToDateString(r["dupdatedate"])
+            updatedAt = ToDateString(r["dupdatedate"]),
+            // 本地改动叠层里有记录 → 界面标「本地已改」并提供一键还原
+            localEdit = Puller.LocalEdits.DescribeSubject(_paths.SqlitePath, courseId, id)
         };
     }
 
-    public object SaveEditorQuestion(Dictionary<string, object?> body)
+    public object SaveEditorQuestion(Dictionary<string, object?> body, string? editor = null)
     {
         var id = BodyInt(body, "id");
         if (id <= 0) throw new InvalidOperationException("缺少题目 ID");
@@ -1942,10 +2748,22 @@ sealed class QuestionBank
         var description = NormalizeEditText(GetBodyString(body, "description"));
         if (title.Length == 0) throw new InvalidOperationException("题目内容不能为空");
 
+        var courseId = ToInt(current["icourseid"]);
+        var chaptersToRename = BodyChapters(body).Where(c => c.Id > 0 && c.Name.Length > 0).ToList();
+        // 记下"改动前"的内容（原样存，供一键还原用）
+        var before = Query("select ctitle, cquestion, canswer, cdescription from coursesubject where isubjectid=@id",
+            new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
+        var chapterNamesBefore = Query(
+            "select ichapterid, cchaptername from coursechapter where ichapterid in (" +
+            string.Join(",", chaptersToRename.Select(c => c.Id)) + ")",
+            new Dictionary<string, object?>())
+            .ToDictionary(r => ToInt(r["ichapterid"]), r => ToStr(r["cchaptername"]));
+
         SqliteConnection.ClearAllPools();
         var backupDir = BackupQuestionBank("edit-question-" + id.ToString(CultureInfo.InvariantCulture));
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _paths.SqlitePath, DefaultTimeout = 30 }.ToString());
-        conn.Open();
+        using var conn = OpenBank(_paths.SqlitePath, _paths.PulledSqlitePath, readOnly: false);
+        // 这道题的内容在主库还是拉取库？本地改动要写回它所在的那一份——遮蔽视图本身不可写。
+        var owner = MainHoldsCourse(conn, ToInt(current["icourseid"])) ? "main" : "pulled";
         using var tx = conn.BeginTransaction();
         try
         {
@@ -1954,7 +2772,7 @@ sealed class QuestionBank
                 if (chapter.Id <= 0 || chapter.Name.Length == 0) continue;
                 using var chapterCmd = conn.CreateCommand();
                 chapterCmd.Transaction = tx;
-                chapterCmd.CommandText = "update coursechapter set cchaptername=@name where ichapterid=@id";
+                chapterCmd.CommandText = $"update {owner}.coursechapter set cchaptername=@name where ichapterid=@id";
                 chapterCmd.Parameters.AddWithValue("@name", chapter.Name);
                 chapterCmd.Parameters.AddWithValue("@id", chapter.Id);
                 chapterCmd.ExecuteNonQuery();
@@ -1962,8 +2780,8 @@ sealed class QuestionBank
 
             using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
-            cmd.CommandText = @"
-                update coursesubject
+            cmd.CommandText = $@"
+                update {owner}.coursesubject
                 set ctitle=@title,
                     cquestion=@question,
                     canswer=@answer,
@@ -1991,7 +2809,55 @@ sealed class QuestionBank
             SqliteConnection.ClearAllPools();
         }
 
+        // 记进本地改动叠层：拉取/重新导出后按题号贴回（本地优先），界面可一键还原
+        Puller.LocalEdits.RememberSubject(_paths.SqlitePath, courseId, id,
+            new Puller.LocalSubjectEdit
+            {
+                Title = title,
+                Question = question,
+                Answer = answer,
+                Description = description,
+                EditedAt = NowText(),
+                Editor = editor ?? "",
+            },
+            before is null ? null : new Puller.LocalSubjectEdit
+            {
+                Title = ToStr(before["ctitle"]),
+                Question = ToStr(before["cquestion"]),
+                Answer = ToStr(before["canswer"]),
+                Description = ToStr(before["cdescription"]),
+            });
+        foreach (var chapter in chaptersToRename)
+        {
+            Puller.LocalEdits.RememberChapter(_paths.SqlitePath, courseId, chapter.Id, chapter.Name,
+                chapterNamesBefore.TryGetValue(chapter.Id, out var was) ? was : null, editor);
+        }
+
         return new { ok = true, id, backup = backupDir, savedAt = NowText(), question = GetEditorQuestion(id) };
+    }
+
+    /// <summary>把本地改过的题还原成服务端版本（叠层里记的那一份），并删掉叠层记录。</summary>
+    public object RestoreEditorQuestion(int id)
+    {
+        if (id <= 0) throw new InvalidOperationException("缺少题目 ID");
+        var row = Query("select isubjectid, icourseid from coursesubject where isubjectid=@id",
+            new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
+        if (row is null) throw new InvalidOperationException("题目不存在");
+        var courseId = ToInt(row["icourseid"]);
+        var target = ServerBankPuller.MainHoldsCourseContent(_paths.SqlitePath, courseId)
+            ? _paths.SqlitePath
+            : _paths.PulledSqlitePath;
+        var ok = Puller.LocalEdits.RestoreSubject(_paths.SqlitePath, target, courseId, id, out var message);
+        return new { ok, id, message, question = ok ? GetEditorQuestion(id) : null };
+    }
+
+    /// <summary>这门课的内容在主库（导出产物）还是在拉取库（未购课程）。</summary>
+    private static bool MainHoldsCourse(SqliteConnection conn, int courseId)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "select count(*) from main.coursesubject where icourseid=@c";
+        cmd.Parameters.AddWithValue("@c", courseId);
+        return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
     }
 
     private List<object> GetChapterPath(int courseId, int chapterId)
@@ -2104,11 +2970,11 @@ sealed class QuestionBank
     private List<Dictionary<string, object?>> Query(string sql, Dictionary<string, object?> parameters)
     {
         if (!File.Exists(_paths.SqlitePath)) throw new FileNotFoundException("SQLite question bank not found. Upload or mount data/question-bank.db first.", _paths.SqlitePath);
-        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _paths.SqlitePath, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
+        // 读路径统一走 OpenBank：主库 + 拉取库（未购课程）合起来看，不带库名的表名会命中遮蔽视图。
+        using var conn = OpenBank(_paths.SqlitePath, _paths.PulledSqlitePath);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         foreach (var pair in parameters) cmd.Parameters.AddWithValue(pair.Key, pair.Value ?? DBNull.Value);
-        conn.Open();
         using var reader = cmd.ExecuteReader();
         var result = new List<Dictionary<string, object?>>();
         while (reader.Read())

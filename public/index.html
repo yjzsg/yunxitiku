@@ -5,7 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>云习题库</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/style.css?v=20260915-mobile15"><link rel="stylesheet" href="/drawer.css?v=3">
+  <script>
+    // 主题必须在样式表之前定下来，否则刷新时先渲染浅色再切暗色，会白闪一下。
+    (function () {
+      var t = "light";
+      try {
+        var saved = localStorage.getItem("yunxi-theme");
+        if (saved === "dark" || saved === "eye" || saved === "light") t = saved;
+      } catch (e) { /* 隐私模式下 localStorage 可能不可用，回落到浅色 */ }
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <link rel="stylesheet" href="/style.css?v=20260917-progress2"><link rel="stylesheet" href="/drawer.css?v=3">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -22,6 +33,11 @@
       </label>
       <div class="login-actions">
         <button id="loginBtn" class="primary-action">登录</button>
+      </div>
+      <div class="theme-switch theme-switch-login" data-theme-switch role="group" aria-label="配色模式">
+        <button type="button" data-theme-set="light">浅色</button>
+        <button type="button" data-theme-set="dark">暗色</button>
+        <button type="button" data-theme-set="eye">护眼</button>
       </div>
       <label class="login-check">
         <input type="checkbox" checked disabled>
@@ -55,6 +71,11 @@
       <div class="account-box">
         <span id="accountLabel">账号：未登录</span>
         <span id="saveStatusLabel" class="save-status" data-status="idle"></span>
+        <div class="theme-switch theme-switch-compact" data-theme-switch role="group" aria-label="配色模式">
+          <button type="button" data-theme-set="light" title="浅色" aria-label="浅色">浅</button>
+          <button type="button" data-theme-set="dark" title="暗色" aria-label="暗色">暗</button>
+          <button type="button" data-theme-set="eye" title="护眼" aria-label="护眼">护</button>
+        </div>
         <button id="logoutBtn">退出</button>
       </div>
     </header>
@@ -243,7 +264,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20260915-mobile15"></script>
+  <script src="/app.js?v=20260917-progress2"></script>
 </body>
 </html>
 

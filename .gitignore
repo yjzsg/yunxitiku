@@ -18,3 +18,26 @@ src/YunxiTiku.Web/public/**
 .env
 .env.*
 docker-compose.override.yml
+
+# ---- 题库与用户数据：绝不进提交范围（2026-09-17）----
+# 主库 / 拉取库 / 题图 / 备份 / 本地改动叠层，都是运行时数据，不是源码
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.dat
+*.zip
+data/**
+src/data/**
+userdata/**
+src/userdata/**
+assets/
+assets-pulled/
+_backups/
+local-edits.json
+
+# 目录占位文件仍要保留（放在最后，避免被上面的 data/** 之类覆盖）
+!data/.gitkeep
+!userdata/.gitkeep
+

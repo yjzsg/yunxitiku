@@ -9,7 +9,7 @@
 - 多账号登录与管理员管理。
 - 科目、章节、刷题、收藏、笔记、纠错反馈。
 - 模拟考场、错题强化、进度分析。
-- 管理员看板、题库数据上传/下载、用户数据上传/下载。
+- 管理员看板、题库直连拉取更新、题库数据上传/下载、用户数据上传/下载。
 - Docker Compose 一键运行。
 
 ## 文件分类
@@ -19,6 +19,7 @@ docker-compose.yml        NAS 默认部署文件，优先使用预构建镜像
 Dockerfile                GitHub Actions 构建镜像使用
 public/                   Web 前端页面、样式和交互脚本
 src/YunxiTiku.Web/        .NET 后端接口和数据读写逻辑
+src/JkdWeb.BankPuller/    跨平台题库拉取层（直连金考典 WebService，无 Windows 依赖）
 data/                     题库数据库和图片挂载目录，只保留空占位文件
 userdata/                 用户数据挂载目录，只保留空占位文件
 deploy/                   备用部署文件
@@ -118,12 +119,34 @@ dotnet run --project src/YunxiTiku.Web
 http://127.0.0.1:8787/
 ```
 
+## 上游题库服务账号（必配，且不进仓库）
+
+拉取题库、以及管理页的「检查可更新」，都要用上游题库服务的账号。
+**账号不写在代码里、也不写在 `docker-compose.yml` 里**（那是要提交的文件），
+放在本机的 `docker-compose.override.yml`（已 gitignore）：
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+# 然后编辑：填 App__BankServiceUser / App__BankServicePassword
+```
+
+或者用环境变量直接注入：
+
+```bash
+docker run -e App__BankServiceUser=xxx -e App__BankServicePassword=yyy ...
+```
+
+没配置时不会静默失败：拉取接口会返回
+`缺少上游题库服务账号。请任选一种方式配置：…`，界面直接提示。
+服务地址不用填（代码里有金考典官方地址作默认值），要改就设 `App__BankServiceUrl`。
+
 ## 安全说明
 
 请不要向公开仓库提交：
 
 - 题库数据库和图片资源。
 - 用户账号与做题数据。
+- 上游题库服务账号（放 `docker-compose.override.yml`，该文件已 gitignore）。
 - 授权文件、令牌、日志、打包文件。
 - 与 Docker 运行无关的本地工具文件。
 

@@ -1,7 +1,9 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
+COPY src/JkdWeb.BankPuller/JkdWeb.BankPuller.csproj src/JkdWeb.BankPuller/
 COPY src/YunxiTiku.Web/YunxiTiku.Web.csproj src/YunxiTiku.Web/
 RUN dotnet restore src/YunxiTiku.Web/YunxiTiku.Web.csproj
+COPY src/JkdWeb.BankPuller/ src/JkdWeb.BankPuller/
 COPY src/YunxiTiku.Web/ src/YunxiTiku.Web/
 COPY public/ src/YunxiTiku.Web/public/
 RUN dotnet publish src/YunxiTiku.Web/YunxiTiku.Web.csproj -c Release -o /app/publish /p:UseAppHost=false

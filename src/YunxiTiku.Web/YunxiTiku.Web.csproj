@@ -13,6 +13,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Cross-platform question-bank puller, so the Docker admin page can pull courses
+         straight from the upstream service instead of only accepting an uploaded zip.
+         Kept byte-identical to webapp-core/JkdWeb.BankPuller by scripts/verify-puller-sync.ps1. -->
+    <ProjectReference Include="..\JkdWeb.BankPuller\JkdWeb.BankPuller.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Include="public\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
   </ItemGroup>
 </Project>
