@@ -112,9 +112,10 @@ app.Use(async (context, next) =>
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path;
+    // 未登录也能访问的只有健康检查、登录、以及「我是谁」——用户名列表不再是公开信息
     var protectedApi = path.StartsWithSegments("/api")
         && !path.StartsWithSegments("/api/health")
-        && !path.StartsWithSegments("/api/users")
+        && !path.StartsWithSegments("/api/auth/session")
         && !path.StartsWithSegments("/api/auth/login");
     var protectedAsset = path.StartsWithSegments("/assets");
     if (!protectedApi && !protectedAsset)
@@ -167,7 +168,9 @@ app.MapGet("/api/health", () => Results.Json(new
     tables = QuestionBank.TryReadTableCounts(paths.SqlitePath)
 }));
 
-app.MapGet("/api/users", () =>
+// 账号清单只给管理员看（/api/admin/* 由中间件强制要求管理员会话）。
+// 登录页不再需要它——它靠 /api/auth/session 判断"上次登录的人还是不是有效会话"。
+app.MapGet("/api/admin/users", () =>
 {
     var users = Directory.GetFiles(paths.UserDataRoot, "*.json")
         // 排除会话存储：它不是用户（否则界面会一直冒出一个叫 sessions 的账号）
@@ -182,6 +185,33 @@ app.MapGet("/api/users", () =>
     {
         name
     }));
+});
+
+// 当前会话身份。登录页用它恢复「上次登录」，所以不带会话也能调；
+// 但它只回答"这张 cookie 是谁"，不泄露任何账号清单。
+app.MapGet("/api/auth/session", (HttpContext context, AuthStore auth, SessionStore sessionStore) =>
+{
+    var user = sessionStore.Resolve(context.Request);
+    if (user.Length == 0) return Results.Json(new { ok = false, user = "" });
+    if (auth.IsDisabled(user))
+    {
+        sessionStore.SignOut(context);
+        return Results.Json(new { ok = false, user = "", error = "账号已停用，请联系管理员" });
+    }
+    var profile = auth.Get(user);
+    // 账号已被删除（admin 没有档案也合法）：会话作废
+    if (profile is null && !user.Equals("admin", StringComparison.OrdinalIgnoreCase))
+    {
+        sessionStore.SignOut(context);
+        return Results.Json(new { ok = false, user = "", error = "账号不存在，请联系管理员" });
+    }
+    return Results.Json(new
+    {
+        ok = true,
+        user,
+        // 还是初始口令的账号：回登录页走改密流程，别让刷新绕过强制改密
+        mustChangePassword = profile is null || auth.MustChangePassword(profile),
+    });
 });
 
 app.MapPost("/api/auth/login", async (HttpContext context, AuthStore auth, SessionStore sessionStore) =>
@@ -719,6 +749,9 @@ app.MapGet("/assets/{**relative}", (string relative) =>
     return Results.Json(new { error = "asset not found" }, statusCode: 404);
 });
 
+// 未知的 /api/* 要回 404 JSON，而不是掉进下面的 SPA 回退：
+// 回退会给出 200 + HTML，容易被误判成「端点还在」。
+app.MapFallback("/api/{**rest}", () => Results.Json(new { ok = false, error = "接口不存在" }, statusCode: 404));
 app.MapFallback(() => Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8"));
 
 app.Run();

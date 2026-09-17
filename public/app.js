@@ -872,22 +872,24 @@ async function init() {
     || (window.innerWidth >= 1280 && window.innerHeight < 900);
   applyResponsiveAnswerCard();
   updateFullscreenState();
-  await loadUsers();
-  const sessionUser = localStorage.getItem(SESSION_USER_KEY);
-  if (sessionUser && state.users.some((item) => item.name.toLowerCase() === sessionUser.toLowerCase() && !item.disabled)) {
+  // 恢复登录：问服务端「这张 cookie 是谁」，不再依赖公开的用户名列表。
+  // 停用 / 已删除的账号由服务端直接作废会话，前端不必再自己比对名单。
+  const session = await api("/api/auth/session").catch(() => null);
+  if (session && session.ok && session.user && !session.mustChangePassword) {
     try {
-      await enterApp(sessionUser, { rememberSession: false });
+      await enterApp(session.user, { rememberSession: true });
       return;
     } catch (err) {
-      localStorage.removeItem(SESSION_USER_KEY);
       toast(err.message);
     }
   }
+  if (!session || !session.ok) localStorage.removeItem(SESSION_USER_KEY);
   showLogin();
 }
 
 async function loadUsers() {
-  state.users = await api("/api/users");
+  // 账号清单是管理员专用接口（未登录 401、非管理员 403）
+  state.users = await api("/api/admin/users");
   renderUsers();
 }
 
@@ -984,6 +986,11 @@ async function enterApp(user, options = {}) {
   if (!isAdmin()) state.mode = "training";
   await loadCourses();
   if (isAdmin()) {
+    // 账号清单改成了管理员专用接口，进面板前先取一次（失败不该挡住进入应用）
+    await loadUsers().catch((err) => {
+      console.warn("user list load failed", err);
+      state.users = [];
+    });
     renderAdminDashboard();
   } else {
     await restoreLastCourse();
