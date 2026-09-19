@@ -20,6 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Web SDK 默认会把 **/*.json 也当作 Content（EnableDefaultContentItems），
+         与下面显式的 public\**\* 撞成 NETSDK1022（public/manifest.json 是新增的 .json）。
+         先移除默认项，再由下面统一包含。 -->
+    <Content Remove="public\**\*.json" />
     <Content Include="public\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
   </ItemGroup>
 </Project>

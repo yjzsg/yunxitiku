@@ -34,7 +34,6 @@ const state = {
   pendingPasswordUser: "",
   pendingOldPassword: "",
   pickerOpen: false,
-  mobileMenuOpen: false,
   mobileActionsOpen: false,
   mobileToolsOpen: false,
   answerCardCollapsed: false,
@@ -91,6 +90,7 @@ const state = {
   printAfterRender: false,
   lastAnimatedQuestionId: 0,
   lastMarkedQuestionId: 0,
+  lastActivityAt: 0,   // 上一次答题时间（内存值，算学习时长用，见 recordPracticeActivity）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -107,10 +107,27 @@ const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
    首屏防白闪靠 index.html <head> 的内联脚本（必须排在样式表之前）。 */
 const THEME_KEY = "yunxi-theme";
 const THEME_NAMES = ["light", "dark", "eye"];
+const THEME_AUTO = "auto";   // 跟随系统（S13）
 
 function currentTheme() {
   const theme = document.documentElement.getAttribute("data-theme");
   return THEME_NAMES.includes(theme) ? theme : "light";
+}
+
+/* 用户的**选择**（可能是 "auto"），与 currentTheme() 不同 —— 后者永远是实际生效的那套配色。
+   data-theme 放实际配色（CSS 令牌块认它），data-theme-choice 放用户选择（按钮高亮认它）。 */
+function currentThemeChoice() {
+  const choice = document.documentElement.getAttribute("data-theme-choice");
+  if (choice === THEME_AUTO) return THEME_AUTO;
+  return THEME_NAMES.includes(choice) ? choice : "light";
+}
+
+function systemTheme() {
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function resolveTheme(choice) {
+  return choice === THEME_AUTO ? systemTheme() : (THEME_NAMES.includes(choice) ? choice : "light");
 }
 
 // 读取当前主题下的令牌值（画布绘图用：它拿不到 CSS 变量，只能算出来）
@@ -119,16 +136,18 @@ function themeToken(name) {
 }
 
 function applyTheme(name, options = {}) {
-  const next = THEME_NAMES.includes(name) ? name : "light";
+  const choice = name === THEME_AUTO || THEME_NAMES.includes(name) ? name : "light";
+  const next = resolveTheme(choice);
   document.documentElement.setAttribute("data-theme", next);
+  document.documentElement.setAttribute("data-theme-choice", choice);
   if (options.persist !== false) {
     try {
-      localStorage.setItem(THEME_KEY, next);
+      localStorage.setItem(THEME_KEY, choice);
     } catch (err) {
       // 隐私模式下写不了，忽略：本次会话仍然生效
     }
   }
-  syncThemeSwitchUi(next);
+  syncThemeSwitchUi(choice);
   // 学习看板的折线图是 canvas 画的，主题换了必须重画
   if (typeof renderProgressTrend === "function") {
     try {
@@ -140,16 +159,23 @@ function applyTheme(name, options = {}) {
   return next;
 }
 
-function syncThemeSwitchUi(theme = currentTheme()) {
+function syncThemeSwitchUi(choice = currentThemeChoice()) {
   document.querySelectorAll("[data-theme-set]").forEach((btn) => {
-    const on = btn.dataset.themeSet === theme;
+    const on = btn.dataset.themeSet === choice;
     btn.classList.toggle("active", on);
     btn.setAttribute("aria-pressed", on ? "true" : "false");
   });
 }
 
 function initTheme() {
-  syncThemeSwitchUi();
+  /* 首屏内联脚本只能定下 data-theme（防白闪），data-theme-choice 在这里补。 */
+  let saved = "light";
+  try {
+    saved = localStorage.getItem(THEME_KEY) || "light";
+  } catch (err) { /* 隐私模式 */ }
+  const choice = saved === THEME_AUTO || THEME_NAMES.includes(saved) ? saved : "light";
+  document.documentElement.setAttribute("data-theme-choice", choice);
+  syncThemeSwitchUi(choice);
   document.querySelectorAll("[data-theme-set]").forEach((btn) => {
     btn.onclick = () => applyTheme(btn.dataset.themeSet);
   });
@@ -157,11 +183,28 @@ function initTheme() {
   window.addEventListener("storage", (event) => {
     if (event.key === THEME_KEY && event.newValue) applyTheme(event.newValue, { persist: false });
   });
+  // 选了「跟随系统」时，系统配色一变就跟着换
+  if (window.matchMedia) {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      if (currentThemeChoice() === THEME_AUTO) applyTheme(THEME_AUTO, { persist: false });
+    };
+    if (media.addEventListener) media.addEventListener("change", onChange);
+    else if (media.addListener) media.addListener(onChange);   // 老 Safari
+  }
 }
 
 function setText(id, value) {
   const el = $(id);
   if (el) el.textContent = value;
+}
+
+/* 科目名在两处显示：内容区的 #courseTitle 与手机端顶栏的 #navCourseTitle
+   （手机端隐藏内容区那份，见 style.css）。文案必须同步，否则顶栏会一直停在
+   初始的「请选择科目」。 */
+function setCourseTitle(value) {
+  setText("courseTitle", value);
+  setText("navCourseTitle", value);
 }
 
 async function api(path, options) {
@@ -172,13 +215,70 @@ async function api(path, options) {
     throw new Error("网络连接失败，请检查服务是否已启动");
   }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    const error = new Error(err.error || res.statusText);
+    const payload = await res.json().catch(() => ({ error: res.statusText }));
+    /* `error` 字段历史上出现过**嵌套对象**（后端 SafeError 曾返回 {ok,error}），
+       直接 new Error(对象) 会让 toast 显示 "[object Object]"，用户完全看不懂。
+       这里做类型防御：字符串直接用；对象则取它自己的 error / message。 */
+    const raw = payload?.error;
+    const text = typeof raw === "string"
+      ? raw
+      : (raw && typeof raw === "object" && typeof raw.error === "string")
+        ? raw.error
+        : (typeof payload?.message === "string" ? payload.message : res.statusText);
+    const error = new Error(text);
     error.status = res.status;
-    error.code = err.code || "";
+    error.code = payload?.code || "";
+    /* 会话失效统一处理。只对业务接口生效 —— /api/auth/* 的 401 是「密码不对」，不是会话失效。 */
+    if (res.status === 401 && !/^\/api\/auth\//.test(path)) handleSessionExpired();
     throw error;
   }
   return res.json();
+}
+
+/* 会话失效（cookie 过期 / 被清）后的统一处理。
+   以前只在保存时弹一句「保存失败：登录已失效，请重新登录」，页面**仍停在应用内**，
+   用户继续操作只会一直失败、也没有出路。这里统一：提示 → 可选导出备份 → 回登录页。 */
+let sessionExpiredAt = 0;
+function handleSessionExpired() {
+  const now = Date.now();
+  if (now - sessionExpiredAt < 8000) return;   // 并发请求只处理一次
+  sessionExpiredAt = now;
+  const hasUnsaved = !!state.storageDirty;
+  if (hasUnsaved && confirm("登录已失效，需要重新登录。\n\n本地还有未保存的改动。\n点「确定」先导出备份，点「取消」直接返回登录页。")) {
+    exportLocalBackup();
+  }
+  clearTimeout(state.saveTimer);
+  state.saveTimer = null;
+  stopExamTimer();
+  state.storageDirty = false;
+  setSaveStatus("idle");
+  localStorage.removeItem(SESSION_USER_KEY);
+  toast("登录已失效，请重新登录");
+  state.user = "";
+  state.currentCourse = null;
+  state.questions = [];
+  state.answers = {};
+  state.submitted = false;
+  document.body.classList.remove("is-admin", "admin-view", "picker-open", "mobile-actions-open", "mobile-tools-open");
+  showLogin();
+}
+
+/* 把当前内存里的数据导出成 JSON 备份（会话失效 / 保存失败时给用户的兜底）。 */
+function exportLocalBackup() {
+  try {
+    const payload = { exportedAt: nowText(), user: state.user, storage: state.storage };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `yunxi-backup-${state.user || "user"}-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (_err) {
+    /* 导出失败不阻塞返回登录页 */
+  }
 }
 
 function debounce(fn, delay = 250) {
@@ -267,7 +367,13 @@ function shouldAutoVerifyInstant(q) {
 }
 
 function normalizeAnswer(value) {
-  return String(value || "").trim().replace(/[、,，\s]/g, "");
+  const cleaned = String(value || "").trim().replace(/[、,，\s]/g, "");
+  /* 多字符答案（多选 / 不定项）按字符**排序后**再比较。
+     题库里存在未排序的正确答案（实测 "BED" / "ABED" / "BCED"），
+     而 chooseOption 写用户答案时会 sort() —— 不排序就会「用户全对却判错」，
+     考试计分也会少给（全对只得 0.5×项数），还会把这题永久记进错题本。
+     排序对 hasAnswer（只看长度）与 calculateQuestionScore（用 Set）都无影响。 */
+  return cleaned.length > 1 ? Array.from(cleaned).sort().join("") : cleaned;
 }
 
 function hasAnswer(questionId) {
@@ -665,15 +771,6 @@ function getWrongRecordsForCurrentCourse(courseStore = userCourseStore()) {
 
 function ensureMobileControls() {
   ensureVerifyModeControl();
-  if (!$("mobileMenuBtn")) {
-    const btn = document.createElement("button");
-    btn.id = "mobileMenuBtn";
-    btn.className = "mobile-menu-btn";
-    btn.type = "button";
-    btn.textContent = "菜单";
-    const refresh = document.querySelector('[data-action="refresh"]');
-    refresh?.parentNode.insertBefore(btn, refresh);
-  }
 
   if (!$("mobileActionsBtn") && $("noteBtn")) {
     const btn = document.createElement("button");
@@ -690,9 +787,12 @@ function ensureMobileControls() {
     btn.className = "mobile-tools-btn";
     btn.type = "button";
     btn.textContent = "工具";
-    const menuBtn = $("mobileMenuBtn");
+    // ⚠️ 必须插在 `[data-action="refresh"]`（也就是 `.account-box`）**之前**。
+    // 这里原来是以已退役的 `#mobileMenuBtn` 为锚点；直接改成 `appendChild`
+    // 会把「工具」排到头像右边，顶栏顺序就反了。
+    const refresh = document.querySelector('[data-action="refresh"]');
     const nav = document.querySelector(".main-nav");
-    if (menuBtn && nav) menuBtn.parentNode.insertBefore(btn, menuBtn.nextSibling);
+    if (refresh) refresh.parentNode.insertBefore(btn, refresh);
     else nav?.appendChild(btn);
   }
 
@@ -742,44 +842,38 @@ function ensureVerifyModeControl() {
   }
 }
 
-function setMobileMenu(open) {
-  state.mobileMenuOpen = !!open;
-  if (state.mobileMenuOpen) {
-    state.mobileActionsOpen = false;
-    state.mobileToolsOpen = false;
-  }
-  document.body.classList.toggle("mobile-menu-open", state.mobileMenuOpen);
-  document.body.classList.toggle("mobile-actions-open", state.mobileActionsOpen);
-  document.body.classList.toggle("mobile-tools-open", state.mobileToolsOpen);
-  if ($("mobileMenuBtn")) {
-    $("mobileMenuBtn").textContent = state.mobileMenuOpen ? "收起" : "菜单";
-    $("mobileMenuBtn").setAttribute("aria-expanded", String(state.mobileMenuOpen));
-  }
-  if ($("mobileActionsBtn")) {
-    $("mobileActionsBtn").textContent = state.mobileActionsOpen ? "收起" : "操作";
-    $("mobileActionsBtn").setAttribute("aria-expanded", String(state.mobileActionsOpen));
-  }
-  if ($("mobileToolsBtn")) {
-    $("mobileToolsBtn").textContent = state.mobileToolsOpen ? "收起" : "工具";
-    $("mobileToolsBtn").setAttribute("aria-expanded", String(state.mobileToolsOpen));
-  }
-  scheduleNavIndicator();
-  setTimeout(updateNavIndicator, 260);
+/* 顶栏账号下拉菜单：点头像开合，点外面 / Esc 关闭。
+   主题按钮点完**不**关闭菜单（方便连着试三种配色）。 */
+function initAccountMenu() {
+  const box = document.querySelector(".account-box");
+  const btn = $("accountMenuBtn");
+  const menu = $("accountMenu");
+  if (!box || !btn || !menu) return;
+  const setOpen = (open) => {
+    box.classList.toggle("open", !!open);
+    menu.classList.toggle("hidden", !open);
+    btn.setAttribute("aria-expanded", String(!!open));
+  };
+  setOpen(false);
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    setOpen(menu.classList.contains("hidden"));
+  };
+  document.addEventListener("click", (e) => {
+    if (box.classList.contains("open") && !box.contains(e.target)) setOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setOpen(false);
+  });
 }
 
 function setMobileActions(open) {
   state.mobileActionsOpen = !!open;
   if (state.mobileActionsOpen) {
-    state.mobileMenuOpen = false;
     state.mobileToolsOpen = false;
   }
-  document.body.classList.toggle("mobile-menu-open", state.mobileMenuOpen);
   document.body.classList.toggle("mobile-actions-open", state.mobileActionsOpen);
   document.body.classList.toggle("mobile-tools-open", state.mobileToolsOpen);
-  if ($("mobileMenuBtn")) {
-    $("mobileMenuBtn").textContent = state.mobileMenuOpen ? "收起" : "菜单";
-    $("mobileMenuBtn").setAttribute("aria-expanded", String(state.mobileMenuOpen));
-  }
   if ($("mobileActionsBtn")) {
     $("mobileActionsBtn").textContent = state.mobileActionsOpen ? "收起" : "操作";
     $("mobileActionsBtn").setAttribute("aria-expanded", String(state.mobileActionsOpen));
@@ -793,16 +887,10 @@ function setMobileActions(open) {
 function setMobileTools(open) {
   state.mobileToolsOpen = !!open;
   if (state.mobileToolsOpen) {
-    state.mobileMenuOpen = false;
     state.mobileActionsOpen = false;
   }
-  document.body.classList.toggle("mobile-menu-open", state.mobileMenuOpen);
   document.body.classList.toggle("mobile-actions-open", state.mobileActionsOpen);
   document.body.classList.toggle("mobile-tools-open", state.mobileToolsOpen);
-  if ($("mobileMenuBtn")) {
-    $("mobileMenuBtn").textContent = state.mobileMenuOpen ? "收起" : "菜单";
-    $("mobileMenuBtn").setAttribute("aria-expanded", String(state.mobileMenuOpen));
-  }
   if ($("mobileActionsBtn")) {
     $("mobileActionsBtn").textContent = state.mobileActionsOpen ? "收起" : "操作";
     $("mobileActionsBtn").setAttribute("aria-expanded", String(state.mobileActionsOpen));
@@ -814,10 +902,12 @@ function setMobileTools(open) {
 }
 
 function shouldAutoCollapseAnswerCard() {
-  const w = window.innerWidth || document.documentElement.clientWidth || 0;
+  // 默认收起。答题卡是「跳题用的导航」，不是正文；它一展开就要吃掉
+  // 150~460px（宽度越窄格子换行越多、越高），而读题区才是主角。
+  // 只在很高的屏幕上（≥1200px）才默认展开 —— 那时卡片只占约 8% 高度，
+  // 读题区仍能拿到 ~74%。
   const h = window.innerHeight || document.documentElement.clientHeight || 0;
-  return w <= 1280
-    || (w > 1280 && h < 900);
+  return h < 1200;
 }
 
 function applyResponsiveAnswerCard() {
@@ -832,6 +922,24 @@ function setAnswerCardCollapsed(collapsed) {
   if ($("answerCardCollapseBtn")) {
     $("answerCardCollapseBtn").textContent = state.answerCardCollapsed ? "展开答题卡" : "收起答题卡";
     $("answerCardCollapseBtn").setAttribute("aria-expanded", String(!state.answerCardCollapsed));
+  }
+}
+
+// 答题卡在 ≤1440px 是 `position: fixed` 的底部覆盖层，脱流后不占位置，
+// 所以题目区得自己预留出「卡片高度」的底部空间，否则 .question-actions
+// （上一题 / 确认答案 / 下一题 / 笔记 / 收藏本题 / 纠错）会被卡片压住、点不到。
+// 卡片高度随宽度变化极大（收起 38~44px；展开 162~462px），写死值必然在某个宽度失效，
+// 因此这里把**实测高度**写进 CSS 变量 --answer-card-h，由 style.css 消费。
+function syncAnswerCardSpace() {
+  const card = document.querySelector(".answer-card-wrap");
+  const root = document.documentElement;
+  if (!card) {
+    root.style.removeProperty("--answer-card-h");
+    return;
+  }
+  const h = Math.round(card.getBoundingClientRect().height) + "px";
+  if (root.style.getPropertyValue("--answer-card-h") !== h) {
+    root.style.setProperty("--answer-card-h", h);
   }
 }
 
@@ -866,6 +974,7 @@ async function toggleFullscreen() {
 
 async function init() {
   initTheme();
+  bindAccountMenuActions();
   ensureMobileControls();
   const shouldCollapseCard = window.innerWidth <= 760
     || (window.innerWidth >= 761 && window.innerWidth < 1280 && window.innerHeight < 950)
@@ -977,13 +1086,17 @@ async function enterApp(user, options = {}) {
   $("loginView").classList.add("hidden");
   $("appShell").classList.remove("hidden");
   document.body.classList.remove("admin-view");
-  setMobileMenu(false);
   setMobileActions(false);
   setMobileTools(false);
   $("adminDashboard").classList.add("hidden");
   $("questionView").classList.remove("hidden");
   state.storage.profile.lastLoginAt = nowText();
-  if (!isAdmin()) state.mode = "training";
+  if (!isAdmin()) {
+    /* 刷新/重新登录后回到上次所在的模式（章节与题号由 restoreLastCourse 恢复）。
+       以前无条件回 training，用户刷到一半刷新就得重新选章节。 */
+    const savedMode = state.storage.settings?.lastMode;
+    state.mode = RESTORABLE_MODES.includes(savedMode) ? savedMode : "training";
+  }
   await loadCourses();
   if (isAdmin()) {
     // 账号清单改成了管理员专用接口，进面板前先取一次（失败不该挡住进入应用）
@@ -999,7 +1112,22 @@ async function enterApp(user, options = {}) {
 }
 
 async function logout() {
-  await saveUserData().catch(() => {});
+  /* 保存失败不能静默：以前是 `.catch(() => {})`，结果「答题后点退出」会把本地未保存的改动
+     无声丢掉（多标签页场景服务器会返回 409）。现在改为提示，并由用户决定是否继续退出。
+
+     ⚠️ 但只在「本地**确实有**未保存改动」时才打扰用户：
+     同一账号开了多个标签页/设备时，另一个先保存过 → 本页 revision 过期 → 409，
+     此时退出本身是安全的，弹冲突框反而会挡住退出流程。 */
+  const hadUnsaved = !!state.storageDirty;
+  try {
+    await saveUserData();
+  } catch (err) {
+    if (hadUnsaved) {
+      handleUserSaveError(err);
+      if (err?.status === 409 || err?.code === "user_data_conflict") return;   // 交给冲突对话框
+      if (!confirm("本地改动还没保存成功，确定仍要退出吗？\n\n点「取消」可留在页面重试或先导出备份。")) return;
+    }
+  }
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   stopExamTimer();
   localStorage.removeItem(SESSION_USER_KEY);
@@ -1016,7 +1144,7 @@ async function logout() {
   state.currentCourse = null;
   state.questions = [];
   state.answers = {};
-  document.body.classList.remove("is-admin", "admin-view", "picker-open", "mobile-menu-open", "mobile-actions-open", "mobile-tools-open");
+  document.body.classList.remove("is-admin", "admin-view", "picker-open", "mobile-actions-open", "mobile-tools-open");
   showLogin();
 }
 
@@ -1273,7 +1401,17 @@ function keepLocalConflictDraft() {
 }
 
 async function switchUser(name) {
-  await saveUserData().catch(() => {});
+  /* 同 logout()：只有「本地确实有未保存改动」时才提示，避免多标签页场景误弹冲突框。 */
+  const hadUnsaved = !!state.storageDirty;
+  try {
+    await saveUserData();
+  } catch (err) {
+    if (hadUnsaved) {
+      handleUserSaveError(err);
+      if (err?.status === 409 || err?.code === "user_data_conflict") return;
+      if (!confirm("本地改动还没保存成功，确定仍要切换账号吗？\n\n点「取消」可留在页面重试。")) return;
+    }
+  }
   localStorage.removeItem(SESSION_USER_KEY);
   localStorage.setItem(LAST_USER_KEY, name);
   $("loginUserSelect").value = name;
@@ -1304,9 +1442,19 @@ function setCoursePicker(open) {
   state.pickerOpen = !!open;
   document.body.classList.toggle("picker-open", state.pickerOpen);
   if (state.pickerOpen) setMobileTools(false);
-  const pickerBtn = $("coursePickerBtn");
-  if (pickerBtn) pickerBtn.textContent = state.pickerOpen ? "收起科目" : "切换科目";
+  // 科目名本身就是开关（手机端在顶栏、桌面端在内容区），把状态同步给读屏
+  for (const id of ["navCourseTitle", "courseTitle"]) {
+    const el = $(id);
+    if (el) el.setAttribute("aria-expanded", String(state.pickerOpen));
+  }
   updatePickerHint();
+}
+
+/* 点科目名 = 开关科目面板。
+   管理看板下没有科目可选（`body.admin-view .course-pane` 是 display:none），忽略。 */
+function toggleCoursePicker() {
+  if (document.body.classList.contains("admin-view")) return;
+  setCoursePicker(!state.pickerOpen);
 }
 
 function updatePickerHint() {
@@ -1377,7 +1525,7 @@ async function selectCourse(course, options = {}) {
   state.storage.profile.lastCourseId = course.id;
   state.storage.profile.lastCourseName = course.name;
   state.storage.profile.lastChapterId = 0;
-  setText("courseTitle", course.name);
+  setCourseTitle(course.name);
   const courseLabel = [course.category, course.subcategory].filter(Boolean).join(" ");
   setText("courseMeta", `${courseLabel ? `${courseLabel} · ` : ""}${course.questionCount}题 · 更新 ${formatRelativeTime(course.changedAt)}`);
   renderCourses();
@@ -2197,11 +2345,26 @@ function renderAll() {
   if (!state.questions.length) {
     $("questionBody").classList.add("hidden");
     $("emptyState").classList.remove("hidden");
-    const message = state.mode === "wrong" && (state.wrongFilters.review || "due") === "due"
-      ? ["当前无待复习错题", "可以切换为全部错题，或稍后按复习计划回来。"]
-      : ["当前范围没有题目", "可以换章节、题型或清空搜索条件。"];
+    const message = buildEmptyMessage();
     $("emptyState").innerHTML = `<strong>${message[0]}</strong><span>${message[1]}</span>`;
   }
+}
+
+/* 空状态文案。错题本默认「待复习」只显示**已到期**的错题（SRS 第 0 阶段到期日是答错次日），
+   所以刚考完的错题在这里看不到 —— 旧文案只说「无待复习错题」，用户会以为错题没记上。 */
+function buildEmptyMessage() {
+  if (state.mode !== "wrong" || (state.wrongFilters.review || "due") !== "due") {
+    return ["当前范围没有题目", "可以换章节、题型或清空搜索条件。"];
+  }
+  const pending = getWrongRecordsForCurrentCourse(userCourseStore())
+    .filter(([, item]) => !item.resolved && !isReviewDue(item));
+  if (!pending.length) return ["当前无待复习错题", "可以切换为全部错题，或稍后按复习计划回来。"];
+  const soonest = Math.min(...pending.map(([, item]) => reviewDueDate(item).getTime()));
+  const days = Math.max(1, Math.ceil((soonest - startOfToday().getTime()) / 86400000));
+  return [
+    `有 ${pending.length} 道错题还没到复习时间`,
+    `最近一批将在 ${days} 天后进入复习；现在想看，把上方「复习」筛选切到「全部」。`,
+  ];
 }
 
 function setPanelPage(active) {
@@ -2230,7 +2393,7 @@ function ensureQuestionSidePanel() {
     panel.className = "question-side-panel";
     body.appendChild(panel);
   }
-  ["questionTagPanel", "examReviewPanel", "answerBox", "noteEditor"].forEach((id) => {
+  ["questionTagPanel", "answerBox", "noteEditor"].forEach((id) => {
     const el = $(id);
     if (el && el.parentNode !== panel) panel.appendChild(el);
   });
@@ -2285,7 +2448,7 @@ function renderQuestion() {
   renderOptions(q);
   ensureQuestionSidePanel();
   renderQuestionTags(q);
-  renderExamReview(q);
+  renderCorrectionBadge(q);
   ensureQuestionSidePanel();
   renderExamStatus();
   renderVerifyModeControls();
@@ -2302,6 +2465,29 @@ function animateQuestionEntry(questionId) {
   body.classList.remove("question-enter");
   void body.offsetWidth;
   body.classList.add("question-enter");
+}
+
+/* 纠错闭环（S12）：提交过纠错的题目在题号栏旁显示角标。
+   此前用户提交后完全看不到结果（管理端能标记处理，但用户侧毫无反馈）。 */
+function renderCorrectionBadge(q) {
+  const record = (state.storage.corrections || [])
+    .find((item) => Number(item.questionId) === Number(q.id) && item.status !== "deleted");
+  let badge = $("correctionBadge");
+  if (!record) {
+    badge?.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.id = "correctionBadge";
+    badge.className = "correction-badge";
+    const anchor = $("questionChapter");
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(badge, anchor.nextSibling);
+    else $("questionView")?.appendChild(badge);
+  }
+  badge.textContent = record.status === "resolved" ? "纠错已处理" : "已提交纠错";
+  badge.title = `${record.type || "纠错"}：${record.note || ""}`;
+  badge.dataset.status = record.status === "resolved" ? "resolved" : "open";
 }
 
 function renderQuestionTags(q) {
@@ -2483,10 +2669,6 @@ function renderTagFilterOptions() {
   select.value = previous;
 }
 
-function renderExamReview() {
-  $("examReviewPanel")?.remove();
-}
-
 function renderWrongFilters() {
   let panel = $("wrongFilterPanel");
   if (state.mode !== "wrong" || isAdmin()) {
@@ -2538,6 +2720,8 @@ function renderWrongFilters() {
         <option value="30" ${filters.period === "30" ? "selected" : ""}>近30天</option>
       </select>
     </label>
+    <button type="button" id="exportWrongBtn" class="wrong-export-btn"
+            title="把全部错题（不受当前筛选限制）导出为可打印页面，可另存为 PDF">导出全部错题</button>
   `;
   const reload = debounce(async () => {
     state.wrongFilters = {
@@ -2552,6 +2736,43 @@ function renderWrongFilters() {
   $("wrongStatusFilter").onchange = reload;
   $("wrongCountFilter").onchange = reload;
   $("wrongPeriodFilter").onchange = reload;
+  const exportBtn = $("exportWrongBtn");
+  if (exportBtn) exportBtn.onclick = () => exportAllWrongQuestions().catch((err) => toast(err.message));
+}
+
+/* 错题导出（S10）：把**全部**错题（不受当前筛选/分页限制）拉全后走打印管线，
+   浏览器「另存为 PDF」即可存档。此前只能打印当前题目集。 */
+async function exportAllWrongQuestions() {
+  if (!state.currentCourse) return;
+  const records = getWrongRecordsForCurrentCourse(userCourseStore());
+  if (!records.length) {
+    toast("错题本里还没有题目");
+    return;
+  }
+  const ids = records.map(([id]) => Number(id)).filter(Boolean);
+  toast(`正在准备导出 ${ids.length} 道错题`);
+  const items = [];
+  const batchSize = 100;   // /api/questions 的 ids 走查询串，分批避免 URL 过长
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    const params = new URLSearchParams({
+      courseId: state.currentCourse.id,
+      ids: batch.join(","),
+      limit: String(batch.length),
+    });
+    const part = await api(`/api/questions?${params}`);
+    items.push(...part);
+  }
+  if (!items.length) {
+    toast("没有可导出的题目");
+    return;
+  }
+  const details = await loadPrintQuestionDetails(items);
+  if (!details.length) {
+    toast("没有可导出的题目");
+    return;
+  }
+  renderPrintView(details, `错题导出（${details.length} 题）`, true);
 }
 
 function renderPracticeContextPanel() {
@@ -2758,7 +2979,8 @@ async function loadPrintQuestionDetails(items) {
 }
 
 function renderPrintView(questions, scopeLabel, includeAnswers = false) {
-  $("printView").innerHTML = `
+  const view = ensurePrintView();
+  view.innerHTML = `
     <div class="print-document">
       <header class="print-document-head">
         <strong>云习题库</strong>
@@ -2768,7 +2990,7 @@ function renderPrintView(questions, scopeLabel, includeAnswers = false) {
       ${includeAnswers ? renderPrintAnswerSection(questions) : ""}
     </div>
   `;
-  $("printView").classList.remove("hidden");
+  view.classList.remove("hidden");
   document.body.classList.add("print-mode");
   state.printAfterRender = true;
   requestAnimationFrame(() => {
@@ -2816,11 +3038,22 @@ function renderPrintAnswerSection(questions) {
   `;
 }
 
+function ensurePrintView() {
+  let view = $("printView");
+  if (!view) {
+    // cleanupPrintView 会把整个节点移除；打印完不该在 DOM 里留一个空壳。
+    view = document.createElement("section");
+    view.id = "printView";
+    view.className = "print-view hidden";
+    document.body.appendChild(view);
+  }
+  return view;
+}
+
 function cleanupPrintView() {
   state.printAfterRender = false;
   document.body.classList.remove("print-mode");
-  $("printView")?.classList.add("hidden");
-  if ($("printView")) $("printView").innerHTML = "";
+  $("printView")?.remove();
 }
 
 function saveSubjectiveAnswer(q, answer) {
@@ -2953,6 +3186,17 @@ function recordPracticeActivity(q, options = {}) {
     verified: 0,
   };
   course.questions ||= {};
+  /* 学习时长：按「相邻两次答题的间隔」累计，单次上限 5 分钟
+     （页面挂着不动不该算成学习时间）。lastActivityAt 是内存值，刷新后从 0 开始，
+     所以刷新后的第一次答题不计时长。 */
+  const nowMs = Date.now();
+  const gap = state.lastActivityAt ? nowMs - state.lastActivityAt : 0;
+  state.lastActivityAt = nowMs;
+  if (gap > 0) {
+    const add = Math.min(gap, 5 * 60000);
+    day.durationMs = Number(day.durationMs || 0) + add;
+    course.durationMs = Number(course.durationMs || 0) + add;
+  }
   const id = String(q.id);
   const previous = course.questions[id] || {};
   const answer = currentAnswerSnapshot(q.id);
@@ -3095,7 +3339,11 @@ function renderAnswerCardPage(options = {}) {
     if (matched.has(index)) btn.classList.add("search-match");
     if (hasAnswer(item.id)) btn.classList.add("done");
     if (state.submitted || isQuestionVerified(item.id)) {
-      if (!hasAnswer(item.id)) btn.classList.add("wrong");
+      // 「未作答」单独一个 `todo` —— 以前打的是 `wrong`，交卷后「没做」和「做错」
+      // 长得一模一样（都是红色），扫漏题时根本分不出来。
+      // `todo` 沿用 `.card-cell` 的默认中性外观（见 style.css 里的说明），
+      // 所以这里只需要换类名，不需要额外样式。
+      if (!hasAnswer(item.id)) btn.classList.add("todo");
       else if (item.detail) btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
     }
     btn.onclick = async () => {
@@ -3125,6 +3373,22 @@ function updateStats() {
   setText("totalCount", total);
   setText("doneCount", done);
   setText("todoCount", Math.max(0, total - done));
+  // 答题卡收起时那条细栏显示进度（原先只显示「答题卡已收起」，白占一行高度）
+  const card = document.querySelector(".answer-card-wrap");
+  if (card) card.dataset.summary = total ? `已做 ${done} / ${total} 题` : "答题卡";
+  updateWrongBadge();
+}
+
+/* 刷新后能安全回到的导航模式（P-9 / S8）。
+   考试有草稿机制、智能训练有会话状态，各有专门的恢复入口，不走这条路径。 */
+const RESTORABLE_MODES = ["practice", "wrong", "favorite", "progress", "training"];
+
+function persistLastMode() {
+  if (!state.user || isAdmin() || !state.storage.settings) return;
+  const next = RESTORABLE_MODES.includes(state.mode) ? state.mode : "";
+  if ((state.storage.settings.lastMode || "") === next) return;
+  state.storage.settings.lastMode = next;
+  scheduleSave();
 }
 
 function renderMode() {
@@ -3135,6 +3399,7 @@ function renderMode() {
   document.body.dataset.mode = state.mode;
   scheduleNavIndicator();
   renderVerifyModeControls();
+  persistLastMode();
 }
 
 function ensureNavIndicator() {
@@ -3176,6 +3441,11 @@ function scheduleNavIndicator() {
 }
 
 function currentVerifyMode() {
+  /* 考试期间一律按「交卷后统一验证」处理 —— 由**模式**决定，而不是去改用户的偏好。
+     旧实现在 startExamPaper 里把 settings.verifyMode 改成 "paper" 并 scheduleSave()，
+     但全文件没有任何地方恢复 → 用户考一次试后，之后**所有练习**被永久改成「统一验证」，
+     而且已经同步到服务器（换设备也是错的）。见 docs/VERSIONS.md。 */
+  if (state.mode === "exam") return "paper";
   const stored = state.storage.settings?.verifyMode;
   if (stored === "single") return "instant";
   return ["paper", "instant", "review"].includes(stored) ? stored : "paper";
@@ -3376,7 +3646,14 @@ function renderTraining() {
   const smart = state.storage.smartPractice;
   const canContinueSmart = canContinueSmartPractice(smart);
   const analysisReady = state.analysisCourseId === Number(state.currentCourse?.id || 0) && state.analysisQuestions.length;
-  const previewContext = { items, stats, due, weak, analysisReady };
+  /* 卡片题量用「真实生成逻辑」算出来，避免文案与实际题单不符（旧实现是估算公式，
+     实测卡片写「20 题」而点进去生成 60 题）。这里算一次给三张卡片共用，避免重复遍历题库。 */
+  const previewCounts = {
+    smart: buildSmartPracticeIds(courseStore, {}).length,
+    similar: Math.min(80, buildSimilarWrongIds(courseStore).length),
+    sprint: Math.min(100, buildSprintPracticeIds(courseStore).length),
+  };
+  const previewContext = { items, stats, due, weak, analysisReady, counts: previewCounts };
   const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
   const similarPreview = previewPracticePlan("similar", courseStore, previewContext);
   const sprintPreview = previewPracticePlan("sprint", courseStore, previewContext);
@@ -3468,19 +3745,12 @@ function previewPracticePlan(type, courseStore, context = {}) {
   const weakCount = Array.isArray(context.weak) ? context.weak.length : 0;
   const undoneCount = items.length ? Math.max(0, items.length - doneCount) : 0;
   if (loading && !items.length) return "正在计算";
-  if (type === "smart") {
-    const estimate = Math.min(60, Math.max(0, dueCount + wrongRecords.length + weakCount * 8 + Math.min(undoneCount, 20)));
-    return estimate ? `${estimate} 题 · 错题优先` : "自动生成 · 错题优先";
-  }
-  if (type === "similar") {
-    const repeated = wrongRecords.filter(([, item]) => Number(item.count || 0) >= 2).length;
-    const estimate = Math.min(80, repeated ? repeated * 6 : wrongRecords.length * 4);
-    return `${estimate || 0} 题 · 同章同型`;
-  }
-  if (type === "sprint") {
-    const estimate = Math.min(100, dueCount + wrongRecords.length + weakCount * 10 + Math.min(undoneCount, 40));
-    return estimate ? `${estimate} 题 · 冲刺组合` : "自动生成 · 冲刺组合";
-  }
+  /* 题量直接取「真实生成逻辑」的结果（context.counts 由 renderTraining 预算一次），
+     不再用估算公式 —— 旧公式与 buildXxxIds 的填充逻辑不一致，文案必然对不上。 */
+  const count = Number(context.counts?.[type] || 0);
+  if (type === "smart") return count ? `${count} 题 · 错题优先` : "自动生成 · 错题优先";
+  if (type === "similar") return count ? `${count} 题 · 同章同型` : "自动生成 · 同章同型";
+  if (type === "sprint") return count ? `${count} 题 · 冲刺组合` : "自动生成 · 冲刺组合";
   return "";
 }
 
@@ -3536,7 +3806,7 @@ function renderStudyDashboard(courseStore, stats, items) {
       <div class="study-card">
         <span>今日练习</span>
         <b>${today.total} 题</b>
-        <small>已确认 ${today.verified} 题 · 答对 ${today.correct} 题 · ${today.rate}%</small>
+        <small>已确认 ${today.verified} 题 · 答对 ${today.correct} 题 · ${today.rate}%${today.durationMs ? ` · 用时 ${formatDuration(today.durationMs)}` : ""}</small>
       </div>
       <div class="study-card">
         <span>薄弱章节</span>
@@ -4614,10 +4884,10 @@ function todayKey() {
 
 function getTodayActivity(courseId = state.currentCourse?.id) {
   const day = state.storage.dailyActivity?.[todayKey()];
-  if (!day) return { total: 0, verified: 0, correct: 0, rate: 0 };
+  if (!day) return { total: 0, verified: 0, correct: 0, rate: 0, durationMs: 0 };
   if (!courseId) {
     const rate = day.verified ? Math.round(Number(day.correct || 0) / Number(day.verified || 1) * 100) : 0;
-    return { total: Number(day.total || 0), verified: Number(day.verified || 0), correct: Number(day.correct || 0), rate };
+    return { total: Number(day.total || 0), verified: Number(day.verified || 0), correct: Number(day.correct || 0), rate, durationMs: Number(day.durationMs || 0) };
   }
   const course = day.courses?.[String(courseId)] || {};
   const verified = Number(course.verified || 0);
@@ -4627,12 +4897,63 @@ function getTodayActivity(courseId = state.currentCourse?.id) {
     verified,
     correct,
     rate: verified ? Math.round(correct / verified * 100) : 0,
+    durationMs: Number(course.durationMs || 0),
   };
 }
 
 function dateKey(d) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/* 学习时长的人类可读文案（S6）。 */
+function formatDuration(ms) {
+  const minutes = Math.floor(Number(ms || 0) / 60000);
+  if (minutes < 1) return "不到 1 分钟";
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} 小时 ${rest} 分` : `${hours} 小时`;
+}
+
+/* 错题本导航项上的「待复习」角标（S11）。
+   到期数在 isReviewDue 里算好但只在用户主动打开训练页时才可见，这里提到导航上。 */
+function updateWrongBadge() {
+  const buttons = document.querySelectorAll('.nav-item[data-mode="wrong"]');
+  const count = (!state.user || isAdmin() || !state.currentCourse)
+    ? 0
+    : getWrongRecordsForCurrentCourse(peekCourseStore()).filter(([, item]) => isReviewDue(item)).length;
+  buttons.forEach((btn) => {
+    if (count > 0) btn.dataset.badge = count > 99 ? "99+" : String(count);
+    else delete btn.dataset.badge;
+  });
+}
+
+/* 用户端数据导出/备份（S4）。
+   此前全项目只有管理端能下载数据，学员无法自己备份进度。 */
+function exportUserData() {
+  if (!state.user) return;
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    user: state.user,
+    revision: state.storageRevision,
+    data: state.storage,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `yunxi-${state.user}-${dateKey(new Date())}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("已导出备份文件");
+}
+
+function bindAccountMenuActions() {
+  const btn = $("exportDataBtn");
+  if (btn) btn.onclick = () => exportUserData();
 }
 
 function renderProgressTrend() {
@@ -4704,7 +5025,7 @@ function renderProgressTrend() {
 
 async function renderAdminDashboard() {
   document.body.classList.add("admin-view");
-  setText("courseTitle", "管理员数据看板");
+  setCourseTitle("管理员数据看板");
   setText("courseMeta", "查看账号进度、管理题库更新");
   $("adminDashboard").classList.remove("hidden");
   $("questionView").classList.add("hidden");
@@ -6921,6 +7242,18 @@ function renderExamHistoryDetails(item) {
   `;
 }
 
+/* 把当前组卷章节勾选写进 settings.examChapters（按科目 id 归档）。 */
+function persistExamChapters() {
+  if (!state.currentCourse || isAdmin()) return;
+  state.storage.settings ||= {};
+  const map = state.storage.settings.examChapters && typeof state.storage.settings.examChapters === "object"
+    ? state.storage.settings.examChapters
+    : {};
+  map[String(state.currentCourse.id)] = Array.from(state.examSelectedChapters || []).map(Number).filter(Boolean);
+  state.storage.settings.examChapters = map;
+  scheduleSave();
+}
+
 function renderExamHome() {
   setPanelPage(true);
   stopExamTimer();
@@ -6929,7 +7262,12 @@ function renderExamHome() {
   setText("answerToggleBtn", "显示答案");
   const rule = getExamRule();
   const parts = normalizeExamParts(rule);
-  state.examSelectedChapters = null;
+  /* 组卷章节选择按科目记忆：换科目时重置（章节 id 不通用），回同一科目恢复上次勾选。
+     存的是空数组（用户清空过但没组卷）时按「默认全选」处理。 */
+  const savedExamChapters = state.storage.settings?.examChapters?.[String(state.currentCourse?.id || 0)];
+  state.examSelectedChapters = Array.isArray(savedExamChapters) && savedExamChapters.length
+    ? new Set(savedExamChapters.map(Number).filter(Boolean))
+    : null;
   $("questionBody").classList.add("hidden");
   $("emptyState").classList.remove("hidden");
   $("emptyState").innerHTML = `
@@ -6978,26 +7316,70 @@ function renderExamHome() {
     </div>
   `;
   bindExamDraftActions();
+  /* 章节一个都没勾选时禁用「开始组卷」，并给出 title 提示 ——
+     否则用户点「清空」后会以为还能出卷（旧行为会悄悄给出全章节卷）。 */
+  const syncStartExamBtn = (persist = false) => {
+    const btn = $("startExamBtn");
+    if (!btn) return;
+    const noneChapter = !(state.examSelectedChapters && state.examSelectedChapters.size);
+    /* 题量全填 0 = 用户把每种题型都排除了，等同于要一份空卷 —— 必须拦住。
+       旧行为会悄悄生成一整份卷子（实测填 0 仍出 80 题）。 */
+    const noCount = !rule.parts.some((part, index) => {
+      const checked = $("examPart" + index)?.checked !== false;
+      const value = Number($("examPartCount" + index)?.value ?? part.count);
+      return checked && Number.isFinite(value) && value > 0;
+    });
+    btn.disabled = !parts.length || noneChapter || noCount;
+    btn.title = noneChapter
+      ? "请至少选择一个章节"
+      : noCount
+        ? "请至少为一个题型设置题量（当前全部为 0）"
+        : "";
+    if (persist) persistExamChapters();
+  };
   $("examSelectAllChapters").onclick = () => {
     state.examSelectedChapters ||= new Set();
     document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
       input.checked = true;
       state.examSelectedChapters.add(Number(input.value || 0));
     });
+    syncStartExamBtn(true);
   };
   $("examSelectNoChapters").onclick = () => {
     state.examSelectedChapters.clear();
     document.querySelectorAll("[data-exam-chapter]").forEach((input) => input.checked = false);
+    syncStartExamBtn(true);
   };
   bindExamChapterTree();
+  /* 事件委托：展开/收起会重绘 .exam-chapter-list 的 innerHTML，但容器本身不变，
+     所以把监听挂在容器上（挂在 input 上会被重绘冲掉）。 */
+  document.querySelector(".exam-chapter-list")?.addEventListener("change", () => syncStartExamBtn(true));
+  /* 题量输入/勾选变化也要重算「开始组卷」是否可用（题量全 0 时禁用）。 */
+  rule.parts.forEach((part, index) => {
+    $("examPart" + index)?.addEventListener("change", () => syncStartExamBtn());
+    $("examPartCount" + index)?.addEventListener("input", () => syncStartExamBtn());
+  });
+  syncStartExamBtn();
   $("startExamBtn").onclick = () => {
     if (!parts.length) {
       toast("当前题库没有可用于组卷的题型");
       return;
     }
+    if (!(state.examSelectedChapters && state.examSelectedChapters.size)) {
+      toast("请至少选择一个章节");
+      return;
+    }
+    if (!getExamConfigFromForm(rule).parts.length) {
+      toast("请至少为一个题型设置题量（当前全部为 0）");
+      return;
+    }
     state.examConfig = getExamConfigFromForm(rule);
     startExamPaper().catch((err) => toast(err.message));
   };
+  // ⚠️ 必须刷新状态条：本函数上面已经把 `state.exam` 置 null 并停了计时，
+  // 但不调这一句的话 `#examStatus` 会**保留上一场的内容且不隐藏** ——
+  // 实测交卷后回到考场首页，顶部还挂着「模拟考场 149:55 … 得分 0/100，正确率 0%」。
+  renderExamStatus();
 }
 
 async function startExamPaper() {
@@ -7015,16 +7397,22 @@ async function startExamPaper() {
     return;
   }
   if (existingDraft) clearExamDraft();
-  state.storage.settings ||= {};
-  state.storage.settings.verifyMode = "paper";
+  /* 这里**不再**写 state.storage.settings.verifyMode（详见 currentVerifyMode 的注释）：
+     考试期间的验证模式由 state.mode 决定，考完自动恢复用户原本的偏好。 */
   state.verifyMode = "paper";
-  scheduleSave();
   $("emptyState").innerHTML = `<strong>正在组卷...</strong><span>按章节比例抽取试题。</span>`;
   const scoreMap = {};
   const seen = new Set();
   state.questions = [];
   const selectedIds = new Set((rule.selectedChapterIds || []).map(Number));
-  const examChapters = selectedIds.size ? examChaptersFromIds(Array.from(selectedIds)) : examChapterGroups();
+  /* 一个章节都没选时**不要**回退成全章节 —— 那会让「清空」按钮的语义和它的名字相反
+     （用户点「清空」期望不出卷，实际拿到的是全章节卷）。改为明确提示并退回考场首页。 */
+  if (!selectedIds.size) {
+    toast("请至少选择一个章节");
+    renderExamHome();
+    return;
+  }
+  const examChapters = examChaptersFromIds(Array.from(selectedIds));
   for (const part of parts) {
     const selected = [];
     const allocations = allocateExamCounts(part, examChapters);
@@ -7467,6 +7855,7 @@ function saveCorrectionDialog() {
   state.storage.corrections = state.storage.corrections.slice(0, 500);
   scheduleSave();
   closeCorrectionDialog();
+  renderQuestion();   // 立刻把「已提交纠错」角标画出来，不用翻页才看到（S12 闭环）
   toast("纠错反馈已保存");
 }
 
@@ -7563,7 +7952,6 @@ bindQuestionSwipe();
 
 document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
   btn.onclick = async () => {
-    setMobileMenu(false);
     setMobileTools(false);
     setMobileActions(false);
     if (isAdmin()) {
@@ -7641,7 +8029,7 @@ $("confirmPassword").addEventListener("keydown", (e) => {
   if (e.key === "Enter") changePassword().catch((err) => toast(err.message));
 });
 $("logoutBtn").onclick = () => logout().catch((err) => toast(err.message));
-$("mobileMenuBtn").onclick = () => setMobileMenu(!state.mobileMenuOpen);
+initAccountMenu();
 $("mobileToolsBtn").onclick = () => setMobileTools(!state.mobileToolsOpen);
 $("answerCardCollapseBtn").onclick = () => {
   state.answerCardUserTouched = true;
@@ -7684,7 +8072,8 @@ $("adminUserNameInput").addEventListener("keydown", (event) => {
 $("adminUserModal").addEventListener("click", (event) => {
   if (event.target === $("adminUserModal")) closeAdminUserDialog();
 });
-if ($("coursePickerBtn")) $("coursePickerBtn").onclick = () => setCoursePicker(!state.pickerOpen);
+if ($("navCourseTitle")) $("navCourseTitle").onclick = toggleCoursePicker;
+if ($("courseTitle")) $("courseTitle").onclick = toggleCoursePicker;
 $("searchToggleBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
 $("filterBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
 $("printBtn").onclick = openPrintDialog;
@@ -7710,9 +8099,19 @@ $("zoomOutBtn").onclick = () => changeZoom(-0.1);
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
 document.addEventListener("fullscreenchange", updateFullscreenState);
 document.addEventListener("keydown", handleGlobalShortcuts);
+// 卡片高度会因展开/收起、翻页、内容重排而变，用 ResizeObserver 让 --answer-card-h 始终跟上
+(function watchAnswerCardSpace() {
+  const card = document.querySelector(".answer-card-wrap");
+  if (!card) return;
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(syncAnswerCardSpace).observe(card);
+  }
+  syncAnswerCardSpace();
+})();
 window.addEventListener("resize", debounce(() => {
   scheduleNavIndicator();
   applyResponsiveAnswerCard();
+  syncAnswerCardSpace();
 }, 120));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
@@ -7721,10 +8120,16 @@ document.addEventListener("visibilitychange", () => {
       saveExamDraft();
     }
     if (state.storageDirty) {
-      saveUserData().catch(() => flushPendingSaveBeacon());
+      saveUserData().catch(() => {
+        /* 页面已隐藏，弹不出对话框 → 退回 sendBeacon 再存一次；
+           若 beacon 也发不出去，把保存状态标成失败，用户切回来能立刻看到。 */
+        if (!flushPendingSaveBeacon()) handleUserSaveError(new Error("保存失败，请检查网络后重试"));
+      });
     }
     return;
   }
+  /* 回到前台时，如果还有未保存的改动（例如刚才那次保存失败），补一次保存。 */
+  if (state.user && state.storageDirty) scheduleSave();
   if (state.user && refreshDailyTrainingState()) {
     scheduleSave();
     if (state.mode === "training") renderTraining();

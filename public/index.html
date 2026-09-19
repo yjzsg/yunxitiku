@@ -2,21 +2,29 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>云习题库</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <script>
     // 主题必须在样式表之前定下来，否则刷新时先渲染浅色再切暗色，会白闪一下。
     (function () {
-      var t = "light";
+      var t = "light", choice = "light";
       try {
         var saved = localStorage.getItem("yunxi-theme");
-        if (saved === "dark" || saved === "eye" || saved === "light") t = saved;
+        if (saved === "auto") {
+          choice = "auto";
+          t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        } else if (saved === "dark" || saved === "eye" || saved === "light") {
+          t = choice = saved;
+        }
       } catch (e) { /* 隐私模式下 localStorage 可能不可用，回落到浅色 */ }
       document.documentElement.setAttribute("data-theme", t);
+      document.documentElement.setAttribute("data-theme-choice", choice);
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=20260917-auth1"><link rel="stylesheet" href="/drawer.css?v=3">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#6265ef">
+  <link rel="stylesheet" href="/style.css?v=20260919-ui6"><link rel="stylesheet" href="/drawer.css?v=4">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -38,6 +46,7 @@
         <button type="button" data-theme-set="light">浅色</button>
         <button type="button" data-theme-set="dark">暗色</button>
         <button type="button" data-theme-set="eye">护眼</button>
+        <button type="button" data-theme-set="auto">跟随系统</button>
       </div>
       <label class="login-check">
         <input type="checkbox" checked disabled>
@@ -61,6 +70,13 @@
 
   <div id="appShell" class="app-shell hidden">
     <header class="main-nav">
+      <!-- 手机端顶栏左侧的科目名。桌面端（≥761px）顶栏已有 6 个导航项，本元素隐藏。
+           文案由 app.js 的 setCourseTitle() 与内容区的 #courseTitle 同步。
+           ⚠️ 手机端同时会隐藏内容区的 .course-head —— 两边显示的是同一份文案，
+           不隐藏就会在顶栏下面紧跟着重复一行。管理视图也一样（那边 .course-head
+           同样只显示「管理员数据看板」一个标题）。 -->
+      <button id="navCourseTitle" class="nav-course-title" type="button"
+              title="切换科目" aria-haspopup="true" aria-expanded="false">请选择科目</button>
       <button class="nav-item study-only" data-mode="practice">考试题库</button>
       <button class="nav-item study-only active" data-mode="training">智能训练</button>
       <button class="nav-item study-only" data-mode="exam">模拟考场</button>
@@ -68,17 +84,51 @@
       <button class="nav-item study-only" data-mode="progress">学习看板</button>
       <button class="nav-item study-only" data-mode="favorite">收藏试题</button>
       <button class="hidden" data-action="refresh" type="button">刷新列表</button>
+      <!-- 账号区：只放一个头像按钮，其余（用户名 / 保存状态 / 配色模式 / 退出）
+           全部收进下拉菜单。手机上顶栏因此只剩「工具 + 账号」两个图标。
+           `#accountLabel` / `#saveStatusLabel` / `[data-theme-set]` 的 id 与属性
+           原样保留，JS 接线不受影响。 -->
       <div class="account-box">
-        <span id="accountLabel">账号：未登录</span>
-        <span id="saveStatusLabel" class="save-status" data-status="idle"></span>
-        <div class="theme-switch theme-switch-compact" data-theme-switch role="group" aria-label="配色模式">
-          <button type="button" data-theme-set="light" title="浅色" aria-label="浅色">浅</button>
-          <button type="button" data-theme-set="dark" title="暗色" aria-label="暗色">暗</button>
-          <button type="button" data-theme-set="eye" title="护眼" aria-label="护眼">护</button>
+        <button id="accountMenuBtn" class="account-btn" type="button"
+                aria-haspopup="true" aria-expanded="false" aria-controls="accountMenu"
+                aria-label="账号菜单" title="账号">
+          <svg class="account-avatar" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="8.2" r="3.9"></circle>
+            <path d="M4.8 20.4c0-4.05 3.2-6.5 7.2-6.5s7.2 2.45 7.2 6.5"></path>
+          </svg>
+        </button>
+        <div id="accountMenu" class="account-menu hidden">
+          <div class="account-menu-head">
+            <span id="accountLabel">账号：未登录</span>
+            <span id="saveStatusLabel" class="save-status" data-status="idle"></span>
+          </div>
+          <div class="account-menu-group">
+            <span class="account-menu-title">配色模式</span>
+            <div class="theme-switch theme-switch-compact" data-theme-switch role="group" aria-label="配色模式">
+              <button type="button" data-theme-set="light" title="浅色" aria-label="浅色">浅</button>
+              <button type="button" data-theme-set="dark" title="暗色" aria-label="暗色">暗</button>
+              <button type="button" data-theme-set="eye" title="护眼" aria-label="护眼">护</button>
+              <button type="button" data-theme-set="auto" title="跟随系统" aria-label="跟随系统">跟</button>
+            </div>
+          </div>
+          <button id="exportDataBtn" type="button">导出我的数据</button>
+          <button id="logoutBtn" type="button">退出登录</button>
         </div>
-        <button id="logoutBtn">退出</button>
       </div>
     </header>
+
+    <!-- 手机端底部悬浮标签栏（只在 ≤760px 显示；桌面端仍是顶栏导航）。
+         按钮沿用 .nav-item[data-mode]：点击切页、选中态（renderMode 切 .active）、
+         图标（.nav-item[data-mode="x"]::before）全部由既有逻辑接管，不需要额外 JS。
+         标签用 2 字短名（窄屏 6 个并排），全名放 title / aria-label。 -->
+    <nav class="mobile-tabbar" aria-label="主导航">
+      <button class="nav-item" data-mode="practice" title="考试题库" aria-label="考试题库">题库</button>
+      <button class="nav-item" data-mode="training" title="智能训练" aria-label="智能训练">训练</button>
+      <button class="nav-item" data-mode="exam" title="模拟考场" aria-label="模拟考场">考场</button>
+      <button class="nav-item" data-mode="wrong" title="错题本" aria-label="错题本">错题</button>
+      <button class="nav-item" data-mode="progress" title="学习看板" aria-label="学习看板">看板</button>
+      <button class="nav-item" data-mode="favorite" title="收藏试题" aria-label="收藏试题">收藏</button>
+    </nav>
 
     <section class="toolbar">
       <button id="searchToggleBtn">搜索</button>
@@ -121,10 +171,10 @@
       <section class="question-pane">
         <div class="course-head">
           <div>
-            <div id="courseTitle" class="course-title">请选择科目</div>
+            <button id="courseTitle" class="course-title" type="button"
+                    title="切换科目" aria-haspopup="true" aria-expanded="false">请选择科目</button>
             <div id="courseMeta" class="course-meta">读取本机已更新题库 · 当前账号 <span id="userName">未登录</span></div>
           </div>
-          <button id="coursePickerBtn" class="course-picker-btn" type="button">切换科目</button>
         </div>
 
         <div id="examStatus" class="exam-status hidden"></div>
@@ -161,7 +211,7 @@
           <button id="wrongBtn">纠错</button>
         </div>
 
-        <footer class="answer-card-wrap">
+        <footer class="answer-card-wrap" data-summary="答题卡">
           <div class="stats">
             <span>总题量：<b id="totalCount">0</b>题</span>
             <span>已完成：<b id="doneCount">0</b>题</span>
@@ -169,6 +219,7 @@
             <span><i class="mark selected"></i>已做</span>
             <span><i class="mark wrong"></i>错误</span>
             <span><i class="mark correct"></i>正确</span>
+            <span><i class="mark todo"></i>未做</span>
           </div>
           <div id="answerCard" class="answer-card"></div>
         </footer>
@@ -264,7 +315,17 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20260917-auth1"></script>
+  <script src="/app.js?v=20260919-polish1"></script>
+  <script>
+    // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("/sw.js").catch(function (err) {
+          console.warn("service worker 注册失败", err);
+        });
+      });
+    }
+  </script>
 </body>
 </html>
 

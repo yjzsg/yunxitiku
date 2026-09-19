@@ -1,0 +1,19 @@
+{
+  "name": "云习题库",
+  "short_name": "云习题库",
+  "description": "模拟考试 · 错题回顾 · 进度追踪",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#6265ef",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

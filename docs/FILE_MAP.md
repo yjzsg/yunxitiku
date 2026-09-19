@@ -14,9 +14,11 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `public/index.html` | 页面骨架、主要 DOM 节点 |
-| `public/style.css` | 页面样式、桌面端和手机端适配 |
-| `public/app.js` | 登录、刷题、模拟考场、管理员面板等前端逻辑 |
+| `public/index.html` | 页面骨架、主要 DOM 节点；`<head>` 里还有主题防白闪脚本，改样式表要同步改 `style.css?v=` 的版本号 |
+| `public/style.css` | 页面样式、桌面端和手机端适配；顶部是配色令牌（`:root` / `[data-theme="dark"]` / `[data-theme="eye"]`），文件末尾是「玻璃层」段 |
+| `public/app.js` | 登录、刷题、模拟考场、管理员面板等前端逻辑；主题切换与 canvas 跟随重绘也在这里 |
+| `public/manifest.json` | PWA 清单（名称 / 图标 / 主题色）；**需要 HTTPS** 才能用于安装 |
+| `public/sw.js` | Service Worker：只缓存同源静态资源，`/api/` 一律走网络，导航请求 network-first；**需要 HTTPS/localhost** 才会注册 |
 
 ## 后端
 
@@ -45,6 +47,15 @@
 ## 修改建议
 
 - 改页面布局、按钮、移动端适配：优先看 `public/index.html`、`public/style.css`、`public/app.js`。
+- 改响应式布局：`public/style.css` 里断点较多（420 / 760 / 1180 / 1280 / 1440 / 1600），
+  改动后**必须跨分辨率复查**——光看 1440 看不出 768 下题干会被挤成一字一行。
+  另外窄屏默认停在「选科目」页，要先点「进入做题」才能看到答题区。
+  注意**同一个元素在不同断点/状态下 `position` 可能不一样**：答题卡 `.answer-card-wrap`
+  在 `>1440` 与 `≤760 收起` 时是 `relative`（在流内），在 `761~1440` 与 `≤760 展开` 时是
+  `fixed` 覆盖层（会盖住下面的东西，需要预留空间）。改它之前先量一遍 `getComputedStyle().position`。
+  断点全表见 `docs/VERSIONS.md` 的「断点与『跟着窗口缩放』的行为」。
+- 改配色 / 主题 / 玻璃效果：`public/style.css` 顶部的令牌块（`:root`、`[data-theme="dark"]`、`[data-theme="eye"]`）
+  加文件末尾的「玻璃层」段。改完必须复查对比度（正文 ≥ 4.5:1），做法见 `docs/VERSIONS.md` 的「前端主题与玻璃层」。
 - 改接口、数据导入导出、账号权限：优先看 `src/YunxiTiku.Web/Program.cs`。
 - 改 NAS 部署：优先看 `docker-compose.yml`。
 - 改镜像构建：优先看 `Dockerfile` 和 `.github/workflows/docker.yml`。

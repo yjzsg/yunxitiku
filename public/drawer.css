@@ -61,11 +61,24 @@
   }
 }
 
-/* Keep the main question column clear on narrow desktop viewports. */
-@media screen and (min-width: 761px) and (max-width: 1100px) {
-  .question-pane > .answer-card-wrap {
-    right: auto;
-    width: min(clamp(280px, 42vw, 520px), calc(100vw - 16px));
-    max-height: min(46vh, calc(100dvh - 16px));
-  }
-}
+/* 这里原有一条 761–1100px 的「42vw 左下角浮层」规则：
+     @media screen and (min-width: 761px) and (max-width: 1100px) {
+       .question-pane > .answer-card-wrap {
+         right: auto;
+         width: min(clamp(280px, 42vw, 520px), calc(100vw - 16px));
+         max-height: min(46vh, calc(100dvh - 16px));
+       }
+     }
+   注释写的是「给窄桌面视口让开主问题栏」，但**题目区在这个区间是单列全宽**
+   （实测 1080px 下 `.question-pane` 的 `grid-template-columns` 只有 `1046px` 一列），
+   浮层贴左只会**遮住问题栏本身**，同时把右侧空着 —— 效果和注释里的意图正好相反。
+   实测 1080×1080：卡片 `[25, 743, 454, 312]`，`width: 453.594px`（= 42vw），
+   右侧空出 584px；而 1101–1440px 本来就是铺满底部的。
+
+   而且卡片只有 404px 宽时，底部图例的 7 项放不下 → 挤成 2~3 行
+   （「○ 未做」孤零零占一行）。
+
+   已删除，让 761–1100px 与 1101–1440px 一致铺满底部。
+   内容不会被永久遮住：`.question-pane` 的 `padding-bottom` 由 `--answer-card-h`
+   动态跟随卡片高度（实测卡片 312px 高 → padding-bottom 328px），可以滚出来。
+   若将来真要「让开主问题栏」，前提是那个区间改成多列布局；单列下这条规则没有意义。 */

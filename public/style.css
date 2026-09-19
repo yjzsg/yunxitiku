@@ -1,12 +1,18 @@
 :root {
   /* ── 表面 ── */
   --bg: #f8fafc;
+  /* 极淡的单色明暗：给 backdrop-filter 提供「可糊的东西」。
+     单色系（白 → 中性灰），幅度 ~5%，平滑过渡所以看不出「渐变」，只有一点光感。 */
+  --bg-image:
+    radial-gradient(95% 70% at 12% 0%, rgba(255, 255, 255, 0.90), transparent 62%),
+    radial-gradient(85% 70% at 100% 100%, rgba(100, 116, 139, 0.10), transparent 66%),
+    linear-gradient(165deg, #fbfcfe 0%, #eef2f9 58%, #f7f9fc 100%);
   --bg-soft: #eef2ff;
-  --card: #ffffff;
-  --card-soft: #fbfdff;
-  --surface-2: #f1f5f9;
-  --surface-3: #eef2f7;
-  --surface-4: #e2e8f0;
+  --card: rgba(255, 255, 255, 0.62);
+  --card-soft: rgba(255, 255, 255, 0.50);
+  --surface-2: rgba(241, 245, 249, 0.60);
+  --surface-3: rgba(238, 242, 247, 0.60);
+  --surface-4: rgba(226, 232, 240, 0.66);
   --violet-50: #f5f3ff;
   --question-bg: #f5faf7;
 
@@ -15,7 +21,7 @@
   --text-2: #111827;
   --text-3: #334155;
   --text-4: #475569;
-  --muted: #64748b;
+  --muted: #5e6c82;
   --muted-2: #94a3b8;
   --muted-3: #7b8794;
   --on-accent: #ffffff;
@@ -67,7 +73,7 @@
   --warning-text-4: #713f12;
 
   /* ── 危险 ── */
-  --danger: #dc2626;
+  --danger: #d61f1f;
   --danger-25: #fff7ed;
   --danger-50: #fef2f2;
   --danger-100: #fee2e2;
@@ -82,6 +88,39 @@
   /* ── 半透明分量：写 rgba(var(--x-rgb), α)，换主题只需换分量 ── */
   --bg-rgb: 248, 250, 252;
   --glass-rgb: 255, 255, 255;
+
+  /* ── 玻璃层（iOS 观感）──
+     彩色光晕：4 团大范围低饱和色团 + 线性底。玻璃要「有颜色可放大」，
+     背后是平的 saturate 就白搭。 */
+  --glass-border: rgba(255, 255, 255, 0.72);
+  --glass-highlight:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.98),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.42);
+  --glass-shade: inset 0 -1px 0 rgba(15, 23, 42, 0.05);
+  --glass-blur: 30px;
+  --glass-sat: 180%;
+  --glass-bright: 1.02;
+  --glass-shadow:
+    0 0 0 1px rgba(15, 23, 42, 0.045),
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 8px 18px rgba(15, 23, 42, 0.075),
+    0 24px 52px rgba(15, 23, 42, 0.16);
+  /* 卡片悬浮时的投影：比基准更重、更散，配合 translateY 做出「抬起来」的感觉 */
+  --lift-shadow: 0 4px 10px rgba(15, 23, 42, 0.10), 0 26px 46px rgba(15, 23, 42, 0.22);
+  --card-solid: #ffffff;
+  --card-ring: #ffffff;
+
+  /* ── 顶栏（玻璃条）：浅色保留品牌靛蓝，做成半透明 + 顶部镜面高光 ── */
+  --nav-bg: rgba(66, 52, 198, 0.84);
+  --nav-fg: #ffffff;
+  --nav-fg-soft: rgba(255, 255, 255, 0.90);
+  --nav-border: rgba(255, 255, 255, 0.26);
+  --nav-spec: rgba(255, 255, 255, 0.30);
+  --nav-shadow: 0 12px 30px rgba(52, 44, 170, 0.26);
+  --nav-pill-bg: rgba(255, 255, 255, 0.03);
+  --nav-pill-hover: rgba(255, 255, 255, 0.10);
+  --nav-pill-active-bg: rgba(255, 255, 255, 0.92);
+  --nav-pill-active-fg: #3b32c9;
   --on-accent-rgb: 255, 255, 255;
   --ink-rgb: 15, 23, 42;
   --slate-rgb: 148, 163, 184;
@@ -101,9 +140,19 @@
   --control-h: 38px;
   --control-h-sm: 34px;
   --space-page: 14px;
-  --radius-sm: 10px;
-  --radius: 14px;
-  --radius-lg: 18px;
+
+  /* ── 圆角（统一尺度：小元素 → 控件 → 卡片 → 面板 → 胶囊）──
+     原先散落 16 种硬编码值（4/6/8/9/10/11/12/13/14/15/16/18/20/22/24/999），
+     同一类组件在不同地方圆角不同，观感就「不统一」。这里收敛成 5 档 + 胶囊，
+     样式表里所有 border-radius 一律引用令牌，不再写裸数值。 */
+  --radius-2xs: 8px;    /* 小元素：图例色块、题号格、开关 */
+  --radius-sm: 12px;    /* 控件：按钮、输入框、小卡 */
+  --radius: 16px;       /* 卡片 */
+  --radius-lg: 20px;    /* 大面板 / 弹窗 / 登录面板 */
+  --radius-pill: 999px; /* 胶囊：标签、角标、主按钮 */
+
+  /* 手机端底部标签栏高度（只在 ≤760px 用到）*/
+  --tabbar-h: 54px;
   --font: "Inter", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   --icon-font: "Segoe UI Symbol", "Segoe UI Emoji", "Microsoft YaHei", sans-serif;
 }
@@ -147,7 +196,7 @@ button {
   justify-content: center;
   gap: 7px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   padding: 0 13px;
   background: var(--card);
   color: var(--text);
@@ -181,7 +230,7 @@ input,
 select,
 textarea {
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--card);
   color: var(--text);
   transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
@@ -264,7 +313,7 @@ body.is-admin .admin-only {
   position: fixed;
   inset: 8%;
   pointer-events: none;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(var(--glass-rgb), 0.44);
   filter: blur(70px);
 }
@@ -276,8 +325,8 @@ body.is-admin .admin-only {
   gap: 17px;
   padding: 34px;
   border: 1px solid rgba(var(--glass-rgb), 0.68);
-  border-radius: 22px;
-  background: rgba(var(--glass-rgb), 0.78);
+  border-radius: var(--radius-lg);
+  background: rgba(var(--glass-rgb), 0.62);
   box-shadow: var(--shadow-lg);
   backdrop-filter: blur(18px);
 }
@@ -364,8 +413,12 @@ body.is-admin .admin-only {
 }
 
 .app-shell {
+  /* 刻意不设 min-width。原先这里有一条 `min-width: 980px`（桌面端至少 980px），
+     但 `@media screen` 和 `@media print` 里各有一处 `min-width: 0` 把它抵消了
+     （print 那处是多行选择器 `.app-shell, .workspace, .question-pane`），
+     屏幕与打印实测计算值恒为 0px —— 纯死代码，2026-09-18 移除。
+     窄屏行为由下方各断点接管：≤1180 / ≤760 / ≤420。 */
   height: 100vh;
-  min-width: 980px;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -393,7 +446,7 @@ body.is-admin .admin-only {
   justify-content: center;
   gap: 4px;
   border: 0;
-  border-radius: 13px;
+  border-radius: var(--radius-sm);
   padding: 7px 12px 10px;
   background: transparent;
   color: var(--on-accent);
@@ -441,7 +494,7 @@ body.is-admin .admin-only {
   right: 16px;
   bottom: 5px;
   height: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   transition: background-color 0.2s ease, left 0.2s ease, right 0.2s ease;
 }
@@ -467,7 +520,7 @@ body.is-admin .admin-only {
   align-items: center;
   min-height: 24px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border);
   background: var(--card-soft);
   color: var(--muted);
@@ -514,7 +567,7 @@ body.is-admin .admin-only {
   align-items: center;
   justify-content: center;
   min-height: 36px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0 12px;
   background: rgba(0, 0, 0, 0.2);
   font-size: 14px;
@@ -656,7 +709,7 @@ body.is-admin .admin-only {
 }
 
 .search-highlight {
-  border-radius: 6px;
+  border-radius: var(--radius-2xs);
   padding: 0 3px;
   background: var(--warning-150);
   color: var(--warning-text-4);
@@ -737,7 +790,7 @@ body.admin-view .workspace {
   align-content: center;
   gap: 4px;
   border: 1px solid transparent;
-  border-radius: 13px;
+  border-radius: var(--radius-sm);
   background: transparent;
   padding: 10px 12px;
   margin: 2px 0;
@@ -774,6 +827,12 @@ body.admin-view .workspace {
   color: var(--muted);
   font-size: 12px;
   font-weight: 500;
+}
+
+/* 选中条目的底是 --primary-50，--muted 在其上只有 4.26:1（低于 4.5），
+   这里的次要文字改用更深的 --text-4 */
+.course-item.active small {
+  color: var(--text-4);
 }
 
 .chapter-list {
@@ -818,7 +877,7 @@ body.admin-view .workspace {
   height: 26px;
   min-height: 26px;
   padding: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-2xs);
   border-color: var(--primary-200);
   background: var(--primary-50);
   color: var(--primary-ink);
@@ -850,7 +909,7 @@ body.admin-view .workspace {
   justify-content: stretch;
   gap: 8px;
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   padding: 8px 10px;
@@ -973,21 +1032,12 @@ body.admin-view .workspace {
   font-size: 13px;
 }
 
-.course-picker-btn {
-  display: none;
-  border-color: var(--primary-200);
-  background: var(--primary-50);
-  color: var(--primary-ink);
-  font-weight: 700;
-}
-
-
 .exam-paused-flag {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--warning-300);
   background: var(--warning-50);
   color: var(--warning);
@@ -1017,7 +1067,7 @@ body.admin-view .workspace {
   color: var(--primary-ink);
 }
 
-body.is-admin .course-picker-btn,
+
 body.admin-view .toolbar,
 body.admin-view .search-panel,
 body.admin-view .search-match-panel,
@@ -1026,7 +1076,6 @@ body.admin-view .course-pane,
 body.admin-view .question-actions,
 body.admin-view .answer-card-wrap,
 body.admin-view .nav-item,
-body.admin-view .mobile-menu-btn,
 body.admin-view .mobile-tools-btn {
   display: none !important;
 }
@@ -1076,7 +1125,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0 12px;
   background: var(--card);
   color: var(--text-4);
@@ -1114,7 +1163,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .description img {
   max-width: 100%;
   height: auto;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
 }
 
 .options {
@@ -1131,7 +1180,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   justify-content: stretch;
   gap: 12px;
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius);
   padding: 12px 14px;
   background: rgba(var(--glass-rgb), 0.88);
   color: var(--text);
@@ -1154,7 +1203,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   justify-content: center;
   align-self: center;
   justify-self: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-2);
   color: var(--text-4);
   font-size: 16px;
@@ -1227,7 +1276,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 }
 
 .question-tag-panel,
-.exam-review-panel,
 .analysis-table-card,
 .learning-signal-panel,
 .practice-context-panel,
@@ -1294,7 +1342,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   align-items: center;
   justify-content: center;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text-4);
   background: var(--bg);
   font-size: 13px;
@@ -1310,7 +1358,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
 .tag-pill {
   min-height: 30px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 5px 10px;
   color: var(--primary-ink);
   background: var(--primary-50);
@@ -1329,7 +1377,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .tag-presets button {
   min-height: 30px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text-4);
   background: var(--bg);
   font-size: 13px;
@@ -1349,14 +1397,10 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   padding: 0 12px;
 }
 
-.exam-review-panel {
-  display: grid;
-  gap: 8px;
-}
 
 .review-line {
   justify-content: space-between;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   padding: 9px 11px;
 }
 
@@ -1380,7 +1424,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .exam-case-split .stem,
 .exam-case-split .options,
 .exam-case-split .question-tag-panel,
-.exam-case-split .exam-review-panel,
 .exam-case-split .note-editor,
 .exam-case-split .answer {
   grid-column: 2;
@@ -1477,7 +1520,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   display: inline-block;
   vertical-align: -1px;
   margin-right: 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-2xs);
   border: 1px solid transparent;
 }
 
@@ -1496,6 +1539,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   border-color: var(--danger-500);
 }
 
+/* 图例「未做」：与 .card-cell 的默认态（含交卷后的 `todo`）**逐值同色** */
+.mark.todo {
+  background: var(--surface-4);
+  border-color: var(--muted);
+}
+
 .answer-card {
   display: block;
   max-height: none;
@@ -1512,7 +1561,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .card-page-btn {
   min-height: 32px;
   padding: 5px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   font-size: 13px;
 }
@@ -1540,10 +1589,17 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
 .card-cell {
   min-height: 36px;
-  border-radius: 12px;
-  border-color: var(--border-strong);
-  background: var(--bg);
-  color: var(--muted);
+  border-radius: var(--radius-sm);
+  /* 「未做」（以及交卷后的 `todo`，两者语义相同）统一用**中性灰**，
+     而不是 `var(--bg)`：
+       · `--bg` 在浅色是近白、在护眼却是豆沙绿 → 护眼里「未做」变成一整片绿格子，
+         和「正确」的绿撞车（实测填充色距离只有 18.5）
+       · 用中性灰后，图例里的 `.mark.todo` 和实体格子才**逐值一致**
+     用 `--surface-4`（半透明，会透出卡片底）+ `--muted` 边框 + `--text-3` 文字，
+     三主题都不用额外覆盖。 */
+  border-color: var(--muted);
+  background: var(--surface-4);
+  color: var(--text-3);
   font-size: 14px;
   font-weight: 750;
   box-shadow: none;
@@ -1636,7 +1692,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   width: 100%;
   padding: 11px 13px;
   border: 1px solid var(--warning-200);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--warning-50);
   color: var(--warning-text) !important;
 }
@@ -1648,7 +1704,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 14px;
   padding: 14px;
   border: 1px solid var(--primary-200);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--primary-50);
   box-shadow: var(--shadow-xs);
 }
@@ -1810,7 +1866,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   min-height: 28px;
   height: 28px;
   padding: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-2xs);
   color: var(--primary-ink);
   background: var(--primary-50);
 }
@@ -1828,7 +1884,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 8px;
   padding: 9px 10px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
 }
@@ -1860,7 +1916,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 10px;
   padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-xs);
 }
@@ -1876,7 +1932,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
 }
 
@@ -1905,7 +1961,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   align-items: center;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: var(--card);
 }
 
@@ -1949,7 +2005,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
 .primary-action {
   border: 1px solid transparent;
-  border-radius: 13px;
+  border-radius: var(--radius-sm);
   color: var(--on-accent);
   background: var(--primary);
   box-shadow: 0 10px 22px rgba(var(--primary-rgb), 0.24);
@@ -2065,7 +2121,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   min-height: 38px;
   padding: 0 14px;
   border-color: var(--primary-200);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--primary-50);
   color: var(--primary-ink);
   font-size: 13px;
@@ -2379,7 +2435,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 12px;
   padding: 11px 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
@@ -2414,7 +2470,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .training-history-progress {
   height: 8px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-4);
 }
 
@@ -2460,7 +2516,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   min-height: 34px;
   padding: 6px 10px;
   border-color: var(--primary-200);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--primary-50);
   color: var(--primary-ink);
   box-shadow: none;
@@ -2471,7 +2527,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   height: 24px;
   display: inline-grid;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--card);
   color: var(--primary-ink);
   font-size: 12px;
@@ -2493,7 +2549,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   max-width: 100%;
   height: auto;
   display: block;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--card);
 }
 
@@ -2515,7 +2571,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   align-items: center;
   gap: 10px;
   text-align: left;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   min-height: 44px;
 }
@@ -2544,7 +2600,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   min-width: 52px;
   min-height: 24px;
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 12px;
   font-style: normal;
   font-weight: 850;
@@ -2596,7 +2652,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 12px;
   padding: 12px;
   border: 1px solid var(--primary-200);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--primary-50);
 }
 
@@ -2619,7 +2675,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .plan-today-card em {
   flex: 0 0 auto;
   padding: 4px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--card);
   color: var(--primary-ink);
   font-size: 12px;
@@ -2639,7 +2695,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   align-items: center;
   gap: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   padding: 9px 10px;
   background: var(--bg);
 }
@@ -2702,7 +2758,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   color: var(--danger-800);
   background: var(--danger-50);
   border: 1px solid var(--danger-200);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   padding: 8px 11px;
 }
 
@@ -2735,7 +2791,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 14px;
   padding: 16px;
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-sm);
 }
@@ -2775,7 +2831,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 4px;
   min-height: 70px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--bg);
   text-align: center;
 }
@@ -2800,7 +2856,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   padding: 9px 11px;
   color: var(--muted);
@@ -2862,7 +2918,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .bank-editor-chapter-fields input {
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--card);
   color: var(--text);
   font-size: 14px;
@@ -2903,7 +2959,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   height: 44px;
   min-height: 44px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   padding: 0 12px;
   white-space: nowrap;
@@ -2963,7 +3019,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   align-items: start;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--card);
   padding: 10px 11px;
   color: var(--text);
@@ -3098,7 +3154,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 16px;
   padding: 16px;
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-sm);
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
@@ -3168,7 +3224,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 4px;
   min-height: 68px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--bg);
 }
 
@@ -3260,7 +3316,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 4px 9px;
   font-size: 12px;
   font-weight: 800;
@@ -3291,7 +3347,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .admin-actions button {
   min-height: var(--control-h-sm);
   padding: 0 10px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
 }
 
@@ -3323,7 +3379,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   display: grid;
   gap: 15px;
   border: 1px solid rgba(var(--glass-rgb), 0.42);
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   background: var(--card);
   padding: 20px;
   box-shadow: var(--shadow-md);
@@ -3402,7 +3458,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   min-height: 42px;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text-3);
   font-weight: 750;
@@ -3458,7 +3514,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   opacity: 0;
   pointer-events: none;
   border: 1px solid rgba(var(--ink-rgb), 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(var(--ink-rgb), 0.92);
   color: var(--on-accent);
   padding: 11px 17px;
@@ -3475,7 +3531,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   animation: questionFadeIn 0.22s ease;
 }
 
-.mobile-menu-btn,
+
 .mobile-tools-btn,
 .mobile-actions-btn {
   display: none;
@@ -3512,7 +3568,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .login-panel {
     padding: 24px;
-    border-radius: 20px;
+    border-radius: var(--radius-lg);
   }
 
   .login-panel h1 {
@@ -3536,37 +3592,19 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     overflow-y: visible;
   }
 
-  .mobile-menu-btn {
-    flex: 0 0 auto;
-    display: inline-flex;
-    min-height: 36px;
-    border-color: rgba(255, 255, 255, 0.28);
-    background: rgba(0, 0, 0, 0.22);
-    color: var(--on-accent);
-    font-weight: 750;
-  }
-
-  .mobile-menu-btn:hover {
-    background: rgba(0, 0, 0, 0.32);
-    color: var(--on-accent);
-  }
-
   .nav-item {
     display: none;
     min-width: 96px;
     min-height: 38px;
     flex-direction: row;
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
     padding: 0 10px;
     font-size: 13px;
   }
 
   .nav-item::before {
     font-size: 14px;
-  }
-
-  .nav-item.active,
-  body.mobile-menu-open .nav-item {
+  }.nav-item.active {
     display: inline-flex;
   }
 
@@ -3615,7 +3653,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-width: 0;
     min-height: 36px;
     padding: 0 7px;
-    border-radius: 11px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
     gap: 4px;
     white-space: nowrap;
@@ -3704,7 +3742,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-height: 0;
     max-height: calc(100dvh - 122px);
     grid-template-rows: auto minmax(116px, 24dvh) auto minmax(0, 1fr) auto;
-    border-radius: 16px;
+    border-radius: var(--radius);
   }
 
   body.picker-open .course-pane {
@@ -3731,7 +3769,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     z-index: 5;
     min-height: 42px;
     margin: 7px;
-    border-radius: 14px;
+    border-radius: var(--radius);
     justify-content: space-between;
     padding-inline: 12px;
   }
@@ -3755,7 +3793,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-width: 30px;
     height: 30px;
     min-height: 30px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
   }
 
   .chapter-item {
@@ -3766,7 +3804,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .question-pane {
     grid-template-rows: auto auto minmax(0, 1fr) auto auto;
-    border-radius: 16px;
+    border-radius: var(--radius);
   }
 
   .course-head {
@@ -3782,10 +3820,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .course-meta {
     font-size: 12px;
-  }
-
-  .course-picker-btn {
-    display: none;
   }
 
   .question-view {
@@ -3836,7 +3870,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     grid-template-columns: 34px minmax(0, 1fr);
     gap: 9px;
     padding: 10px;
-    border-radius: 14px;
+    border-radius: var(--radius);
     min-height: 54px;
   }
 
@@ -3863,7 +3897,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-width: 0;
     min-height: 36px;
     padding: 0 7px;
-    border-radius: 11px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
@@ -3920,7 +3954,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .card-cell {
     min-height: 31px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
@@ -3988,7 +4022,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .question-tag-panel,
-  .exam-review-panel,
   .analysis-table-card,
   .review-plan-panel {
     padding: 12px;
@@ -4061,7 +4094,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .admin-user-card {
     padding: 12px;
-    border-radius: 14px;
+    border-radius: var(--radius);
   }
 
   .admin-user-card-head {
@@ -4147,10 +4180,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     font-size: 28px;
   }
 
-  body.mobile-menu-open .nav-item {
-    min-width: 94px;
-  }
-
   .toolbar button,
   .question-actions button {
     padding-left: 5px;
@@ -4177,38 +4206,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .nav-item.active {
     flex: 0 0 auto;
     min-width: 94px;
-  }
-
-  .mobile-menu-btn {
-    min-width: 58px;
-    padding-inline: 10px;
-  }
-
-  body.mobile-menu-open .main-nav {
-    flex-wrap: wrap;
-    align-content: start;
-    gap: 8px;
-    padding-bottom: 9px;
-  }
-
-  body.mobile-menu-open .nav-item {
-    flex: 1 1 calc(33.333% - 8px);
-    min-width: 0;
-    order: 3;
-  }
-
-  body.mobile-menu-open .nav-item.active {
-    flex: 1 1 calc(33.333% - 8px);
-  }
-
-  body.mobile-menu-open .mobile-menu-btn {
-    order: 2;
-  }
-
-  body.mobile-menu-open .account-box {
-    order: 1;
-    flex: 1 1 100%;
-    justify-content: flex-end;
   }
 
   .account-box {
@@ -4284,7 +4281,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .answer-card-wrap {
-    border-radius: 0 0 16px 16px;
+    border-radius: 0 0 var(--radius) var(--radius);
   }
 
   .card-page-content {
@@ -4332,10 +4329,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     padding-inline: 8px;
   }
 
-  .mobile-menu-btn {
-    min-width: 54px;
-  }
-
   #accountLabel {
     max-width: 104px;
     padding-inline: 8px;
@@ -4355,9 +4348,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     --shadow-sm: 0 6px 18px rgba(15, 23, 42, 0.07);
     --shadow-md: 0 18px 38px rgba(15, 23, 42, 0.12);
     --shadow-lg: 0 28px 70px rgba(15, 23, 42, 0.16);
-    --radius-sm: 12px;
-    --radius: 14px;
-    --radius-lg: 16px;
     --font: "Inter", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
   }
 
@@ -4367,11 +4357,8 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   body {
     min-width: 0;
-    background:
-      linear-gradient(rgba(var(--primary-rgb), 0.035) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(var(--primary-rgb), 0.035) 1px, transparent 1px),
-      var(--bg);
-    background-size: 28px 28px, 28px 28px, auto;
+    /* 桌面端的 28px 网格纹理已去掉（折射回退后它只剩视觉噪声），底色交给 html。 */
+    background: transparent;
     color: var(--text);
     -webkit-font-smoothing: antialiased;
     text-rendering: geometricPrecision;
@@ -4381,7 +4368,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   input,
   select,
   textarea {
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
   }
 
   button {
@@ -4421,8 +4408,8 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     width: min(440px, calc(100vw - 32px));
     gap: 18px;
     border: 1px solid rgba(var(--hairline-rgb), 0.78);
-    border-radius: 24px;
-    background: rgba(var(--glass-rgb), 0.82);
+    border-radius: var(--radius-lg);
+    background: rgba(var(--glass-rgb), 0.62);
     box-shadow: var(--shadow-lg);
   }
 
@@ -4453,7 +4440,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .primary-action {
-    border-radius: 14px;
+    border-radius: var(--radius);
     background: var(--primary);
     color: var(--on-accent);
   }
@@ -4477,7 +4464,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .nav-item {
     min-width: 108px;
     min-height: 54px;
-    border-radius: 14px;
+    border-radius: var(--radius);
     color: var(--on-accent);
     transition: background-color 0.2s ease, color 0.2s ease;
   }
@@ -4586,7 +4573,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .admin-actions button,
   .modal-head button,
   .modal-actions button {
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
     background: var(--card);
   }
 
@@ -4617,7 +4604,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .analysis-grid div,
   .trend-panel,
   .question-tag-panel,
-  .exam-review-panel,
   .analysis-table-card,
   .review-plan-panel,
   .modal-panel {
@@ -4627,7 +4613,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .course-pane,
   .question-pane {
-    border-radius: 18px;
+    border-radius: var(--radius-lg);
   }
 
   .pane-title {
@@ -4653,7 +4639,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .chapter-toggle {
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     font-size: 0;
   }
 
@@ -4726,7 +4712,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .question-head span {
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
   }
 
   .stem,
@@ -4739,7 +4725,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .stem {
     padding: 18px;
     border: 1px solid rgba(var(--hairline-rgb), 0.86);
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: rgba(var(--glass-rgb), 0.82);
     box-shadow: var(--shadow-xs);
   }
@@ -4747,13 +4733,13 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .extra:not(:empty) {
     padding: 16px;
     border: 1px solid rgba(var(--hairline-rgb), 0.86);
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: rgba(var(--glass-rgb), 0.82);
     box-shadow: var(--shadow-xs);
   }
 
   .option {
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: rgba(var(--glass-rgb), 0.92);
     transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   }
@@ -4786,7 +4772,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .card-cell {
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
     transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   }
 
@@ -4814,7 +4800,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .analysis-table-card,
   .review-plan-panel,
   .question-tag-panel,
-  .exam-review-panel,
   .answer {
     transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
   }
@@ -4838,14 +4823,14 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     z-index: 5;
     padding: 10px;
     border: 1px solid rgba(var(--hairline-rgb), 0.9);
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: rgba(var(--glass-rgb), 0.9);
     backdrop-filter: blur(14px);
     box-shadow: var(--shadow-xs);
   }
 
   .admin-table-wrap {
-    border-radius: 16px;
+    border-radius: var(--radius);
     max-height: min(68dvh, 720px);
   }
 
@@ -4871,11 +4856,11 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .modal-panel {
-    border-radius: 18px;
+    border-radius: var(--radius-lg);
   }
 
   .toast {
-    border-radius: 14px;
+    border-radius: var(--radius);
   }
 
   @media (min-width: 761px) {
@@ -4928,7 +4913,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
       width: 100%;
       gap: 15px;
       padding: 24px 20px;
-      border-radius: 22px;
+      border-radius: var(--radius-lg);
     }
 
     .login-panel h1 {
@@ -4939,13 +4924,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
       min-height: 54px;
       gap: 6px;
       padding: 7px 8px;
-    }
-
-    .mobile-menu-btn {
-      order: 1;
-      min-width: 58px;
-      min-height: 38px;
-      border-radius: 12px;
     }
 
     .nav-item.active {
@@ -4972,29 +4950,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
       padding-inline: 9px;
     }
 
-    body.mobile-menu-open .main-nav {
-      align-items: stretch;
-      padding-bottom: 9px;
-    }
-
-    body.mobile-menu-open .account-box {
-      order: 1;
-      flex: 1 1 100%;
-      justify-content: flex-end;
-    }
-
-    body.mobile-menu-open .mobile-menu-btn {
-      order: 2;
-      flex: 1 1 calc(50% - 6px);
-    }
-
-    body.mobile-menu-open .nav-item {
-      order: 3;
-      flex: 1 1 calc(50% - 6px);
-      max-width: none;
-      min-height: 44px;
-    }
-
     .toolbar {
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 7px;
@@ -5008,7 +4963,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     .toolbar button,
     .question-actions button {
       min-height: 38px;
-      border-radius: 12px;
+      border-radius: var(--radius-sm);
       line-height: 1.15;
       white-space: normal;
     }
@@ -5028,7 +4983,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
     .course-pane,
     .question-pane {
-      border-radius: 16px;
+      border-radius: var(--radius);
     }
 
     .course-pane {
@@ -5056,7 +5011,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
     .stem {
       padding: 14px;
-      border-radius: 14px;
+      border-radius: var(--radius);
     }
 
     .question-head {
@@ -5098,7 +5053,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
       grid-template-columns: 34px minmax(0, 1fr);
       min-height: 56px;
       padding: 10px;
-      border-radius: 14px;
+      border-radius: var(--radius);
     }
 
     .option b {
@@ -5139,7 +5094,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
     .card-cell {
       min-height: 32px;
-      border-radius: 10px;
+      border-radius: var(--radius-sm);
     }
 
     .wrong-filter-panel {
@@ -5167,7 +5122,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
     .exam-rule-list > div,
     .exam-chapter-list label {
-      border-radius: 14px;
+      border-radius: var(--radius);
     }
 
     .exam-chapter-list {
@@ -5188,7 +5143,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
       padding: 8px;
-      border-radius: 16px;
+      border-radius: var(--radius);
     }
 
     .admin-toolbar button {
@@ -5224,12 +5179,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
     #accountLabel {
       max-width: 82px;
-    }
-
-    body.mobile-menu-open .nav-item,
-    body.mobile-menu-open .mobile-menu-btn {
-      flex-basis: calc(50% - 6px);
-      min-width: 0;
     }
 
     .toolbar {
@@ -5503,26 +5452,32 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     border-width: 1px;
   }
 
+  /* 答题卡格子的四态底色。
+     ⚠ 这里（@media screen，靠后）才是**生效**的值 —— 上面 L1600 附近那套同选择器的
+     规则被本块整体覆盖了。两块必须同值，否则「格子实际颜色」和「图例小方块」（.mark.*）
+     就对不上：本块原先用的是浅一档的 --*-100，而图例用 --*-200，实测相差 13~61 个 RGB 距离。
+     现在两块统一到 --*-200 一档（图例本来就是这个档）。 */
   .card-cell:not(.done):not(.correct):not(.wrong) {
-    background: var(--bg);
-    color: var(--muted);
+    border-color: var(--muted);
+    background: var(--surface-4);
+    color: var(--text-3);
   }
 
   .card-cell.done:not(.correct):not(.wrong) {
-    border-color: var(--warning-600);
-    background: var(--warning-100);
-    color: var(--warning-text);
+    border-color: var(--warning-500);
+    background: var(--warning-150);
+    color: var(--warning-text-3);
   }
 
   .card-cell.correct {
     border-color: var(--success-500);
-    background: var(--success-100);
+    background: var(--success-200);
     color: var(--success-800);
   }
 
   .card-cell.wrong {
     border-color: var(--danger-500);
-    background: var(--danger-100);
+    background: var(--danger-200);
     color: var(--danger-800);
   }
 
@@ -5537,7 +5492,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     z-index: 4;
     padding: 10px;
     border: 1px solid rgba(var(--hairline-rgb), 0.9);
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: rgba(var(--glass-rgb), 0.94);
     backdrop-filter: blur(12px);
     box-shadow: var(--shadow-xs);
@@ -5569,7 +5524,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .empty {
-    border-radius: 16px;
+    border-radius: var(--radius);
   }
 }
 
@@ -5603,10 +5558,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     gap: 6px;
   }
 
-  .mobile-menu-btn {
-    grid-column: 1;
-  }
-
   .nav-item.active {
     grid-column: 2;
     width: 100%;
@@ -5621,14 +5572,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   #accountLabel {
     max-width: 104px;
-  }
-
-  body.mobile-menu-open .main-nav {
-    display: flex;
-  }
-
-  body.mobile-menu-open .account-box {
-    min-width: 100%;
   }
 
   .toolbar {
@@ -5744,7 +5687,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .card-cell {
     min-height: 31px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
   }
 
   .stats {
@@ -5791,7 +5734,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     display: grid;
     overflow: hidden;
     border: 1px solid var(--border);
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: var(--card);
     box-shadow: var(--shadow-xs);
   }
@@ -5931,7 +5874,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .analysis-grid div,
   .trend-panel,
   .question-tag-panel,
-  .exam-review-panel,
   .analysis-table-card,
   .review-plan-panel {
     box-shadow: 0 10px 28px rgba(var(--ink-rgb), 0.06);
@@ -5945,7 +5887,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .stem {
     border: 1px solid rgba(var(--hairline-rgb), 0.88);
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: rgba(var(--glass-rgb), 0.86);
     box-shadow: var(--shadow-xs);
   }
@@ -5968,7 +5910,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .admin-bank-tools,
   .admin-toolbar {
     border: 1px solid rgba(var(--hairline-rgb), 0.9);
-    border-radius: 16px;
+    border-radius: var(--radius);
     background: rgba(var(--glass-rgb), 0.88);
     box-shadow: var(--shadow-xs);
   }
@@ -6148,7 +6090,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     width: min(410px, calc(100vw - 28px));
     gap: 15px;
     padding: 24px 22px;
-    border-radius: 22px;
+    border-radius: var(--radius-lg);
   }
 
   .login-panel h1 {
@@ -6170,17 +6112,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     gap: 6px;
   }
 
-  .mobile-menu-btn,
+  
   .nav-item,
   .account-box button,
   #accountLabel {
     min-height: 34px;
-    border-radius: 12px;
-  }
-
-  .mobile-menu-btn {
-    min-width: 54px;
-    padding-inline: 9px;
+    border-radius: var(--radius-sm);
   }
 
   .nav-item.active {
@@ -6211,15 +6148,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     padding-inline: 8px;
   }
 
-  body.mobile-menu-open .main-nav {
-    gap: 7px;
-    padding-bottom: 8px;
-  }
-
-  body.mobile-menu-open .nav-item {
-    min-height: 38px;
-  }
-
   .toolbar {
     min-height: 0;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -6231,7 +6159,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .question-actions button {
     min-height: 36px;
     padding: 0 6px;
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
@@ -6258,7 +6186,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .course-pane,
   .question-pane {
-    border-radius: 16px;
+    border-radius: var(--radius);
   }
 
   .course-pane {
@@ -6313,7 +6241,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .stem {
     padding: 13px;
-    border-radius: 15px;
+    border-radius: var(--radius);
   }
 
   .stem,
@@ -6333,7 +6261,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     gap: 9px;
     min-height: 54px;
     padding: 9px 10px;
-    border-radius: 14px;
+    border-radius: var(--radius);
   }
 
   .option b {
@@ -6382,7 +6310,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-width: 0;
     min-height: 32px;
     padding: 3px 8px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
@@ -6400,7 +6328,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .card-cell {
     min-height: 30px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
@@ -6417,7 +6345,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .admin-toolbar button {
     min-height: 38px;
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
     font-size: 13px;
   }
 
@@ -6438,7 +6366,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .admin-table-wrap {
     max-height: 62dvh;
-    border-radius: 15px;
+    border-radius: var(--radius);
     box-shadow: var(--shadow-xs);
   }
 
@@ -6448,7 +6376,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .admin-table:not(.admin-course-table) tr {
-    border-radius: 14px;
+    border-radius: var(--radius);
   }
 
   .admin-table:not(.admin-course-table) td {
@@ -6479,7 +6407,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .admin-user-card {
     gap: 12px;
     padding: 12px;
-    border-radius: 15px;
+    border-radius: var(--radius);
   }
 
   .admin-user-card-head {
@@ -6601,7 +6529,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     gap: 10px;
     min-height: 48px;
     padding: 8px 12px;
-    border-radius: 13px;
+    border-radius: var(--radius-sm);
   }
 
   .option b {
@@ -6707,7 +6635,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     justify-content: center;
     min-height: 30px;
     padding: 4px 12px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--primary-200);
     background: var(--primary-50);
     color: var(--primary-ink);
@@ -6728,7 +6656,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   body.answer-card-collapsed .answer-card-wrap::before {
-    content: "答题卡已收起";
+    content: attr(data-summary);
     position: absolute;
     left: 14px;
     top: 50%;
@@ -6749,7 +6677,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     justify-content: center;
     min-height: 28px;
     padding: 4px 12px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--primary-200);
     background: var(--primary-50);
     color: var(--primary-ink);
@@ -6782,31 +6710,14 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     padding: 7px 8px;
   }
 
-  body.mobile-menu-open .main-nav {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: stretch;
-    gap: 6px;
-    padding: 6px 8px;
-  }
-
   .account-box {
     grid-column: 1 / -1;
     width: 100%;
     min-width: 0;
     justify-content: space-between;
     order: 0;
-  }
-
-  .mobile-menu-btn {
-    grid-column: 1;
-    width: 100%;
-    order: 1;
-  }
-
-  .nav-item,
-  .nav-item.active,
-  body.mobile-menu-open .nav-item {
+  }.nav-item,
+.nav-item.active {
     width: 100%;
     min-width: 0;
     max-width: none;
@@ -6818,65 +6729,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .nav-item.active {
     grid-column: 2;
     order: 2;
-  }
-
-  body.mobile-menu-open .nav-item {
-    grid-column: auto;
-  }
-
-  body.mobile-menu-open .nav-item:nth-of-type(1) {
-    order: 2;
-  }
-
-  body.mobile-menu-open .nav-item:nth-of-type(2) {
-    order: 3;
-  }
-
-  body.mobile-menu-open .nav-item:nth-of-type(3) {
-    order: 4;
-  }
-
-  body.mobile-menu-open .nav-item:nth-of-type(4) {
-    order: 5;
-  }
-
-  body.mobile-menu-open .nav-item:nth-of-type(5) {
-    order: 6;
-  }
-
-  body.mobile-menu-open .main-nav > .account-box {
-    grid-column: 1 / -1;
-    grid-row: 1;
-  }
-
-  body.mobile-menu-open .main-nav > #mobileMenuBtn {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1) {
-    grid-column: 2;
-    grid-row: 2;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2) {
-    grid-column: 1;
-    grid-row: 3;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3) {
-    grid-column: 2;
-    grid-row: 3;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4) {
-    grid-column: 1;
-    grid-row: 4;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
-    grid-column: 2;
-    grid-row: 4;
   }
 
   #accountLabel {
@@ -6983,7 +6835,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     width: 100%;
     min-height: 28px;
     margin-bottom: 4px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     border-color: var(--primary-200);
     background: var(--primary-50);
     color: var(--primary-ink);
@@ -7005,7 +6857,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   body.answer-card-collapsed .answer-card-wrap::before {
-    content: "答题卡已收起";
+    content: attr(data-summary);
     position: absolute;
     left: 8px;
     top: 50%;
@@ -7025,7 +6877,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-height: 26px;
     margin-bottom: 0;
     padding: 3px 10px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border-color: var(--primary-200);
     background: var(--primary-50);
     color: var(--primary-ink);
@@ -7066,7 +6918,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 
   .card-cell {
     min-height: 26px;
-    border-radius: 8px;
+    border-radius: var(--radius-2xs);
     font-size: 11px;
   }
 }
@@ -7121,7 +6973,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   height: 24px !important;
   min-height: 24px !important;
   padding: 0 !important;
-  border-radius: 999px !important;
+  border-radius: var(--radius-pill) !important;
   border: 1px solid var(--primary-200) !important;
   background: var(--card) !important;
   color: var(--primary-ink) !important;
@@ -7143,7 +6995,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   top: 50%;
   width: 10px;
   height: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
   transform: translate(-50%, -50%);
   -webkit-mask: none !important;
@@ -7190,7 +7042,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   #questionBody:not(.exam-case-split) .question-tag-panel,
-  #questionBody:not(.exam-case-split) .exam-review-panel,
   #questionBody:not(.exam-case-split) .note-editor,
   #questionBody:not(.exam-case-split) .answer {
     grid-column: 2 !important;
@@ -7221,9 +7072,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     margin-top: 0;
   }
 
-  #questionBody:not(.exam-case-split) .exam-review-panel {
-    margin-top: 0;
-  }
 
   #questionBody:not(.exam-case-split) .note-editor:not(.hidden) {
     min-height: 132px;
@@ -7231,28 +7079,15 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 }
 
-@media screen and (max-width: 760px) {
-  .main-nav,
-  body.mobile-menu-open .main-nav {
+@media screen and (max-width: 760px) {.main-nav {
     grid-template-columns: minmax(0, 1fr) minmax(92px, 0.58fr) !important;
   }
 
   .account-box {
     grid-column: 1 / -1 !important;
     order: 0 !important;
-  }
-
-  .mobile-menu-btn {
-    grid-column: 2 !important;
-    order: 2 !important;
-    min-height: 32px;
-    padding-inline: 8px;
-    justify-self: stretch;
-  }
-
-  .nav-item,
-  .nav-item.active,
-  body.mobile-menu-open .nav-item {
+  }.nav-item,
+.nav-item.active {
     min-height: 32px;
     padding-inline: 7px;
     font-size: 12px;
@@ -7268,36 +7103,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .nav-item.active {
     grid-column: 1 !important;
     order: 1 !important;
-  }
-
-  body.mobile-menu-open .main-nav > #mobileMenuBtn {
-    grid-column: 2 !important;
-    grid-row: 2 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1) {
-    grid-column: 1 !important;
-    grid-row: 2 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2) {
-    grid-column: 1 !important;
-    grid-row: 3 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3) {
-    grid-column: 2 !important;
-    grid-row: 3 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4) {
-    grid-column: 1 !important;
-    grid-row: 4 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
-    grid-column: 2 !important;
-    grid-row: 4 !important;
   }
 
   .question-head {
@@ -7319,7 +7124,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .question-tag-panel {
     margin-top: 8px;
     padding: 6px;
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
   }
 
   .tag-panel-toggle {
@@ -7330,7 +7135,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     align-items: center;
     gap: 6px;
     padding: 0 8px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     border-color: var(--border);
     background: var(--bg);
     color: var(--text-3);
@@ -7345,7 +7150,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--primary-50);
     color: var(--primary-ink);
     font-size: 14px;
@@ -7387,7 +7192,7 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .quick-mark {
     min-height: 26px;
     padding-inline: 8px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     font-size: 11px;
   }
 
@@ -7506,7 +7311,7 @@ body.panel-page .question-view {
   justify-content: center;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--bg);
   color: var(--text-4);
   font-size: 12px;
@@ -7548,7 +7353,6 @@ body.panel-page .question-view {
   }
 
   #questionBody:not(.exam-case-split) .question-tag-panel,
-  #questionBody:not(.exam-case-split) .exam-review-panel,
   #questionBody:not(.exam-case-split) .answer,
   #questionBody:not(.exam-case-split) .note-editor {
     grid-column: auto !important;
@@ -7584,7 +7388,6 @@ body.panel-page .question-view {
   }
 
   .exam-case-split .question-side-panel .question-tag-panel,
-  .exam-case-split .question-side-panel .exam-review-panel,
   .exam-case-split .question-side-panel .answer,
   .exam-case-split .question-side-panel .note-editor {
     grid-column: auto;
@@ -7625,15 +7428,9 @@ body.panel-page .question-view {
     min-height: 26px;
     padding: 0 8px;
     font-size: 11px;
-  }
-
-  .main-nav,
-  body.mobile-menu-open .main-nav {
+  }.main-nav {
     align-items: stretch;
-  }
-
-  .main-nav > .account-box,
-  body.mobile-menu-open .main-nav > .account-box {
+  }.main-nav > .account-box {
     grid-column: 1 / -1 !important;
     grid-row: 1 !important;
     order: 0 !important;
@@ -7642,40 +7439,10 @@ body.panel-page .question-view {
 
   #accountLabel {
     max-width: calc(100vw - 94px) !important;
-  }
-
-  .main-nav > #mobileMenuBtn,
-  body.mobile-menu-open .main-nav > #mobileMenuBtn {
-    grid-column: 2 !important;
-    grid-row: 2 !important;
-    order: 2 !important;
-  }
-
-  .main-nav > .nav-item.active,
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1) {
+  }.main-nav > .nav-item.active {
     grid-column: 1 !important;
     grid-row: 2 !important;
     order: 1 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2) {
-    grid-column: 1 !important;
-    grid-row: 3 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3) {
-    grid-column: 2 !important;
-    grid-row: 3 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4) {
-    grid-column: 1 !important;
-    grid-row: 4 !important;
-  }
-
-body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
-    grid-column: 2 !important;
-    grid-row: 4 !important;
   }
 }
 
@@ -7724,9 +7491,7 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
   }
 }
 
-@media screen and (max-width: 760px) {
-  .main-nav,
-  body.mobile-menu-open .main-nav {
+@media screen and (max-width: 760px) {.main-nav {
     display: grid !important;
     grid-template-columns: minmax(0, 1fr) minmax(82px, 104px) auto !important;
     grid-auto-rows: 34px !important;
@@ -7735,7 +7500,6 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
   }
 
   .main-nav > .nav-item,
-  .main-nav > #mobileMenuBtn,
   #accountLabel,
   .account-box #logoutBtn {
     min-height: 34px !important;
@@ -7744,7 +7508,7 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
     padding-bottom: 0 !important;
     font-size: 12px !important;
     line-height: 1 !important;
-    border-radius: 12px !important;
+    border-radius: var(--radius-sm) !important;
     align-items: center !important;
     justify-content: center !important;
   }
@@ -7757,10 +7521,7 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
   .main-nav > .nav-item::before {
     font-size: 14px !important;
     line-height: 1 !important;
-  }
-
-  .main-nav > .account-box,
-  body.mobile-menu-open .main-nav > .account-box {
+  }.main-nav > .account-box {
     grid-column: 3 !important;
     grid-row: 1 !important;
     width: auto !important;
@@ -7786,41 +7547,13 @@ body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5) {
     min-width: 50px !important;
     padding-inline: 8px !important;
     justify-self: auto !important;
-  }
-
-  .main-nav > .nav-item.active,
-  body.mobile-menu-open .main-nav > .nav-item.active {
+  }.main-nav > .nav-item.active {
     grid-column: 1 !important;
     grid-row: 1 !important;
     order: 1 !important;
   }
-
-  .main-nav > #mobileMenuBtn,
-  body.mobile-menu-open .main-nav > #mobileMenuBtn {
-    grid-column: 2 !important;
-    grid-row: 1 !important;
-    order: 2 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(6):not(.active) {
-    grid-column: span 1 !important;
-    grid-row: auto !important;
-    order: 3 !important;
-  }
 }
 
-@media screen and (max-width: 760px) {
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(6) {
-    grid-column: span 1 !important;
-    grid-row: auto !important;
-    order: 3 !important;
-  }
-}
 
 /* Motion polish: course picker, top navigation, and tree toggles. */
 @keyframes navActivePop {
@@ -7902,7 +7635,7 @@ body:not(.admin-view).picker-open .question-pane {
   z-index: 1;
   width: var(--nav-indicator-w, 0px);
   height: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--card);
   opacity: 0;
   pointer-events: none;
@@ -7957,7 +7690,7 @@ body:not(.admin-view).picker-open .question-pane {
   top: 50%;
   width: 10px;
   height: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
   opacity: 1;
   transform: translate(-50%, -50%);
@@ -8216,7 +7949,7 @@ body.panel-page .answer-card-wrap,
   gap: 4px;
   padding: 10px 8px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--card-soft);
   text-align: center;
 }
@@ -8266,7 +7999,7 @@ body.panel-page .answer-card-wrap,
   flex-wrap: wrap;
   padding: 6px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: linear-gradient(180deg, var(--card) 0%, var(--bg) 100%);
 }
 
@@ -8281,7 +8014,7 @@ body.panel-page .answer-card-wrap,
   gap: 12px;
   padding: 14px 16px;
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-xs);
 }
@@ -8309,7 +8042,7 @@ body.panel-page .answer-card-wrap,
   align-items: center;
   min-height: 28px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--primary-200);
   background: var(--primary-50);
   color: var(--primary-ink);
@@ -8357,11 +8090,11 @@ body.panel-page .answer-card-wrap,
     min-width: 0;
     min-height: 36px;
     padding: 0 10px;
-    border-radius: 11px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
-  .mobile-menu-btn,
+  
   .mobile-actions-btn,
   .mobile-tools-btn {
     font-weight: 700;
@@ -8410,7 +8143,7 @@ body.panel-page .answer-card-wrap,
 
   .admin-user-card {
     padding: 12px;
-    border-radius: 14px;
+    border-radius: var(--radius);
   }
 
   .admin-user-actions button,
@@ -8463,7 +8196,6 @@ body.panel-page .answer-card-wrap,
 /* Fix: top/mobile icon vertical centering */
 .nav-item,
 .question-actions button,
-.mobile-menu-btn,
 .mobile-tools-btn,
 .mobile-actions-btn {
   display: inline-flex;
@@ -8503,10 +8235,7 @@ body.panel-page .answer-card-wrap,
 @media screen and (max-width: 760px) {
   .main-nav {
     align-items: center;
-  }
-
-  .nav-item.active,
-  body.mobile-menu-open .nav-item {
+  }.nav-item.active {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -8528,7 +8257,6 @@ body.panel-page .answer-card-wrap,
 
   .toolbar button:not(.mobile-tools-btn),
   .question-actions button,
-  .mobile-menu-btn,
   .mobile-actions-btn {
     align-items: center;
     justify-content: center;
@@ -8538,7 +8266,6 @@ body.panel-page .answer-card-wrap,
 
   .question-actions button,
   .mobile-tools-btn,
-  .mobile-menu-btn,
   .mobile-actions-btn {
     display: inline-flex;
   }
@@ -8602,12 +8329,6 @@ body.panel-page .answer-card-wrap,
     padding-inline: 10px !important;
   }
 
-  .main-nav > #mobileMenuBtn {
-    display: inline-flex !important;
-    flex: 0 0 auto !important;
-    min-height: 36px !important;
-  }
-
   .main-nav > .account-box {
     display: inline-flex !important;
     flex: 0 0 auto !important;
@@ -8615,31 +8336,9 @@ body.panel-page .answer-card-wrap,
     min-width: 0 !important;
     gap: 6px !important;
   }
-
-  body.mobile-menu-open .main-nav {
-    display: grid !important;
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-    gap: 6px !important;
-    padding: 6px 8px !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item {
-    display: inline-flex !important;
-    width: 100% !important;
-    min-width: 0 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .account-box {
-    grid-column: 1 / -1 !important;
-    width: 100% !important;
-    justify-content: space-between !important;
-    margin-left: 0 !important;
-  }
 }
 /* --- Final mobile top-bar override: normalize conflicting legacy grid rules. --- */
-@media screen and (max-width: 760px) {
-  .main-nav,
-  body.mobile-menu-open .main-nav {
+@media screen and (max-width: 760px) {.main-nav {
     display: flex !important;
     flex-wrap: nowrap !important;
     align-items: center !important;
@@ -8651,10 +8350,7 @@ body.panel-page .answer-card-wrap,
     grid-template-columns: none !important;
     grid-auto-rows: auto !important;
     grid-area: auto !important;
-  }
-
-  .main-nav > .nav-item,
-  body.mobile-menu-open .main-nav > .nav-item {
+  }.main-nav > .nav-item {
     display: none !important;
     grid-column: auto !important;
     grid-row: auto !important;
@@ -8674,27 +8370,7 @@ body.panel-page .answer-card-wrap,
     white-space: nowrap !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
-  }
-
-  .main-nav > #mobileMenuBtn {
-    display: inline-flex !important;
-    flex: 0 0 auto !important;
-    width: auto !important;
-    min-width: 58px !important;
-    min-height: 34px !important;
-    height: 34px !important;
-    padding: 0 12px !important;
-    margin: 0 !important;
-    grid-column: auto !important;
-    grid-row: auto !important;
-    order: 2 !important;
-    border-color: rgba(255, 255, 255, 0.28) !important;
-    background: rgba(0, 0, 0, 0.22) !important;
-    color: var(--on-accent) !important;
-  }
-
-  .main-nav > .account-box,
-  body.mobile-menu-open .main-nav > .account-box {
+  }.main-nav > .account-box {
     display: inline-flex !important;
     flex: 0 0 auto !important;
     width: auto !important;
@@ -8738,31 +8414,6 @@ body.panel-page .answer-card-wrap,
     height: 30px !important;
     padding: 0 9px !important;
     font-size: 12px !important;
-  }
-
-  body.mobile-menu-open .main-nav {
-    flex-wrap: wrap !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item {
-    display: inline-flex !important;
-    flex: 0 0 calc(50% - 3.5px) !important;
-    width: auto !important;
-    min-width: 0 !important;
-    max-width: none !important;
-    min-height: 34px !important;
-    height: 34px !important;
-    margin: 0 !important;
-    padding: 0 10px !important;
-    font-size: 12px !important;
-    justify-content: center !important;
-  }
-
-  body.mobile-menu-open .main-nav > .account-box {
-    flex: 0 0 auto !important;
-    justify-content: flex-end !important;
-    margin-left: auto !important;
-    order: 3 !important;
   }
 }
 
@@ -8895,9 +8546,7 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
   grid-template-rows: auto auto minmax(0, 1fr) auto 42px;
 }
 /* --- User feedback round 2: balanced nav, tighter top bars, 2-row answer card on mobile. --- */
-@media screen and (max-width: 760px) {
-  .main-nav,
-  body.mobile-menu-open .main-nav {
+@media screen and (max-width: 760px) {.main-nav {
     min-height: 44px !important;
     padding: 5px 8px !important;
     gap: 6px !important;
@@ -8912,7 +8561,7 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
     padding: 0 10px !important;
     font-size: 12px !important;
     justify-content: flex-start !important;
-    border-radius: 10px !important;
+    border-radius: var(--radius-sm) !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
     white-space: nowrap !important;
@@ -8922,16 +8571,6 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
     flex: 0 0 auto !important;
     width: 15px !important;
     height: 15px !important;
-  }
-
-  .main-nav > #mobileMenuBtn {
-    flex: 0 0 auto !important;
-    min-width: 52px !important;
-    min-height: 32px !important;
-    height: 32px !important;
-    padding: 0 10px !important;
-    font-size: 12px !important;
-    border-radius: 10px !important;
   }
 
   .main-nav > .account-box {
@@ -8977,13 +8616,6 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
   .course-title {
     font-size: 15px !important;
   }
-
-  body.mobile-menu-open .main-nav > .nav-item {
-    flex: 0 0 calc(50% - 3px) !important;
-    min-height: 32px !important;
-    height: 32px !important;
-    font-size: 12px !important;
-  }
 }
 
 /* Answer card: three visible rows on mobile when expanded, scroll for the rest. */
@@ -9016,9 +8648,7 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
   }
 }
 /* --- Narrow tablet/desktop (<=880px): reuse compact mobile top bars to prevent overflow. --- */
-@media screen and (max-width: 1280px) {
-  .main-nav,
-  body.mobile-menu-open .main-nav {
+@media screen and (max-width: 1280px) {.main-nav {
     display: flex !important;
     flex-wrap: nowrap !important;
     align-items: center !important;
@@ -9053,23 +8683,6 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
     white-space: nowrap !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
-  }
-
-  .main-nav > #mobileMenuBtn {
-    display: inline-flex !important;
-    flex: 0 0 auto !important;
-    width: auto !important;
-    min-width: 56px !important;
-    min-height: 34px !important;
-    height: 34px !important;
-    padding: 0 12px !important;
-    margin: 0 !important;
-    grid-column: auto !important;
-    grid-row: auto !important;
-    order: 2 !important;
-    border-color: rgba(255, 255, 255, 0.28) !important;
-    background: rgba(0, 0, 0, 0.22) !important;
-    color: var(--on-accent) !important;
   }
 
   .main-nav > .account-box {
@@ -9114,48 +8727,6 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
     font-size: 12px !important;
   }
 
-  body.mobile-menu-open .main-nav {
-    flex-wrap: wrap !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item {
-    display: inline-flex !important;
-    flex: 0 0 calc(33.333% - 5px) !important;
-    min-width: 0 !important;
-    max-width: none !important;
-    min-height: 30px !important;
-    height: 30px !important;
-    margin: 0 !important;
-    padding: 0 8px !important;
-    font-size: 12px !important;
-    justify-content: center !important;
-    order: 4 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item.active {
-    flex: 0 1 auto !important;
-    max-width: 26vw !important;
-    min-height: 32px !important;
-    height: 32px !important;
-    justify-content: flex-start !important;
-    order: 1 !important;
-  }
-
-  body.mobile-menu-open .main-nav > #mobileMenuBtn {
-    order: 2 !important;
-  }
-
-  body.mobile-menu-open .main-nav > #mobileToolsBtn {
-    order: 2 !important;
-  }
-
-  body.mobile-menu-open .main-nav > .account-box {
-    flex: 0 0 auto !important;
-    justify-content: flex-end !important;
-    margin-left: auto !important;
-    order: 3 !important;
-  }
-
   .toolbar {
     display: none !important;
   }
@@ -9195,7 +8766,7 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
     top: 52px !important;
     z-index: 60 !important;
     border: 1px solid var(--border) !important;
-    border-radius: 14px !important;
+    border-radius: var(--radius) !important;
     background: var(--card) !important;
     box-shadow: var(--shadow-md) !important;
   }
@@ -9221,66 +8792,12 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
 }
 /* Desktop (wide): hide mobile-only menu/tools triggers in the nav. */
 @media screen and (min-width: 1281px) {
-  .main-nav > #mobileMenuBtn,
+  
   .main-nav > #mobileToolsBtn {
     display: none !important;
   }
 }
 /* --- Menu-open override: force all non-active nav items into a compact 3-column wrap. --- */
-@media screen and (max-width: 1280px) {
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(6),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(1):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(2):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(3):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(4):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(5):not(.active),
-  body.mobile-menu-open .main-nav > .nav-item:nth-of-type(6):not(.active) {
-    display: inline-flex !important;
-    flex: 0 0 calc(33.333% - 5px) !important;
-    min-width: 0 !important;
-    max-width: none !important;
-    min-height: 30px !important;
-    height: 30px !important;
-    margin: 0 !important;
-    padding: 0 8px !important;
-    font-size: 12px !important;
-    justify-content: center !important;
-    order: 4 !important;
-    grid-column: auto !important;
-    grid-row: auto !important;
-    grid-area: auto !important;
-    width: auto !important;
-  }
-
-  body.mobile-menu-open .main-nav > .nav-item.active {
-    flex: 0 1 auto !important;
-    max-width: 26vw !important;
-    min-height: 32px !important;
-    height: 32px !important;
-    justify-content: flex-start !important;
-    order: 1 !important;
-    grid-area: auto !important;
-  }
-
-  body.mobile-menu-open .main-nav > #mobileMenuBtn,
-  body.mobile-menu-open .main-nav > #mobileToolsBtn {
-    order: 2 !important;
-    grid-area: auto !important;
-  }
-
-  body.mobile-menu-open .main-nav > .account-box {
-    flex: 0 0 auto !important;
-    justify-content: flex-end !important;
-    margin-left: auto !important;
-    order: 3 !important;
-    grid-area: auto !important;
-  }
-}
 
 /* --- Compact screens: answer card becomes a floating drawer so the question
    area keeps its full height while the card is open. --- */
@@ -9357,7 +8874,7 @@ body.answer-card-collapsed .answer-card-collapse-btn {
   min-height: 30px !important;
   padding: 5px 16px !important;
   border: 1px solid var(--primary) !important;
-  border-radius: 999px !important;
+  border-radius: var(--radius-pill) !important;
   background: var(--primary) !important;
   color: var(--on-accent) !important;
   font-size: 13px !important;
@@ -9474,7 +8991,6 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   }
 }
 
-
 /* --- Mobile smart-training context: keep today's training header compact. --- */
 @media screen and (max-width: 760px) {
   .practice-context-panel {
@@ -9483,7 +8999,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 4px;
     padding: 4px 7px;
-    border-radius: 11px;
+    border-radius: var(--radius-sm);
   }
 
   .practice-context-panel > div:first-child {
@@ -9514,7 +9030,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   .practice-context-toggle {
     min-height: 25px;
     padding: 2px 7px;
-    border-radius: 8px;
+    border-radius: var(--radius-2xs);
     font-size: 11px;
   }
 
@@ -9526,7 +9042,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   .practice-context-actions button {
     min-height: 29px;
     padding: 3px 6px;
-    border-radius: 8px;
+    border-radius: var(--radius-2xs);
     font-size: 11px;
   }
 
@@ -9534,7 +9050,6 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
     padding: 4px 7px;
   }
 }
-
 
 /* --- Compact touch viewport practice context: one-line header by default. --- */
 @media screen and (max-width: 1280px) {
@@ -9546,7 +9061,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
     flex-wrap: wrap;
     gap: 4px 6px;
     padding: 4px 7px;
-    border-radius: 11px;
+    border-radius: var(--radius-sm);
   }
 
   .practice-context-panel > div:first-child {
@@ -9586,7 +9101,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
     flex: 0 0 auto;
     min-height: 25px;
     padding: 2px 7px;
-    border-radius: 8px;
+    border-radius: var(--radius-2xs);
     font-size: 11px;
   }
 
@@ -9601,7 +9116,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   .practice-context-actions button {
     min-height: 29px;
     padding: 3px 7px;
-    border-radius: 8px;
+    border-radius: var(--radius-2xs);
     font-size: 11px;
   }
 
@@ -9623,7 +9138,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   flex-wrap: wrap;
   gap: 4px 6px;
   padding: 4px 7px;
-  border-radius: 11px;
+  border-radius: var(--radius-sm);
 }
 
 .practice-context-panel.compact-touch > div:first-child {
@@ -9663,7 +9178,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   flex: 0 0 auto;
   min-height: 25px;
   padding: 2px 7px;
-  border-radius: 8px;
+  border-radius: var(--radius-2xs);
   font-size: 11px;
 }
 
@@ -9678,7 +9193,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 .practice-context-panel.compact-touch .practice-context-actions button {
   min-height: 29px;
   padding: 3px 7px;
-  border-radius: 8px;
+  border-radius: var(--radius-2xs);
   font-size: 11px;
 }
 
@@ -9689,10 +9204,6 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 .practice-context-panel.compact-touch.collapsed .practice-context-actions {
   display: none !important;
 }
-
-
-
-
 
 /* --- Device-audit fix: question pane could be stretched by its own content. --- */
 /* .question-pane is a grid with explicit rows but no explicit columns, so the
@@ -9762,7 +9273,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   flex-direction: column;
   background: var(--card);
   color: var(--text);
-  border-radius: 14px;
+  border-radius: var(--radius);
   box-shadow: 0 24px 60px rgba(var(--ink-rgb), 0.28);
   overflow: hidden;
 }
@@ -9828,7 +9339,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 /* 拉取后的对比报告（原「题库管理器」预检并入拉取流程） */
 .bank-report {
   border: 1px solid rgba(var(--slate-rgb), 0.32);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--bg);
   padding: 12px 14px;
   display: grid;
@@ -9859,7 +9370,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 }
 .bank-report-chip {
   border: 1px solid rgba(var(--slate-rgb), 0.4);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 3px 10px;
   font-size: 12px;
   background: var(--card);
@@ -9890,7 +9401,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   border: 1px solid var(--warning-300);
   background: var(--warning-50);
   color: var(--warning-text);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 1px 8px;
   font-size: 12px;
 }
@@ -10018,7 +9529,6 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   }
 }
 
-
 /* ══════════════════════════════════════════════════════════════════════════
    主题：浅色（默认，见文件开头 :root）/ 暗色 / 护眼
    ──────────────────────────────────────────────────────────────────────────
@@ -10035,19 +9545,53 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 
   /* ── 表面 ── */
   --bg: #0e131b;
+  --bg-image:
+    radial-gradient(95% 70% at 12% 0%, rgba(130, 150, 200, 0.16), transparent 62%),
+    radial-gradient(85% 70% at 100% 100%, rgba(80, 100, 150, 0.12), transparent 66%),
+    linear-gradient(165deg, #111826 0%, #0b1019 58%, #0e131d 100%);
   --bg-soft: #141c27;
   --bg-rgb: 14, 19, 27;
-  --card: #151c26;
-  --card-soft: #19212d;
-  --surface-2: #1d2634;
-  --surface-3: #1a2230;
-  --surface-4: #222c3b;
+  --card: rgba(21, 28, 38, 0.58);
+  --card-soft: rgba(25, 33, 45, 0.48);
+  --surface-2: rgba(29, 38, 52, 0.60);
+  --surface-3: rgba(26, 34, 48, 0.60);
+  --surface-4: rgba(34, 44, 59, 0.66);
   --violet-50: #1e1b33;
   --question-bg: #121a24;
   --question-bg-rgb: 18, 26, 36;
 
   /* ── 半透明分量：面板 / 遮罩 / 阴影 / 细边 ── */
   --glass-rgb: 21, 28, 38;
+
+  /* ── 玻璃层 ── */
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-highlight:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --glass-shade: inset 0 -1px 0 rgba(0, 0, 0, 0.32);
+  --glass-blur: 30px;
+  --glass-sat: 170%;
+  --glass-bright: 1.16;
+  --glass-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45),
+    0 1px 2px rgba(0, 0, 0, 0.45),
+    0 8px 18px rgba(0, 0, 0, 0.45),
+    0 24px 52px rgba(0, 0, 0, 0.55);
+  --lift-shadow: 0 4px 12px rgba(0, 0, 0, 0.55), 0 28px 50px rgba(0, 0, 0, 0.62);
+  --card-solid: #151c26;
+  --card-ring: #1d2634;
+
+  /* ── 顶栏：深色玻璃条 + 顶部镜面高光 ── */
+  --nav-bg: rgba(32, 42, 64, 0.72);
+  --nav-fg: #ffffff;
+  --nav-fg-soft: rgba(255, 255, 255, 0.84);
+  --nav-border: rgba(255, 255, 255, 0.12);
+  --nav-spec: rgba(255, 255, 255, 0.12);
+  --nav-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+  --nav-pill-bg: rgba(255, 255, 255, 0.10);
+  --nav-pill-hover: rgba(255, 255, 255, 0.20);
+  --nav-pill-active-bg: rgba(255, 255, 255, 0.22);
+  --nav-pill-active-fg: #ffffff;
   --ink-rgb: 0, 0, 0;
   --slate-rgb: 71, 85, 105;
   --hairline-rgb: 51, 65, 85;
@@ -10145,56 +9689,92 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 [data-theme="eye"] {
   color-scheme: light;
 
-  /* ── 表面 ── */
-  --bg: #dfe8d5;
-  --bg-soft: #e6eeda;
-  --bg-rgb: 223, 232, 213;
-  --card: #f1f6e9;
-  --card-soft: #f5f9ef;
-  --surface-2: #e8efdd;
-  --surface-3: #e4ecdb;
-  --surface-4: #dbe5cf;
-  --violet-50: #eee9f5;
-  --question-bg: #eaf2e0;
-  --question-bg-rgb: 234, 242, 224;
+  /* ── 表面：经典豆沙绿 #C7EDCC（眼科推荐的那个）── */
+  --bg: #c7edcc;
+  --bg-image:
+    radial-gradient(95% 70% at 12% 0%, rgba(255, 255, 255, 0.60), transparent 62%),
+    radial-gradient(85% 70% at 100% 100%, rgba(70, 110, 75, 0.12), transparent 66%),
+    linear-gradient(165deg, #d4f0d8 0%, #c7edcc 58%, #cff0d3 100%);
+  --bg-soft: #d5f2d9;
+  --bg-rgb: 199, 237, 204;
+  --card: rgba(247, 253, 248, 0.64);
+  --card-soft: rgba(238, 250, 240, 0.52);
+  --surface-2: rgba(222, 242, 225, 0.62);
+  --surface-3: rgba(214, 238, 218, 0.62);
+  --surface-4: rgba(200, 231, 205, 0.68);
+  --violet-50: #e6f0e6;
+  --question-bg: #e8f6ea;
+  --question-bg-rgb: 232, 246, 234;
 
   /* ── 半透明分量 ── */
-  --glass-rgb: 246, 250, 240;
+  --glass-rgb: 247, 253, 248;
+
+  /* ── 玻璃层：豆沙绿上的柔和光晕 ── */
+  --glass-border: rgba(255, 255, 255, 0.62);
+  --glass-highlight:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.90),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.38);
+  --glass-shade: inset 0 -1px 0 rgba(31, 45, 36, 0.06);
+  --glass-blur: 30px;
+  --glass-sat: 160%;
+  --glass-bright: 1.02;
+  --glass-shadow:
+    0 0 0 1px rgba(31, 45, 36, 0.05),
+    0 1px 2px rgba(31, 45, 36, 0.06),
+    0 8px 18px rgba(31, 45, 36, 0.08),
+    0 24px 52px rgba(31, 45, 36, 0.17);
+  --lift-shadow: 0 4px 10px rgba(31, 45, 36, 0.10), 0 26px 46px rgba(31, 45, 36, 0.22);
+  --card-solid: #f7fdf8;
+  --card-ring: #f7fdf8;
+
+  /* ── 顶栏：浅豆沙绿玻璃 + 深墨绿字（护眼模式不用白字）── */
+  --nav-bg: rgba(233, 248, 235, 0.76);
+  --nav-fg: #1f3d2a;
+  --nav-fg-soft: rgba(31, 61, 42, 0.84);
+  --nav-border: rgba(255, 255, 255, 0.62);
+  --nav-spec: rgba(255, 255, 255, 0.70);
+  --nav-shadow: 0 12px 30px rgba(31, 61, 42, 0.16);
+  --nav-pill-bg: rgba(31, 61, 42, 0.09);
+  --nav-pill-hover: rgba(31, 61, 42, 0.16);
+  --nav-pill-active-bg: rgba(38, 102, 63, 0.94);
+  --nav-pill-active-fg: #ffffff;
   --ink-rgb: 38, 49, 31;
   --slate-rgb: 138, 152, 122;
   --hairline-rgb: 201, 214, 184;
 
-  /* ── 文字（深绿墨，比纯黑柔和）── */
-  --text: #26311f;
-  --text-2: #2b3624;
-  --text-3: #3b4633;
-  --text-4: #4b5742;
-  --muted: #5d6a51;
-  --muted-2: #78856b;
-  --muted-3: #6f7c63;
+  /* ── 文字：深墨绿灰（不是绿色，绿色文字反而费眼）── */
+  --text: #1f2d24;
+  --text-2: #24332a;
+  --text-3: #35473b;
+  --text-4: #3d4f42;
+  --muted: #465848;
+  --muted-2: #6b8172;
+  --muted-3: #62786a;
   --on-accent: #ffffff;
   --on-accent-rgb: 255, 255, 255;
 
   /* ── 边框 ── */
-  --border: #c9d6b8;
-  --border-2: #cbd8bb;
-  --border-3: #c6d4b5;
-  --border-4: #bccba9;
-  --border-strong: #b3c39c;
+  --border: #b6d9bd;
+  --border-2: #b9dcbf;
+  --border-3: #b2d6b9;
+  --border-4: #a6cfae;
+  --border-strong: #9ac6a3;
 
-  /* ── 主色：保持品牌靛蓝，色阶往绿底上靠一点 ── */
-  --primary: #5c60d8;
-  --primary-500: #5c60d8;
-  --primary-600: #4b4fc4;
-  --primary-700: #3f43a8;
-  --primary-ink: #4549b8;
-  --primary-50: #e5e7f7;
-  --primary-100: #dadcf4;
-  --primary-200: #b7bbe8;
-  --primary-300: #979ce0;
-  --primary-rgb: 92, 96, 216;
-  --primary-50-rgb: 229, 231, 247;
-  --primary-600-rgb: 75, 79, 196;
+  /* ── 主色：克制的深绿，只用于按钮 / 关键强调 ──
+     色阶（--primary-50/100/200）刻意做成「中性偏绿」而不是饱和绿：
+     它们撑的是标签、chip、选中底这类大面积次要元素，做成饱和绿就会满屏绿。 */
+  --primary: #2e7d4f;
+  --primary-500: #2e7d4f;
+  --primary-600: #26663f;
+  --primary-700: #1f5533;
+  --primary-ink: #255f3d;
+  --primary-50: #e7efe9;
+  --primary-100: #dde8e0;
+  --primary-200: #c0d3c6;
+  --primary-300: #9fb8a7;
+  --primary-rgb: 46, 125, 79;
+  --primary-50-rgb: 231, 239, 233;
+  --primary-600-rgb: 38, 102, 63;
 
   /* ── 成功 ── */
   --success: #14682f;
@@ -10339,11 +9919,10 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   }
 
   body {
-    background: #ffffff !important;
-    color: #0f172a !important;
+    background: var(--card) !important;
+    color: var(--text) !important;
   }
 }
-
 
 /* ══════════════════════════════════════════════════════════════════════════
    配色切换控件（浅色 / 暗色 / 护眼）
@@ -10355,7 +9934,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border);
-  border-radius: 11px;
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
   flex: 0 0 auto;
 }
@@ -10364,7 +9943,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   min-height: 30px;
   padding: 0 10px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: var(--radius-2xs);
   background: transparent;
   color: var(--muted);
   font-size: 13px;
@@ -10426,7 +10005,6 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   }
 }
 
-
 /* ══════════════════════════════════════════════════════════════════════════
    拉取进度条（题库更新）
    ══════════════════════════════════════════════════════════════════════════ */
@@ -10437,7 +10015,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   margin: 0 0 12px;
   padding: 12px 14px;
   border: 1px solid var(--primary-200);
-  border-radius: 14px;
+  border-radius: var(--radius);
   background: var(--primary-50);
 }
 
@@ -10462,7 +10040,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 
 .bank-progress-track {
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-4);
   overflow: hidden;
 }
@@ -10470,7 +10048,7 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 .bank-progress-track i {
   display: block;
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: linear-gradient(90deg, var(--primary), var(--primary-600));
   transition: width 0.35s ease;
 }
@@ -10510,5 +10088,1467 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 @media print {
   .bank-progress {
     display: none !important;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   玻璃层（iOS 观感）
+   ──────────────────────────────────────────────────────────────────────────
+   iOS 玻璃的质感 = 半透明底 + 背景模糊 + 饱和度放大 + 提亮
+                    + 镜面高光边 + 内阴影 + 分层投影。
+   只做 blur 是不够的：
+     · 背后必须是「有颜色起伏」的底，否则 saturate 无从放大（原先靠 --bg-image 的光晕，已去掉）
+     · 必须有高光边和分层投影，否则就是一块平的半透明色块
+   放在文件最后，用顺序覆盖前面的实色写法，不改动上面的规则。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 页面底色：纯色（只在 html 上定义一处），body 透明
+   ──────────────────────────────────────────────────
+   这里原先有两层装饰，都已去掉：
+
+   1. `--bg-image`：4~5 团彩色径向光晕，铺在 html。唯一用途是给玻璃表面的
+      `saturate()` 提供「可放大的颜色起伏」（底色是平的，玻璃就退化成半透明色块）。
+      在长时间阅读的界面上偏花，已去掉。
+   2. `body` 的 28px 网格：原本是桌面端的纹理，后来为了给 Liquid Glass 的折射
+      提供「可掰的细节」把 alpha 提了上去；折射回退后它只剩视觉噪声，也去掉了。
+
+   代价：玻璃表面背后的颜色起伏变小，玻璃感比早期版本弱 —— 半透明现在主要体现为
+   「能隐约看到下层卡片」。要恢复其中任一层，见 docs/VERSIONS.md 的「底色改纯色」。 */
+html {
+  background-color: var(--bg);
+  background-image: var(--bg-image);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+body {
+  /* 透明：让 html 的底色透出来。底色只在 html 上定义一处，避免两处分叉。 */
+  background-color: transparent;
+}
+
+.app-shell {
+  background: transparent;
+}
+
+/* 登录页：本身有一层不透明背景，会把 html 的光晕整个挡住，
+   这里让它透出来，登录面板才是「玻璃浮在彩色底上」。
+   注意暗色主题另有一条 `[data-theme="dark"] .login-view`（特异性更高），
+   只写 `.login-view` 在暗色下会被它压住 —— 必须把主题作用域的一并列出。 */
+.login-view,
+[data-theme="dark"] .login-view,
+[data-theme="eye"] .login-view {
+  background: transparent;
+}
+
+/* 原来那层白色模糊光斑 / 桌面端网格，叠在光晕上只会把颜色洗掉 */
+.login-view::before {
+  background: none;
+}
+
+/* ── 顶栏：玻璃条 ──
+   顶部那层白色渐变就是「光从上面来」的镜面高光，是 iOS 观感的关键一笔。 */
+.main-nav {
+  background-color: var(--nav-bg);
+  /* 这里原有一层 `linear-gradient(180deg, var(--nav-spec), transparent 58%)`：
+     30% 白从顶栏上沿往下洗，把靛蓝洗成「褪色的蓝」。已去掉 ——
+     顶栏现在是纯色玻璃 + 下沿 1px 高光（见下面的 box-shadow）。
+     `--nav-spec` 令牌保留，只用于那条 1px 高光。 */
+  color: var(--nav-fg);
+  border-bottom: 1px solid var(--nav-border);
+  box-shadow: inset 0 1px 0 var(--nav-spec), var(--nav-shadow);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  backdrop-filter: blur(28px) saturate(190%);
+}
+
+.main-nav .nav-item {
+  color: var(--nav-fg-soft);
+}
+
+.main-nav .nav-item::before {
+  color: currentColor;
+}
+
+.main-nav .nav-item:hover {
+  background: var(--nav-pill-hover);
+  color: var(--nav-fg);
+}
+
+.main-nav .nav-item.active {
+  background: var(--nav-pill-active-bg);
+  color: var(--nav-pill-active-fg);
+  box-shadow: 0 1px 2px rgba(var(--ink-rgb), 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+/* 选中态下面那条小横线：跟随当前文字色（原来写死 var(--card)，浅色药丸上会看不见） */
+.main-nav .nav-item.active::after {
+  background: currentColor;
+}
+
+.main-nav .account-box {
+  color: var(--nav-fg);
+}
+
+.main-nav #accountLabel {
+  border: 1px solid var(--nav-border);
+  background: var(--nav-pill-bg);
+  color: var(--nav-fg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.main-nav .account-box button {
+  border-color: var(--nav-border);
+  background: var(--nav-pill-bg);
+  color: var(--nav-fg);
+}
+
+.main-nav .account-box button:hover {
+  background: var(--nav-pill-hover);
+  color: var(--nav-fg);
+}
+
+/* 顶栏里的主题切换：原来是写死的白/黑半透明，改成 nav 令牌 */
+.main-nav .theme-switch {
+  border-color: var(--nav-border) !important;
+  background: var(--nav-pill-bg) !important;
+}
+
+.main-nav .theme-switch button {
+  color: var(--nav-fg-soft) !important;
+}
+
+.main-nav .theme-switch button:hover {
+  color: var(--nav-fg) !important;
+  background: var(--nav-pill-hover) !important;
+}
+
+.main-nav .theme-switch button.active {
+  background: var(--nav-pill-active-bg) !important;
+  border-color: transparent !important;
+  color: var(--nav-pill-active-fg) !important;
+  box-shadow: 0 1px 2px rgba(var(--ink-rgb), 0.18) !important;
+}
+
+/* 移动端顶栏按钮（原规则带 !important，这里也带上才盖得住） */
+
+.main-nav > #mobileToolsBtn {
+  border-color: var(--nav-border) !important;
+  background: var(--nav-pill-bg) !important;
+  color: var(--nav-fg) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16) !important;
+}
+
+
+.main-nav > #mobileToolsBtn:hover {
+  background: var(--nav-pill-hover) !important;
+  color: var(--nav-fg) !important;
+}
+
+/* ── 玻璃面板：模糊 + 饱和度放大 + 提亮 + 镜面高光 + 分层投影 ── */
+.course-pane,
+.question-pane,
+.exam-history-card,
+.trend-panel,
+.study-card,
+.plan-today-card,
+.admin-data-card,
+.admin-user-card,
+.login-panel,
+.modal-panel,
+.bank-report {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight), var(--glass-shade), var(--glass-shadow);
+}
+
+/* 条状 / 贴边元素：同样磨砂，但保留各自的方向性投影 */
+.toolbar,
+.search-panel,
+.search-match-panel,
+.wrong-filter-panel,
+.question-actions,
+.plan-day,
+.admin-toolbar,
+.admin-bank-tools {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight), var(--glass-shade);
+}
+
+/* 贴底的答题卡：投影朝上 */
+.answer-card-wrap {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight), 0 -12px 28px rgba(var(--ink-rgb), 0.10);
+}
+
+/* 分配对话框：自带很重的投影，别换成通用的那套 */
+.assign-card {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight), 0 24px 60px rgba(var(--ink-rgb), 0.28);
+}
+
+/* 弹窗遮罩：重模糊 + 少压暗，让背后的内容「化开」而不是「变黑」 */
+.modal-backdrop {
+  background: rgba(var(--ink-rgb), 0.28);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+}
+
+/* 「当前题」那圈环要实色，半透明会在网格里糊掉 */
+.card-cell.current {
+  box-shadow: 0 0 0 1px var(--card-ring), 0 8px 16px rgba(var(--primary-rgb), 0.18);
+}
+
+/* ── 不支持 backdrop-filter 时退回不透明，别让文字糊在光晕上 ── */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --card: #ffffff;
+    --card-soft: #fbfdff;
+    --surface-2: #f1f5f9;
+    --surface-3: #eef2f7;
+    --surface-4: #e2e8f0;
+    --nav-bg: #4536cf;
+  }
+  [data-theme="dark"] {
+    --card: #151c26;
+    --card-soft: #19212d;
+    --surface-2: #1d2634;
+    --surface-3: #1a2230;
+    --surface-4: #222c3b;
+    --nav-bg: #202a40;
+  }
+  [data-theme="eye"] {
+    --card: #f7fdf8;
+    --card-soft: #eefaf0;
+    --surface-2: #def2e1;
+    --surface-3: #d6eeda;
+    --surface-4: #c8e7cd;
+    --nav-bg: #e9f8eb;
+  }
+  html {
+    background-image: none;
+  }
+
+  /* 没有 backdrop-filter 时，`.question-pane` 不再是 fixed 元素的包含块 ——
+     展开态的答题卡会退回「相对视口」定位（bottom: 8px），于是盖住底部标签栏。
+     这里显式把它抬到标签栏上方。
+     （支持 backdrop-filter 时答题卡是相对 `.question-pane` 定位的，
+      而 `.app-shell` 已经让出了标签栏的高度，所以自动就是对的，不需要这条。） */
+  @media screen and (max-width: 760px) {
+    .question-pane > .answer-card-wrap {
+      bottom: calc(var(--tabbar-h) + 18px);
+    }
+  }
+}
+
+/* ── 打印：强制回不透明浅色，关掉磨砂 ── */
+@media print {
+  html {
+    background: var(--card) !important;
+    background-image: none !important;
+  }
+  body,
+  .app-shell {
+    background: var(--card) !important;
+  }
+  .main-nav {
+    background: var(--card) !important;
+    background-image: none !important;
+    color: var(--text) !important;
+  }
+  * {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   卡片悬浮：hover 抬起 + 加深投影
+   ──────────────────────────────────────────────────────────────────────────
+   · 只改 transform / box-shadow，**不动 color 和 background** —— 所以文字对比度不受影响
+   · 大面板（科目区 / 题目区 / 工具条 / 顶栏 / 弹窗）不参与：
+     鼠标会长时间停在上面，一直抬着反而烦
+   · 投影叠在原有基础上：玻璃卡片自带镜面高光 + 内阴影，
+     hover 时不能直接换掉，否则玻璃感会消失
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 玻璃卡片：保留玻璃三件套，只把最外层投影换成更重的 */
+.exam-history-card,
+.trend-panel,
+.study-card,
+.plan-today-card,
+.admin-data-card,
+.admin-user-card,
+.bank-report,
+.plan-day {
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.exam-history-card:hover,
+.trend-panel:hover,
+.study-card:hover,
+.plan-today-card:hover,
+.admin-data-card:hover,
+.admin-user-card:hover,
+.bank-report:hover,
+.plan-day:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--glass-highlight), var(--glass-shade), var(--lift-shadow);
+}
+
+/* 列表行 / 题号格 / 训练卡：本来没有玻璃三件套，直接换投影 */
+.course-item,
+.chapter-item,
+.card-cell,
+.exam-draft-card,
+.training-card,
+.training-history-row,
+.bank-editor-result,
+.analysis-grid div {
+  transition: transform 0.18s ease, box-shadow 0.18s ease,
+              border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.course-item:hover,
+.chapter-item:hover,
+.card-cell:hover,
+.exam-draft-card:hover,
+.training-card:hover,
+.training-history-row:hover,
+.bank-editor-result:hover,
+.analysis-grid div:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--lift-shadow);
+}
+
+/* 「当前题」自带一圈实色环，hover 时不能把它弄丢 */
+.card-cell.current:hover {
+  box-shadow: 0 0 0 1px var(--card-ring), var(--lift-shadow);
+}
+
+/* 用户开了「减少动效」：只留投影，不做位移 */
+@media (prefers-reduced-motion: reduce) {
+  .exam-history-card:hover,
+  .trend-panel:hover,
+  .study-card:hover,
+  .plan-today-card:hover,
+  .admin-data-card:hover,
+  .admin-user-card:hover,
+  .bank-report:hover,
+  .plan-day:hover,
+  .course-item:hover,
+  .chapter-item:hover,
+  .card-cell:hover,
+  .exam-draft-card:hover,
+  .training-card:hover,
+  .training-history-row:hover,
+  .bank-editor-result:hover,
+  .analysis-grid div:hover {
+    transform: none;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   窄屏（761~1199px）题干被挤塌的修复
+   ──────────────────────────────────────────────────────────────────────────
+   原有规则给右侧栏定了硬下限：`grid-template-columns: minmax(0,1fr) minmax(330px, 36%)`。
+   在 761~1199px 这个区间，题目区本身只有 386~671px 宽，侧栏吃掉 330px 之后
+   正文列只剩 40~280px —— 实测 768px 时题干宽度只有 **30px**，中文一个字一行。
+   这个区间塞不下两栏，直接退回单栏；标签/错因/笔记等侧栏内容顺排到题目下方。
+   （这是既有的响应式问题，与主题/玻璃改动无关：开/关 backdrop-filter 实测完全一致。）
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (min-width: 761px) and (max-width: 1199px) {
+  #questionBody:not(.exam-case-split) {
+    grid-template-columns: minmax(0, 1fr) !important;
+    column-gap: 0;
+  }
+
+  #questionBody:not(.exam-case-split) .stem,
+  #questionBody:not(.exam-case-split) .options,
+  #questionBody:not(.exam-case-split) .extra,
+  #questionBody:not(.exam-case-split) .question-head,
+  #questionBody:not(.exam-case-split) .subjective-input,
+  #questionBody:not(.exam-case-split) .answer,
+  #questionBody:not(.exam-case-split) .question-tag-panel,
+  #questionBody:not(.exam-case-split) .note-editor,
+  #questionBody:not(.exam-case-split) .question-side-panel {
+    grid-column: 1 !important;
+  }
+
+  #questionBody:not(.exam-case-split) .question-side-panel {
+    grid-row: auto !important;
+    position: static !important;
+    align-self: auto;
+    margin-top: 10px;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ≤1440px：给「固定定位的答题卡」预留出它**实测高度**的底部空间
+   ──────────────────────────────────────────────────────────────────────────
+   答题卡在 `max-width: 1440px` 是 `position: fixed; z-index: 90` 的底部覆盖层，
+   脱流之后不占位置；而 `.question-actions`（上一题 / 确认答案 / 下一题 / 笔记 /
+   收藏本题 / 纠错）的 z-index 只有 3，会被它整条压住 —— 看不见也点不到。
+   所以必须让**题目区本身变矮**，把操作区顶到卡片上方。
+
+   > 加在内层 `.question-view` 上没用：内容没超出容器时它不滚动，padding 只是空转。
+
+   预留高度必须跟着卡片的**实测高度**走：卡片高度随宽度变化极大
+   —— 收起 38~44px；展开 162~462px（题号格子换行行数不同，且受 `max-height: 46vh` 约束）。
+   写死值必然在某个宽度失效：曾用 188px，1281px 以上够用（卡高 162px），
+   到 768px 就不够了（卡高 462px），到 ≤760px 更是完全没预留（那里 padB 原本是 0）。
+
+   `--answer-card-h` 由 app.js 的 ResizeObserver 实时写入，
+   展开/收起、翻页、内容重排、窗口缩放都会更新。
+
+   > 为什么分两段写：卡片在不同区间/状态下的 `position` 不一样。
+   > - `>1440px`：`relative`，在流内自己占位置 → 不需预留。
+   > - `761~1440px`：收起、展开**都是** `fixed` → 两种状态都要预留。
+   > - `≤760px`：收起时是 `relative`（按钮底边正好贴卡片顶边，没被盖）→ 不需预留；
+   >   展开时才是 `fixed` → 需要预留。这一段写成「非收起态」才生效。
+
+   （既有问题，与主题/玻璃无关：开/关 backdrop-filter 实测逐项一致。）
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (min-width: 761px) and (max-width: 1440px) {
+  .question-pane:has(> .answer-card-wrap) {
+    /* +16px = 卡片 `bottom: 8px` 的偏移 + 8px 间隙 */
+    padding-bottom: calc(var(--answer-card-h, 44px) + 16px);
+  }
+}
+
+@media screen and (max-width: 760px) {
+  /* 只在展开态（卡片变回 fixed）时预留 */
+  body:not(.answer-card-collapsed) .question-pane:has(> .answer-card-wrap) {
+    padding-bottom: calc(var(--answer-card-h, 44px) + 16px);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   >1280px：顶栏降高（62px → 50px）
+   ──────────────────────────────────────────────────────────────────────────
+   桌面端顶栏看着「太高、占地方」，原因不在 .main-nav 的下限，而在 .nav-item 本身：
+   它是「图标在上、文字在下」的竖排药丸，自然高度 =
+     padding 7+10  +  图标 18  +  gap 5  +  文字行盒 16.1  =  56px
+   再套上 .main-nav 的 min-height: 62px，整条就 62px。
+
+   收紧到 50px：药丸 44px（padding 4+5、图标 16、gap 3），上下各留 3px。
+   62 → 50（-19%），药丸 56 → 44（-21%）。
+
+   范围限定 >1280px：
+   - 761~1280px 的顶栏是 46px（另一条 `max-width: 1280px` 规则），本来就紧，不动；
+   - ≤760px 手机上更紧（44~56px 视高度而定），也不动。
+   顺带消掉一个跳变：原先 1280px 是 47px、1366px 却是 62px，现在 1280→47 / 1366→50，接得上。
+
+   只改尺寸（padding / gap / 图标框），不改颜色与结构，所以对比度不受影响。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (min-width: 1281px) {
+  .main-nav {
+    min-height: 50px;
+  }
+
+  .main-nav > .nav-item {
+    min-height: 42px;
+    padding: 4px 12px 5px;
+    gap: 3px;
+  }
+
+  /* 图标框 18 → 16，字号跟着收 1 档，免得字形被框裁掉 */
+  .main-nav > .nav-item::before {
+    width: 16px;
+    height: 16px;
+    flex-basis: 16px;
+    font-size: 15px;
+  }
+
+  /* 工具条同理：原来 61px（min-height 58 + padding 10 + 40px 按钮）。
+     按钮高度是全局令牌 --control-h: 40px，不动；只把上下 padding 收到 5px，
+     61 → 50px，和顶栏一样高。
+     只在 >1280px 生效：≤1280px 时 .toolbar 是 display: none（收进手机端工具菜单）。 */
+  .toolbar {
+    min-height: 50px;
+    padding: 5px 18px;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   主 CTA 统一成「胶囊按钮」
+   ──────────────────────────────────────────────────────────────────────────
+   参考图里最显眼的一处是主行动按钮（「立即抢购」）做成全圆角胶囊，
+   而次要控件保持小圆角 —— 这样一眼能分出主次。
+   这里只给两个真正的主动作：.primary-action（登录 / 保存并进入 / 创建账号 …）
+   与 #submitBtn（提交答卷）。工具栏里其余按钮保持 --radius-sm，不受影响。
+   ══════════════════════════════════════════════════════════════════════════ */
+.primary-action,
+#submitBtn {
+  border-radius: var(--radius-pill);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ≤760px：底部悬浮标签栏（替代顶栏导航）
+   ──────────────────────────────────────────────────────────────────────────
+   手机端原先靠顶栏的「菜单」按钮展开一格格导航项。改成底部悬浮胶囊栏后：
+   - 顶栏只留「当前页名 + 工具 + 账号」，「菜单」按钮不再需要（已隐藏）；
+   - 导航项移到下面，拇指可及，也不用再展开。
+
+   按钮刻意沿用 `.nav-item[data-mode]` —— 点击切页、选中态（renderMode 切 .active）、
+   图标（`.nav-item[data-mode="x"]::before`）全部由既有逻辑接管，一行 JS 都不用加。
+   （顶栏的活动项 `offsetParent` 为 null 时 `updateNavIndicator` 会自动隐藏指示条，
+     所以隐藏顶栏导航项不会留下一条悬空的横线。）
+
+   底部空间用 `.app-shell { padding-bottom }` 让出来，不是给内容加 margin ——
+   `.app-shell` 是 `height: 100dvh` + `box-sizing: border-box`，
+   加 padding 会让内部区域整体变矮，各面板自己滚，不会漏出被盖住的内容。
+   ══════════════════════════════════════════════════════════════════════════ */
+.mobile-tabbar {
+  display: none;
+}
+
+@media screen and (max-width: 760px) {
+
+  .mobile-tabbar {
+    display: flex;
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    z-index: 96;                 /* 高于答题卡(90)与顶栏 */
+    height: var(--tabbar-h);
+    align-items: stretch;
+    gap: 2px;
+    padding: 5px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--glass-border);
+    background: rgba(var(--glass-rgb), 0.9);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));
+    box-shadow: var(--glass-highlight), var(--glass-shade), var(--shadow-md);
+  }
+
+  /* 覆盖基础规则里的 `.nav-item { display: none }`（≤760px 那条是裸选择器，
+     不加限定会把这里的按钮也一起藏掉） */
+  .mobile-tabbar .nav-item {
+    display: inline-flex;
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
+    min-height: 0;
+    height: 100%;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    padding: 2px 0 3px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 1.1;
+    color: var(--muted);
+    background: transparent;
+  }
+
+  /* 顶栏在手机端有一批「把活动项提到最前 / 撑宽」的规则（`order` / `grid-column` /
+     `flex` / `min-width` / `max-width`），用的是裸 `.nav-item` / `.nav-item.active`
+     选择器，会一并漏进标签栏 —— 症状是「当前页那个标签自己跳到最后一个」。
+     这里逐项复位；其中 order / grid-column 在源样式里带 !important，必须同样用
+     !important 才盖得住。 */
+  .mobile-tabbar .nav-item,
+  .mobile-tabbar .nav-item.active {
+    order: 0 !important;
+    grid-column: auto !important;
+    grid-row: auto !important;
+  }
+
+  .mobile-tabbar .nav-item::before {
+    width: 17px;
+    height: 17px;
+    flex: 0 0 17px;
+    font-size: 15px;
+    color: inherit;
+  }
+
+  /* 不要顶栏那条下划线（选中态靠底色 + 文字色区分） */
+  .mobile-tabbar .nav-item::after {
+    content: none;
+  }
+
+  .mobile-tabbar .nav-item.active {
+    color: var(--primary-ink);
+    background: var(--primary-50);
+  }
+
+  /* 让出标签栏的高度 */
+  .app-shell {
+    padding-bottom: calc(var(--tabbar-h) + 18px);
+  }
+
+  /* admin 没有刷题模式 —— 源样式里 `body.admin-view .nav-item { display: none }`
+     会把导航项（含标签栏里的）全藏掉，只剩一个空壳胶囊。整条藏掉，底部留白也取消。 */
+  body.admin-view .mobile-tabbar {
+    display: none;
+  }
+
+  body.admin-view .app-shell {
+    padding-bottom: 0;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   护眼主题：把「正确」标记加深一档
+   ──────────────────────────────────────────────────────────────────────────
+   用户反馈「护眼答题区，正确答案颜色不明显」。
+
+   根因：护眼的 `--success-*` 色阶是为了「不刺眼」整体调成低饱和灰绿的
+   （`--success-50: #e4f1e0`），而护眼的**页面底色本身就是豆沙绿** `#c7edcc`
+   —— 两个绿一叠，正确选项和普通选项几乎分不出来（实测背景只差 6~7 个色阶）。
+
+   对照：`.card-cell.correct`（答题卡格子）用的是 `--success-200` + `--success-500`，
+   本来就比选项/答案区深一档，所以格子一直没问题。这里把正确态**提到同一档**。
+
+   对比度（对面板底 ≈ rgb(230,247,232)）：
+     · 正确选项正文  --text #1f2d24 在 #b7d9ae 上 → 9.29
+     · 字母标白字    在 --success-700 #14682f 上 → 6.88
+     · 答案区正文    在 #b7d9ae 上 → 9.29
+     · #answerText   --success-800 #14532d 在 #b7d9ae 上 → 5.88
+     · 边框          --success-700 #14682f 对面板底 → 6.17
+   （边框用 #16a34a 只有 2.96，非文本对比度要求 3.0，所以边框也取深一档。）
+
+   只作用于护眼；浅色 / 暗色实测本来就清楚，不动。
+   ══════════════════════════════════════════════════════════════════════════ */
+[data-theme="eye"] .option.correct {
+  border-color: var(--success-700);
+  border-width: 2px;
+  background: var(--success-200);
+}
+
+[data-theme="eye"] .option.correct b {
+  background: var(--success-700);
+  color: var(--on-accent);
+}
+
+[data-theme="eye"] .answer {
+  border-color: var(--success-700);
+  background: var(--success-200);
+}
+
+[data-theme="eye"] #answerText {
+  color: var(--success-800);
+  font-weight: 800;
+}
+
+[data-theme="eye"] .review-line.correct {
+  background: var(--success-200);
+  color: var(--success-800);
+}
+
+[data-theme="eye"] .mark.correct {
+  background: var(--success-200);
+  border-color: var(--success-700);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   护眼主题：答题卡「未做」格子改中性色
+   ──────────────────────────────────────────────────────────────────────────
+   用户反馈「答题卡区域的正确和未做，颜色也不好区分」。
+
+   根因和上一轮「护眼正确答案不明显」**同一个**：护眼的页面底色 `--bg` 本身就是
+   豆沙绿 `#c7edcc`，而「未做」格子的规则是 `background: var(--bg)`
+   —— 于是在护眼里「未做」变成了**一格格绿色**，正好撞上「正确」的绿。
+
+   实测（护眼）：
+     未做 #c7edcc   vs   正确 #d8ebd3    →  RGB 距离只有 **18.5**
+     （其余任何一对都 ≥ 29.7，浅色/暗色主题最小也有 19.3）
+
+   改法：
+     1. 护眼的「未做」不再用 `--bg`，改成中性近白 `#f6faf7`
+        （与浅色主题「未做 = 近白」的语义一致，只是浅色那边 `--bg` 本来就是近白）。
+     2. 「正确」加深到 `--success-200` + `--success-700` 边框，
+        与上一轮 `[data-theme="eye"] .option.correct` 的处理保持一致。
+
+   改后两两填充色距离（护眼）：未做↔正确 **101.9**、未做↔已做 83.4、
+   未做↔错误 94.3、正确↔错误 54.5、已做↔正确 57.7、已做↔错误 38.9
+   —— 最小的 38.9 也比改前最小的 15.3 大 2.5 倍。
+
+   文字对比度：未做 7.25 / 已做 5.67 / 正确 5.88 / 错误 5.81（均 ≥ 4.5）。
+   边框对卡底：`--success-700` #14682f → 6.17（`--success-500` #16a34a 只有 2.81，
+   低于非文本对比度 3.0，所以护眼的正确态边框取深一档）。
+   ══════════════════════════════════════════════════════════════════════════ */
+/* 护眼的「未做」不再需要单独覆盖 —— 基础规则已改用中性的 `--surface-4`
+   （`--surface-4` 在护眼里是 rgba(200,231,205,0.68)，叠在卡上是灰绿，
+   与「正确」的 --success-200 #b7d9ae 填充距离 51.2，分得开）。 */
+
+[data-theme="eye"] .card-cell.correct {
+  border-color: var(--success-700);
+  background: var(--success-200);
+  color: var(--success-800);
+}
+
+/* 护眼图例「未做」同理，跟随基础规则即可 */
+
+/* ══════════════════════════════════════════════════════════════════════════
+   顶栏账号：头像按钮 + 下拉菜单；手机端顶栏只留「工具 + 账号」
+   ──────────────────────────────────────────────────────────────────────────
+   用户反馈「手机端底部已经有 dock 栏，顶部可以省略一些东西，都挤到一起去了」
+   「账号不用显示名字，用个图像代替」「退出收进账号按钮的下级菜单」。
+
+   改前手机端（390px）顶栏里三个大药丸：
+     ☀ 智能训练 90px  +  ⚙ 工具 75px  +  账号区 172px（占 44%）
+   账号区里塞了 4 样（账号：xxx / 保存状态 / 浅暗护 / 退出），**内容超出 172px，
+   文字直接压在「工具」按钮上**。这是被反复打补丁缩出来的：
+   `#accountLabel` 的 max-width 一路 130 → 112 → 104 → 96 → 92 → 88 → 74px，
+   高度 36 → 34 → 32 → 30 → 28px，缩到极限还是塞不下。
+
+   改法：
+     1. 账号区 → 一个 40px 头像按钮（通用用户剪影）+ 下拉菜单，
+        菜单里放：用户名 / 保存状态 / 配色模式 / 退出登录。**全部宽度生效**。
+     2. 手机端顶栏隐藏模式按钮（底部 dock 已高亮当前页）与「菜单」按钮，
+        「工具」改纯图标 → 顶栏只剩两个图标。
+     3. 顺带补 iPhone 安全区（`viewport-fit=cover` + `env(safe-area-inset-*)`）——
+        改前完全没有处理，底部 dock 会压在 Home 指示条上。
+
+   结果（390px）：顶栏内容 337px → 约 90px。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.main-nav .account-box {
+  position: relative;
+}
+
+/* ── 头像按钮 ────────────────────────────────────────────────────────── */
+.main-nav .account-box .account-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--nav-border);
+  background: var(--nav-pill-bg);
+  color: var(--nav-fg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  cursor: pointer;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.main-nav .account-box .account-btn:hover {
+  background: var(--nav-pill-hover);
+}
+
+.main-nav .account-box .account-btn[aria-expanded="true"] {
+  background: var(--nav-pill-active-bg);
+  border-color: transparent;
+  color: var(--nav-pill-active-fg);
+}
+
+.account-avatar {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 头像右上角的保存状态点。
+   由菜单里 #saveStatusLabel 的 data-status 驱动 —— 用 :has() 做，**不需要 JS**。
+   手机上 `#saveStatusLabel` 本身被既有规则 `display:none` 藏掉了（改前手机上
+   完全没有保存反馈），这个点把反馈补回来。 */
+.main-nav .account-box .account-btn::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--nav-bg);
+  background: var(--warning-500);
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.account-box:has(#saveStatusLabel[data-status="dirty"]) .account-btn::after,
+.account-box:has(#saveStatusLabel[data-status="saving"]) .account-btn::after,
+.account-box:has(#saveStatusLabel[data-status="error"]) .account-btn::after {
+  opacity: 1;
+}
+
+.account-box:has(#saveStatusLabel[data-status="saving"]) .account-btn::after {
+  background: var(--primary-200);
+}
+
+.account-box:has(#saveStatusLabel[data-status="error"]) .account-btn::after {
+  background: var(--danger-500);
+}
+
+/* ── 下拉菜单 ────────────────────────────────────────────────────────── */
+.main-nav .account-box .account-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 140;                 /* 只在顶栏这一层内比较；顶栏整体见文件末尾的层级约定 */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 236px;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  /* `--card` 是半透明的，直接铺在靛蓝顶栏上会发紫。
+     用 `--bg` 打底再叠 `--card` = 得到不透明的「卡片色」。 */
+  background-color: var(--bg);
+  background-image: linear-gradient(var(--card), var(--card));
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  text-align: left;
+}
+
+.main-nav .account-box .account-menu.hidden {
+  display: none;
+}
+
+.main-nav .account-box .account-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* 覆盖顶栏那套「白字药丸」样式，菜单里按普通卡片文字走 */
+.main-nav .account-box .account-menu #accountLabel {
+  display: inline-block !important;
+  max-width: none !important;
+  min-height: 0 !important;
+  height: auto !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: none !important;
+  box-shadow: none !important;
+  color: var(--text) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 手机上既有规则把保存状态整块 `display:none` 了，菜单里要放出来 */
+.main-nav .account-box .account-menu .save-status {
+  display: inline-flex !important;
+  flex: 0 0 auto;
+  min-height: 22px;
+  font-size: 11px;
+}
+
+.main-nav .account-box .account-menu-title {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.main-nav .account-box .account-menu .theme-switch {
+  width: 100%;
+  border-color: var(--border) !important;
+  background: var(--surface-2) !important;
+}
+
+.main-nav .account-box .account-menu .theme-switch button {
+  flex: 1 1 0;
+  min-height: 34px !important;
+  height: 34px !important;
+  color: var(--muted) !important;
+  font-size: 12px !important;
+}
+
+.main-nav .account-box .account-menu .theme-switch button:hover {
+  color: var(--text) !important;
+  background: var(--surface-4) !important;
+}
+
+.main-nav .account-box .account-menu .theme-switch button.active {
+  background: var(--card) !important;
+  border-color: var(--primary-200) !important;
+  color: var(--primary-ink) !important;
+  box-shadow: var(--shadow-xs) !important;
+}
+
+.main-nav .account-box .account-menu #logoutBtn {
+  width: 100%;
+  min-width: 0 !important;
+  min-height: 40px !important;
+  height: 40px !important;
+  padding: 0 12px !important;
+  border-radius: var(--radius-sm) !important;
+  border: 1px solid var(--border) !important;
+  background: var(--surface-2) !important;
+  color: var(--danger) !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  box-shadow: none !important;
+}
+
+.main-nav .account-box .account-menu #logoutBtn:hover {
+  background: var(--surface-4) !important;
+}
+
+/* ── 手机端：顶栏只留「工具 + 账号」两个图标 ─────────────────────────── */
+@media screen and (max-width: 760px) {
+  /* 底部 dock 已经是完整导航，顶栏不再重复放模式按钮 */
+  .main-nav > .nav-item,
+  .main-nav > .nav-item.active{
+    display: none !important;
+  }
+
+  /* 「工具」改纯图标：font-size:0 把「工具 / 收起」文字收掉，只留 ::before 的 ⚙ */
+  .main-nav > #mobileToolsBtn {
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 40px !important;
+    height: 38px !important;
+    min-height: 38px !important;
+    padding: 0 11px !important;
+    margin: 0 0 0 auto !important;
+    font-size: 0 !important;
+  }
+
+  .main-nav > #mobileToolsBtn::before {
+    display: inline-flex !important;
+    font-size: 15px !important;
+    margin-right: 0 !important;
+  }
+
+  .main-nav > .account-box {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    margin: 0 0 0 6px !important;
+    padding: 0 !important;
+    gap: 0 !important;
+  }
+
+  .main-nav .account-box .account-btn {
+    width: 38px;
+    min-width: 38px;
+    height: 38px;
+    min-height: 38px;
+  }
+
+  .main-nav .account-box .account-menu {
+    right: -2px;
+    min-width: 0;
+    width: min(268px, calc(100vw - 24px));
+  }
+
+  /* 顶栏现在只有两个图标，不需要横向裁剪；否则下拉菜单会被 overflow 切掉 */
+  .main-nav {
+    overflow: visible !important;
+  }
+
+  /* iPhone 安全区（非刘海机型 env() 取 0，等于没变）。
+     5 + 38 + 5 + 1px 边框 = 49px，和改前的 47px 基本一致。 */
+  .main-nav {
+    padding-top: calc(5px + env(safe-area-inset-top, 0px)) !important;
+    padding-bottom: 5px !important;
+  }
+
+  .mobile-tabbar {
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* ⚠️ 不要在这里动 `.question-pane > .answer-card-wrap` 的 `bottom`！
+     文件上面有一条同样选择器的规则（`bottom: calc(var(--tabbar-h) + 18px)`），
+     但它被包在 `@supports not (backdrop-filter: …)` 里 —— **只在浏览器不支持磨砂时**
+     才该生效（那时 `.question-pane` 不再是 fixed 的包含块，卡片会退回相对视口定位）。
+     我一开始给它加了 `!important`，等于把那个开关短路了：
+     320×568 上卡片的 bottom 从 8px 变成 72px，被顶上去 64px，
+     正好压住 `#options` 的中心点。已删除，保持原样。 */
+
+  /* 横屏时刘海在侧边，左右也要让 */
+  .main-nav {
+    padding-left: calc(8px + env(safe-area-inset-left, 0px)) !important;
+    padding-right: calc(8px + env(safe-area-inset-right, 0px)) !important;
+  }
+
+  .mobile-tabbar {
+    left: calc(10px + env(safe-area-inset-left, 0px));
+    right: calc(10px + env(safe-area-inset-right, 0px));
+  }
+
+  /* 内容底部留位也要算上 Home 指示条 */
+  .app-shell {
+    padding-bottom: calc(var(--tabbar-h) + 18px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   z-index 层级理顺（配合顶栏账号下拉菜单）
+   ──────────────────────────────────────────────────────────────────────────
+   踩到的坑：`.main-nav` 上有 `backdrop-filter: blur(28px)` —— 它会**自建层叠上下文**。
+   于是菜单里写的 `z-index: 140` 只在「顶栏这一层」内部比大小，**出不去**；
+   顶栏本身 z-index 是 auto，被 `.admin-toolbar`(5) 这类页内 sticky 元素盖住，
+   菜单跟着一起被盖 → 点不到「退出登录」。
+
+   所以要把**顶栏本身**抬起来，而不是抬菜单。同时顺手理顺全局层级 ——
+   改前 `.mobile-tabbar`(96) 和 `.assign-overlay`(90) 都压在 `.modal-backdrop`(50)
+   之上，也就是**手机上弹窗的遮罩盖不住底部 dock**（既有 bug）。
+
+   新的层级约定：
+     0–99    页内元素（粘性表头 1~5 / 答题卡 90 / 底部 dock 96）
+     100     顶栏（含账号下拉菜单）
+     200     全屏浮层与弹窗（modal-backdrop / assign-overlay）
+     300     toast（永远最上）
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.main-nav {
+  z-index: 100;
+}
+
+.modal-backdrop {
+  z-index: 200;
+}
+
+.assign-overlay {
+  z-index: 200;
+}
+
+.toast {
+  z-index: 300;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   761–1280px：顶栏直接显示 6 个导航项，「菜单」折叠退役
+   ──────────────────────────────────────────────────────────────────────────
+   改前这个区间顶栏只显示「当前模式 + 菜单 + 工具 + 账号」——实测 761px 下总共只用
+   了 **232px**（900px 下同样 232px），却把 5 个导航项藏在「菜单」按钮后面，
+   还要点一次才展开，而展开态本身就是十几代 `!important` 覆盖堆出来的乱局。
+
+   实测 6 项紧凑排列只需约 **600px**（< 761px 的可用宽度），**折叠毫无必要**。
+   于是直接常显，并把「菜单」按钮退役 —— `body.mobile-menu-open` 随之**永不出现**，
+   相关的 428 行规则已在本文件里删除。
+
+   ⚠️ `#mobileMenuBtn` 的 DOM / JS / CSS **已在后续清理中全部删除** ——
+   实测 13 个宽度（320→1920）它恒为 `display:none`，`setMobileMenu(true)`
+   唯一的触发点就是它自己的 `onclick`，所以 `state.mobileMenuOpen` 永远为 false、
+   `body.mobile-menu-open` 永不出现。原先「保留 DOM 零风险」的判断是保守过头了。
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media screen and (min-width: 761px) and (max-width: 1280px) {
+  .main-nav {
+    flex-wrap: nowrap !important;
+    overflow: visible !important;
+  }
+
+  /* ⚠ 基础 `.nav-item` 是 `flex-direction: column`（图标在上、文字在下）。
+     只把高度压到 34px 会让图标和文字**叠在一起**（17 + 4 + 16 = 37 > 34）。
+     所以高度按「图标 + 间距 + 文字 + 内边距」给足，并同步缩小图标。 */
+  .main-nav > .nav-item,
+  .main-nav > .nav-item.active {
+    display: inline-flex !important;
+    flex: 0 1 auto !important;
+    flex-direction: column !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    min-height: 40px !important;
+    height: 40px !important;
+    margin: 0 !important;
+    padding: 3px 10px 4px !important;
+    gap: 2px !important;
+    font-size: 12px !important;
+    line-height: 1.1 !important;
+    justify-content: center !important;
+    align-items: center !important;
+    order: 0 !important;
+    white-space: nowrap !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+  }
+
+  .main-nav > .nav-item::before,
+  .main-nav > .nav-item.active::before {
+    font-size: 15px !important;
+    line-height: 1 !important;
+    flex: 0 0 auto !important;
+  }
+
+  .main-nav > #mobileToolsBtn {
+    flex: 0 0 auto !important;
+    min-width: 0 !important;
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机端顶栏：左侧显示当前科目名
+   ──────────────────────────────────────────────────────────────────────────
+   改前手机顶栏（390px）只剩右边「工具 + 账号」两个图标 —— 实测左边空 **287px（76%）**。
+   而顶栏正下方就是 `.course-head` 里的科目名，两边都放会紧挨着重复。
+
+   所以：**把科目名搬进顶栏，内容区那份隐藏**。好处：
+     · 顶栏不再空
+     · 不重复
+     · 省下内容区顶部 31px 竖向空间
+     · 科目名在滚动时也常驻（原来一滚就没了）
+
+   管理视图同样适用 —— 实测 `body.admin-view` 下 `.course-head` 也只显示
+   「管理员数据看板」一个标题（`#courseMeta` 在手机端本来就是 `display:none`），
+   搬进顶栏不丢信息。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.nav-course-title {
+  display: none;
+}
+
+@media screen and (max-width: 760px) {
+  /* 科目名是**按钮**：点一下打开/收起科目面板。
+     ≤760px 时它也是屏幕上唯一能看到科目名的地方。 */
+  .main-nav > .nav-course-title {
+    display: block !important;
+    position: relative !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    margin: 0 10px 0 0 !important;
+    /* 复位全局 `button`（它现在是 <button>）：min-height: var(--control-h) 会让它
+       比顶栏还高，底色/边框/圆角也要清掉，只留文字。 */
+    min-height: 0 !important;
+    height: auto !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    /* 上下 padding 撑到 36px 触控高度；右侧给箭头留位 */
+    padding: 9px 20px 9px 0 !important;
+    font-size: 15px;
+    font-weight: 800;
+    line-height: 1.2;
+    color: var(--nav-fg) !important;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 右侧的下拉箭头。用边框画（两个 2px 边旋转 45°），不依赖字体里有那个字符。 */
+  .main-nav > .nav-course-title::after {
+    content: "";
+    position: absolute;
+    right: 5px;
+    top: 50%;
+    width: 6px;
+    height: 6px;
+    margin-top: -4px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(45deg);
+    opacity: 0.7;
+    pointer-events: none;
+    transition: transform 0.18s ease, margin-top 0.18s ease;
+  }
+
+  /* 面板已展开 → 箭头翻上去 */
+  body.picker-open .main-nav > .nav-course-title::after {
+    transform: rotate(-135deg);
+    margin-top: -1px;
+  }
+
+  .main-nav > .nav-course-title:active {
+    opacity: 0.72;
+  }
+
+  /* 管理看板下没有科目可选（`body.admin-view .course-pane` 是 display:none），
+     所以只当标题，不给「可点」的暗示。 */
+  body.admin-view .main-nav > .nav-course-title {
+    cursor: default;
+    pointer-events: none;
+  }
+
+  body.admin-view .main-nav > .nav-course-title::after {
+    display: none;
+  }
+
+  /* 科目名已搬到顶栏，内容区这份收掉（避免重复 + 省竖向空间）。
+     ⚠️ 只收 `#courseTitle` 和 padding，**不动 `.course-head` 整条** ——
+     `#courseMeta`（「建筑工程 一级造价工程师 · 9983题 · 更新 5 天前」）保留，
+     万一它在某些设备上可见，也不会被我藏掉。
+     实测扫描 14 个宽度（320→1100）：`.course-meta` 在 ≤760 恒为 `display:none`
+     （既有规则 L7573），≥761 才可见；所以 ≤760 时这条 `padding:0` 会把
+     `.course-head` 收成 0 高，效果等同于整条隐藏。 */
+  .question-pane > .course-head {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    min-height: 0 !important;
+  }
+
+  .question-pane > .course-head #courseTitle {
+    display: none !important;
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   科目名（内容区）= 切换科目的入口（≥761px）
+   ──────────────────────────────────────────────────────────────────────────
+   和手机端顶栏那份是同一个交互：点科目名 → 打开/收起科目面板。
+   ≤760px 时这条标题被隐藏，入口在顶栏（见上一节）。
+
+   为什么现在才补：
+     `#coursePickerBtn`（「切换科目」按钮）**在所有宽度都是 `display:none`**
+     （无条件隐藏，翻遍全部备份都没见过它被放出来）—— 所以 ≥761px 之前换科目
+     只能**点顶栏的「考试题库」**：那是 `app.js` 里「点当前模式项 → 开关面板」的
+     隐藏交互，界面上没有任何提示。
+
+     ⚠️ `#coursePickerBtn` 的 HTML / CSS / JS 已在后续清理中**全部删除** ——
+     它既不可见，又与这里的科目名功能完全重复。
+
+   实现说明：
+     · 元素改成 <button>，所以要复位全局 `button` 的底色/边框/圆角/高度
+     · 全局 `button:hover` 的特异性（0,1,1）比 `.course-title`（0,1,0）高，
+       会把底色刷成 `--primary-50`、文字刷成 `--primary-ink` —— 必须显式压回去
+   ═══════════════════════════════════════════════════════════════════════════ */
+.course-title {
+  position: relative !important;
+  /* ⚠ 必须是 block，不能是 inline-block：
+     inline-block 会在父容器里生成一个**行盒**，多出 2.3px 行距
+     → `.course-head` 从 61.6px 撑到 63.9px → 整个内容区跟着下移 2.3px
+     （实测 `#stem`/`#options` 的 top 都变了）。
+     `width: fit-content` 让按钮只包住文字，不会变成一条横贯整行的可点区域。 */
+  display: block !important;
+  width: fit-content !important;
+  max-width: 100% !important;
+  min-height: 0 !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: 0 22px 0 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  text-align: left !important;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.course-title:hover,
+.course-title:focus-visible {
+  background: transparent !important;
+  color: var(--text) !important;
+  box-shadow: none !important;
+}
+
+.course-title:active {
+  opacity: 0.72;
+}
+
+/* 右侧的下拉箭头，和手机端顶栏同一套画法 */
+.course-title::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -5px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  opacity: 0.5;
+  pointer-events: none;
+  transition: transform 0.18s ease, margin-top 0.18s ease;
+}
+
+body.picker-open .course-title::after {
+  transform: rotate(-135deg);
+  margin-top: -2px;
+}
+
+/* 管理看板下没有科目可选 */
+body.admin-view .course-title {
+  cursor: default;
+  pointer-events: none;
+}
+
+body.admin-view .course-title::after {
+  display: none;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   键盘焦点环
+   ──────────────────────────────────────────────────────────────────────────
+   全局有一条 `button, select, input, textarea { outline: none }`（约 L185），
+   而按钮**没有**自己的 `:focus` 样式 —— 实测 Tab 过 26 个可聚焦元素，
+   **26 个在聚焦时没有任何可见变化**（对比聚焦前后的 computed style），
+   键盘用户完全看不到焦点在哪。
+
+   `input / select / textarea` 有自己的 `:focus` box-shadow，这里不重复加。
+
+   颜色用 `--primary-ink`（就是「本主题下可读的主色」）：
+     浅色 6.01 / 护眼 5.90 / 暗色 9.34 —— 都 ≥ WCAG 2.2 焦点外观要求的 3:1。
+   ═══════════════════════════════════════════════════════════════════════════ */
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--primary-ink) !important;
+  outline-offset: 2px !important;
+}
+
+/* 顶栏 / 底部 dock：底色在「深靛蓝」和「浅色药丸（选中项）」之间来回，
+   写死任何一个颜色都会在另一半上消失。用 `currentColor` ——
+   它永远等于该元素自己的文字色，而文字色必然是配着它自己那块底色选的。 */
+.main-nav button:focus-visible,
+.main-nav [role="button"]:focus-visible,
+.mobile-tabbar button:focus-visible {
+  outline-color: currentColor !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   错题本导航项的「待复习」角标（S11）
+   ──────────────────────────────────────────────────────────────────────────
+   到期错题数（isReviewDue）本来就已算好，但只在用户主动打开训练页时才看得见。
+   提到导航项上：桌面顶栏与手机底部 dock 共用 .nav-item[data-mode="wrong"]，
+   .nav-item 已有 position: relative，所以角标直接绝对定位即可。
+   只在有到期错题时由 JS 写入 data-badge，平时不占位。
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* 带数字的圆形角标，贴在导航项右上角（单数字为正圆，多数字自动变胶囊）。
+   ⚠️ 只作用于手机端 dock：
+   `.nav-item::after` 在桌面端已经被「选中态下划线」占用（left/right 各撑 16px），
+   桌面端复用它会把角标拉成横条、还会顶掉选中指示。手机端那条下划线已被
+   `.mobile-tabbar .nav-item::after { content: none }` 禁用，可以安全复用。
+   另外必须显式写 `left: auto` / `bottom: auto` —— 下划线规则里的 left/bottom 会残留。 */
+.mobile-tabbar .nav-item[data-badge]::after {
+  content: attr(data-badge) !important;
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  left: auto !important;
+  bottom: auto !important;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 13px;
+  text-align: center;
+  box-shadow: 0 0 0 1.5px var(--nav-pill-bg, rgba(0, 0, 0, 0.25));
+  pointer-events: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   移动端 UI 修正（2026-09-19）
+   ──────────────────────────────────────────────────────────────────────────
+   ① 顶栏「工具」按钮：它被 JS 插进 .main-nav（顶栏），但样式是按 .toolbar 写的，
+      带着 `padding: 0 11px`（为容纳被 font-size:0 隐藏的「工具」文字）。
+      结果按钮是 43.7×38 的圆角矩形，而右边头像按钮是 38×38 圆形 —— 两者不对称。
+      这里统一成和头像一样的 38×38 圆形。
+   ② 底部按钮行：.question-actions 是 3 列网格，但错题本「立即反馈」模式下
+      会多出 #confirmAnswerBtn（确认答案）变成 4 个按钮 → 第 4 个被挤到第二行。
+      改成 flex 等分，几个按钮都排一行。
+   ③ 错题本筛选面板：4 个下拉竖排 + 导出按钮，在 390px 屏上占 237px（约 28% 屏高）。
+      手机上改成 2 列网格。
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 760px) {
+  /* ① 顶栏工具按钮：与头像按钮完全对齐 */
+  /* 必须写成 `.main-nav > #mobileToolsBtn`：原规则（约 L11016）用的是 ID 选择器，
+     特异性 (1,1,0) 高于 class 组合 (0,2,0)，只有同特异性且写在后面才能覆盖。 */
+  .main-nav > #mobileToolsBtn {
+    position: relative !important;
+    width: 38px !important;
+    min-width: 38px !important;
+    padding: 0 !important;
+    border-radius: 999px !important;
+  }
+
+  /* 齿轮改用内联 SVG 而不是字体字符 ⚙：
+     实测该字符的字形视觉中心比行框中心偏上 2.5px（ascent 11 / descent 1），
+     按钮 align-items:center 居中的是行框而非字形，所以看起来偏上。
+     而且偏移量随字体变化（Windows 是 Segoe UI Symbol，手机上是别的），
+     用 translateY 微调不可移植 —— 换成 SVG 后天然居中。 */
+  .main-nav > #mobileToolsBtn::before {
+    content: "" !important;
+    display: block !important;
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    width: 18px !important;
+    height: 18px !important;
+    margin: 0 !important;
+    background-color: currentColor !important;
+    -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 0 1 8.4 12 3.6 3.6 0 0 1 12 8.4a3.6 3.6 0 0 1 3.6 3.6 3.6 3.6 0 0 1-3.6 3.6z'/></svg>") !important;
+    -webkit-mask-repeat: no-repeat !important;
+    -webkit-mask-position: center !important;
+    -webkit-mask-size: contain !important;
+    mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 0 1 8.4 12 3.6 3.6 0 0 1 12 8.4a3.6 3.6 0 0 1 3.6 3.6 3.6 3.6 0 0 1-3.6 3.6z'/></svg>") !important;
+    mask-repeat: no-repeat !important;
+    mask-position: center !important;
+    mask-size: contain !important;
+  }
+
+  /* ② 底部按钮行：按实际按钮数等分，不再固定 3 列 */
+  .question-actions {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    gap: 6px !important;
+  }
+  .question-actions > button {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    white-space: nowrap !important;
+  }
+  .question-actions > .toolbar-spacer {
+    display: none !important;
+  }
+
+  /* ③ 错题本筛选面板：4 个下拉改 2×2，导出按钮单独一行 */
+  .wrong-filter-panel {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px 10px !important;
+    align-items: center !important;
+    padding: 10px 12px !important;
+  }
+  .wrong-filter-panel label {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    min-width: 0 !important;
+  }
+  .wrong-filter-panel label > span {
+    flex: 0 0 auto !important;
+    font-size: 13px !important;
+  }
+  .wrong-filter-panel select {
+    flex: 1 1 0 !important;   /* 等分，避免 4 个下拉宽度参差 */
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+  .wrong-filter-panel .wrong-export-btn {
+    grid-column: 1 / -1 !important;
+    padding: 7px 12px !important;
   }
 }

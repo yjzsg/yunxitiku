@@ -11,7 +11,7 @@ userdata/**
 *.sqlite3
 *.dat
 *.zip
-*.bak*
+**/*.bak*
 *.tmp
 *.log
 .env

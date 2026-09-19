@@ -952,7 +952,11 @@ internal static bool IsTruthy(string? value)
 
 internal static bool IsAdmin(string? value) => CleanUserName(value).Equals("admin", StringComparison.OrdinalIgnoreCase);
 
-internal static object SafeError(Exception ex) => new { ok = false, error = SafeErrorText(ex) };
+// 只返回错误文案字符串。以前返回的是对象 `{ok, error}`，而调用处写成 `error = SafeError(ex)`，
+// 于是响应体变成 `{"error":{"ok":false,"error":"…"}}` 的**嵌套对象**，
+// 前端 `new Error(err.error)` 拿到对象 → toast 显示 "[object Object]"，用户完全看不懂。
+// 受影响端点：/api/admin/user-courses、/api/admin/course-update-check、/api/admin/update-bank。
+internal static string SafeError(Exception ex) => SafeErrorText(ex);
 
 /// <summary>只取错误文案（进度登记等处用，不能直接塞对象）。</summary>
 internal static string SafeErrorText(Exception ex)
