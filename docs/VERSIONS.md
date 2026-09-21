@@ -14,6 +14,7 @@
 
 | 提交 | 说明 |
 | --- | --- |
+| `ba95605` | 交付评审整改（2026-09-21）：账号/会话/题库导入加固，见下方「交付评审整改」 |
 | `57756d4` | 修复运行镜像缺少 `/app/public/`，确保前端文件随镜像发布 |
 | `5becc6e` | 修复 .NET 顶层入口返回值，保证 Docker 发布可编译 |
 | `0c5211b` | 调整发布内容项，减少 MSBuild 内容项冲突 |
@@ -21,6 +22,41 @@
 | `ac4c8ba` | 移除运行镜像里不必要的 curl 安装 |
 | `a91f899` | 增加空数据初始化和题库/用户数据 zip 上传下载 |
 | `6477c9c` | 初始公开 Docker 部署版本 |
+
+## 交付评审整改（2026-09-21，提交 `ba95605`）
+
+一次交付级评审（架构 / 安全 / 验收三视角）后做的整改，均已部署并验证。
+
+**阻断级**
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| B1 | `?user=sessions` 能读写会话存储本身 → 可伪造持久 admin 凭据 | `ResolveRequestedUser` 拒绝保留名（400） |
+| B2 | 题库包只校验"表存在"，坏包上传"成功"并把 `/api/courses` 打成 500 | 校验改跑读路径真实查询；换入后复验，失败自动回滚 |
+| B3 | 初始口令未文档化 + 界面写死 `123456` | `docker-compose.yml` 显式设 `App__DefaultLoginPassword`；界面文案改用服务端返回值 |
+| B4 | 结构错的 `accounts.dat` 上传会静默清空全部凭据、重启后锁死 | 结构校验 + 先写临时文件再原子改名 |
+| B5 | 两套 SQLite DDL 不一致 → 全新部署拉取必然 `no such column: ctypscount` | DDL 补列 + `EnsureBankColumns` 迁移旧库 + `CopyMetadataFrom` 改列交集 |
+
+**高危**
+
+- 删号/重置/停用/改密立即吊销该用户会话（新增 `SessionStore.RevokeUser`）；被删账号由中间件直接拒绝。
+- `mustChangePassword` 改为**服务端强制**（admin 无档案也算）。
+- 拉取图片扩展名净化 + 落盘路径包含校验（上游 `cextname`/`ctblname` 可造成容器内任意文件写）。
+- `BankWriter.ReplaceCourse` 把 delete+insert+水位收进**单事务**；`BankWriteGate` 串行化拉取/上传/清广告。
+- 容器加 `TZ=Asia/Shanghai`。
+
+**中/低**
+
+- 全局异常处理（坏 JSON → 400 而非裸 500）；`/api/user/save` 要求 JSON 对象。
+- `/api/health` 跑真实查询（库坏了不再报绿）且不再泄露题库规模。
+- `ForwardedHeaders` + 状态变更请求的 `Sec-Fetch-Site` 校验。
+- `sessions.json` 只存 `SHA256(token)`；凭据/会话/用户 json 权限 `0600`；哈希比较改常量时间；旧 SHA256 档案登录后自动升级 PBKDF2。
+- 备份名加随机后缀；备份保留改为**硬上限**（原先"排 20 名外且超 30 天"才删，等于不删）。
+- 前导 `//` 路径回 404 JSON；日志查询串脱敏；`/api` 响应 `Cache-Control: no-store`；资产响应加 CSP `sandbox`。
+- 新增 `.gitattributes`（行尾统一 LF）；`.dockerignore` 补 `docker-compose.override.yml*` 与 `src/userdata/**`。
+
+**已知限制（本次未改）**：全新空库（未上传真实题库）直接拉取时，拉取库里没有 `course` 行
+（`CopyMetadataFrom` 是从主库拷课程行的），该课程不会出现在列表里。正常部署（先上传题库，主库已含全部课程元数据）不受影响。
 
 ## 发布流程
 
