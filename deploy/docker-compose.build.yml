@@ -13,6 +13,10 @@ services:
       App__SqlitePath: /app/data/question-bank.db
       App__DataAssetsRoot: /app/data/assets
       App__UserDataRoot: /app/userdata
+      # 容器时区（不设则 UTC，落盘时间戳比本地早 8 小时）
+      TZ: Asia/Shanghai
+      # 初始登录口令（公开默认值，靠首次登录强制改密兜底）
+      App__DefaultLoginPassword: "123456"
     healthcheck:
       test: ["CMD-SHELL", "DOTNET_CLI_TELEMETRY_OPTOUT=1 dotnet exec /app/YunxiTiku.Web.dll --healthcheck http://127.0.0.1:8787/api/health"]
       interval: 30s

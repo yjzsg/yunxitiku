@@ -20,8 +20,16 @@ userdata/**
 # ---- 题库与用户数据不进构建上下文（2026-09-17）----
 # 这些只是本地运行时数据，进上下文只会拖慢 build，镜像里也不需要
 src/data/**
+src/userdata/**
 assets/
 assets-pulled/
 _backups/
 local-edits.json
+
+# ---- 机密与本机配置不进构建上下文 ----
+# docker-compose.override.yml 含上游题库账号口令；.dockerignore 按上下文根锚定，
+# 只写 userdata/** 匹配不到 src/userdata/**，所以上面单独列一条。
+docker-compose.override.yml
+docker-compose.override.yml.*
+**/admin-init-password.txt
 

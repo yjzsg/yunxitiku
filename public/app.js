@@ -6575,7 +6575,7 @@ async function adminAddUser() {
     toast("账号已存在");
     return;
   }
-  await api(`/api/admin/user-action?user=${encodeURIComponent(state.user)}`, {
+  const created = await api(`/api/admin/user-action?user=${encodeURIComponent(state.user)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({ target: user, action: "create" }),
@@ -6583,7 +6583,7 @@ async function adminAddUser() {
   await loadUsers();
   await renderAdminDashboard();
   closeAdminUserDialog();
-  toast(`已添加用户：${user}，默认密码 123456`);
+  toast(`已添加用户：${user}，初始密码 ${created.defaultPassword || "见部署配置"}`);
 }
 
 function uniqueCount(values) {
@@ -6608,7 +6608,7 @@ async function adminUserAction(target, action) {
     body: JSON.stringify({ target, action }),
   });
   const hints = {
-    "reset-password": "默认密码已重置为 123456，用户下次登录需修改",
+    "reset-password": `初始密码已重置为 ${result.defaultPassword || "部署配置值"}，用户下次登录需修改`,
     "clear-data": "该账号做题数据已清空",
     delete: "账号已删除",
     disable: "账号已停用",
@@ -7692,6 +7692,31 @@ async function updateQuestionBank(courseId = 0, btn = null) {
     await uploadCourseQuestionBank(courseId, btn);
     return;
   }
+  /* 拉取前先检查有没有更新：没有就直接跳过，不弹确认框、也不白等几分钟的拉取。
+     检查失败时照常继续 —— 宁可多拉一次，也别因为检查环节出错就拉不了。 */
+  const oldText = btn?.textContent || "";
+  if (btn) { btn.disabled = true; btn.textContent = "检查中..."; }
+  let hasUpdate = true;
+  try {
+    const check = await api("/api/admin/course-update-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ courseIds: [courseId] }),
+    });
+    const item = (check.results || []).find((row) => Number(row.courseId) === Number(courseId));
+    if (item && item.hasUpdate === false && !item.error) hasUpdate = false;
+    if (item) state.adminUpdateCheck[courseId] = !!item.hasUpdate;
+  } catch (err) {
+    console.warn("拉取前检查更新失败，改为直接拉取", err);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = oldText; }
+  }
+  if (!hasUpdate) {
+    toast("该题库已是最新，无需更新");
+    refreshAdminBankTable();
+    return;
+  }
+
   const query = new URLSearchParams({ user: state.user });
   query.set("courseId", String(courseId));
   if (!confirm("确定从服务器拉取并更新该题库吗？会先自动备份当前数据。")) return;
@@ -7756,6 +7781,10 @@ async function uploadCourseQuestionBank(courseId, btn = null) {
 }
 
 async function handleQuestionBankUpdateResult(result) {
+  if (result.skipped) {
+    toast(result.message || "该题库已是最新，未执行拉取");
+    return;
+  }
   if (result.reserved || result.mode === "upload") {
     toast(result.message || "当前部署使用上传题库包更新");
     if (isAdmin() && state.adminView === "banks") renderAdminRows(state.adminRows, state.adminFailedCount);

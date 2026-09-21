@@ -117,21 +117,12 @@ public sealed class BankWriter : IDisposable
         Exec("ATTACH DATABASE $src AS meta", ("$src", src));
         try
         {
-            Exec("""
-                INSERT OR REPLACE INTO courseclass   (iclassid, ccoursecname, iindex)             SELECT iclassid, ccoursecname, iindex FROM meta.courseclass;
-                INSERT OR REPLACE INTO coursesubclass(isubclassid, csubclassname, iindex)         SELECT isubclassid, csubclassname, iindex FROM meta.coursesubclass;
-                INSERT OR REPLACE INTO coursesubjecttype(isubjecttype, csubjectname)              SELECT isubjecttype, csubjectname FROM meta.coursesubjecttype;
-                """);
+            CopyFromMeta("courseclass", null, null);
+            CopyFromMeta("coursesubclass", null, null);
+            CopyFromMeta("coursesubjecttype", null, null);
             if (courseId is { } cid)
             {
-                Exec("""
-                    INSERT OR REPLACE INTO course
-                      (icourseid, ccoursename, ihadbuy, dchangedate, dchapterchange, dsubjectchange,
-                       ctypscount, iclassid, isubclassid, bstopflag, iindex)
-                    SELECT icourseid, ccoursename, ihadbuy, dchangedate, dchapterchange, dsubjectchange,
-                           ctypscount, iclassid, isubclassid, bstopflag, iindex
-                    FROM meta.course WHERE icourseid = $cid;
-                    """, ("$cid", cid));
+                CopyFromMeta("course", "icourseid = $cid", ("$cid", cid));
             }
         }
         finally
@@ -140,16 +131,83 @@ public sealed class BankWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// 按**列交集**从 meta 拷到本库。源库与本库 schema 可能不同（早期自建空库缺
+    /// <c>ctypscount</c> / <c>brich</c>），点名列会在缺列时抛 "no such column"；
+    /// 只拷两边都有的列即可跨版本兼容。
+    /// </summary>
+    private void CopyFromMeta(string table, string? whereSql, (string Name, object? Value)? param)
+    {
+        var cols = TableColumns("main", table)
+            .Intersect(TableColumns("meta", table), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (cols.Count == 0) throw new InvalidOperationException($"无法从元数据源拷贝表 {table}：没有匹配字段");
+        var list = string.Join(", ", cols.Select(QuoteIdent));
+        var sql = $"INSERT OR REPLACE INTO main.{QuoteIdent(table)} ({list}) SELECT {list} FROM meta.{QuoteIdent(table)}";
+        if (!string.IsNullOrWhiteSpace(whereSql)) sql += " WHERE " + whereSql;
+        if (param is { } p) Exec(sql, (p.Name, p.Value));
+        else Exec(sql);
+    }
+
+    private List<string> TableColumns(string schema, string table)
+    {
+        using var cmd = _cn.CreateCommand();
+        cmd.CommandText = $"PRAGMA {schema}.table_info({QuoteIdent(table)})";
+        using var reader = cmd.ExecuteReader();
+        var cols = new List<string>();
+        while (reader.Read()) cols.Add(reader.GetString(1));
+        return cols;
+    }
+
+    private static string QuoteIdent(string ident) => "\"" + ident.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
     public void DeleteCourseContent(long courseId)
     {
         Exec("DELETE FROM coursechapter WHERE icourseid = $c", ("$c", courseId));
         Exec("DELETE FROM coursesubject WHERE icourseid = $c", ("$c", courseId));
     }
 
+    /// <summary>
+    /// 原子替换一门课：删旧正文 + 写新章节/题目 + 更新水位，全部在**同一个事务**里。
+    /// 中途失败/被 kill → 整门课回滚，不会留下"删了但没写"的空课（旧实现是 4 个独立提交）。
+    /// </summary>
+    public (int Chapters, int Subjects) ReplaceCourse(long courseId,
+        IEnumerable<ChapterRow> chapters, IEnumerable<SubjectRow> subjects,
+        string? chapterChange, string? subjectChange)
+    {
+        using var tx = _cn.BeginTransaction();
+        using (var del = _cn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM coursechapter WHERE icourseid = $c";
+            del.Parameters.AddWithValue("$c", courseId);
+            del.ExecuteNonQuery();
+        }
+        using (var del = _cn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM coursesubject WHERE icourseid = $c";
+            del.Parameters.AddWithValue("$c", courseId);
+            del.ExecuteNonQuery();
+        }
+        var chapterCount = InsertChaptersCore(tx, chapters);
+        var subjectCount = InsertSubjectsCore(tx, subjects);
+        SetWatermarksCore(tx, courseId, chapterChange, subjectChange);
+        tx.Commit();
+        return (chapterCount, subjectCount);
+    }
+
     public int InsertChapters(IEnumerable<ChapterRow> rows)
     {
-        var n = 0;
         using var tx = _cn.BeginTransaction();
+        var n = InsertChaptersCore(tx, rows);
+        tx.Commit();
+        return n;
+    }
+
+    private int InsertChaptersCore(SqliteTransaction tx, IEnumerable<ChapterRow> rows)
+    {
+        var n = 0;
         using var cmd = _cn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -178,14 +236,20 @@ public sealed class BankWriter : IDisposable
             pStop.Value = r.StopFlag;
             n += cmd.ExecuteNonQuery();
         }
-        tx.Commit();
         return n;
     }
 
     public int InsertSubjects(IEnumerable<SubjectRow> rows)
     {
-        var n = 0;
         using var tx = _cn.BeginTransaction();
+        var n = InsertSubjectsCore(tx, rows);
+        tx.Commit();
+        return n;
+    }
+
+    private int InsertSubjectsCore(SqliteTransaction tx, IEnumerable<SubjectRow> rows)
+    {
+        var n = 0;
         using var cmd = _cn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -230,7 +294,6 @@ public sealed class BankWriter : IDisposable
             pRich.Value = r.Rich;
             n += cmd.ExecuteNonQuery();
         }
-        tx.Commit();
         return n;
     }
 
@@ -246,6 +309,18 @@ public sealed class BankWriter : IDisposable
             Exec("UPDATE course SET dsubjectchange = $v WHERE icourseid = $c",
                 ("$v", subjectChange), ("$c", courseId));
         }
+    }
+
+    private void SetWatermarksCore(SqliteTransaction tx, long courseId, string? chapterChange, string? subjectChange)
+    {
+        if (string.IsNullOrEmpty(chapterChange) && string.IsNullOrEmpty(subjectChange)) return;
+        using var cmd = _cn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "UPDATE course SET dchapterchange = coalesce($ch, dchapterchange), dsubjectchange = coalesce($sc, dsubjectchange) WHERE icourseid = $c";
+        cmd.Parameters.AddWithValue("$ch", (object?)chapterChange ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sc", (object?)subjectChange ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$c", courseId);
+        cmd.ExecuteNonQuery();
     }
 
     public long Count(string table, long courseId)

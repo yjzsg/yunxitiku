@@ -1,0 +1,25 @@
+# 统一行尾：仓库里一律 LF，检出时按平台自动转换。
+# 之前 public/app.js、public/style.css 等文件在 Windows 上被写成 CRLF，
+# 导致 git diff 显示"改了 16000 行"（实际只改了几十行），评审与回滚都不可读。
+* text=auto eol=lf
+
+# 二进制文件不要做行尾转换（否则会损坏内容 / 造成假 diff）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.svg text
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.db binary
+*.db-shm binary
+*.db-wal binary
+*.sqlite binary
+*.sqlite3 binary
+*.dat binary
+*.dll binary
+*.pdb binary
+*.exe binary

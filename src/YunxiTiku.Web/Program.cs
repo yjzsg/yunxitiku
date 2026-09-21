@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.Globalization;
 using System.IO.Compression;
 using System.Net;
@@ -10,6 +10,8 @@ using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using Puller = JkdWeb.BankPuller;
@@ -58,6 +60,14 @@ builder.Services.AddSingleton<AuthStore>();
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<UserDataStore>();
 builder.Services.AddSingleton<QuestionBank>();
+// 反代/隧道部署时按真实客户端 IP 计数（否则限流把所有人算成一个 IP）。
+// 注意：这里信任所有代理来源——本机自托管场景够用；对外暴露时应收窄为已知反代地址。
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -74,6 +84,24 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+// 全局异常处理：任何未捕获异常都回 JSON，而不是 Production 下的裸 500 空响应体。
+app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
+{
+    var error = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+    var (status, message) = error switch
+    {
+        UnauthorizedAccessException => (StatusCodes.Status401Unauthorized, error.Message),
+        InvalidOperationException => (StatusCodes.Status400BadRequest, error.Message),
+        JsonException => (StatusCodes.Status400BadRequest, "请求体不是有效 JSON"),
+        _ => (StatusCodes.Status500InternalServerError, "服务器内部错误，请查看服务端日志"),
+    };
+    context.Response.StatusCode = status;
+    context.Response.ContentType = "application/json; charset=utf-8";
+    await context.Response.WriteAsJsonAsync(new { ok = false, error = message });
+}));
+app.UseForwardedHeaders();
+
 var paths = app.Services.GetRequiredService<AppPaths>();
 var sessions = app.Services.GetRequiredService<SessionStore>();
 Directory.CreateDirectory(paths.UserDataRoot);
@@ -96,7 +124,9 @@ app.Use(async (context, next) =>
     finally
     {
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {context.Request.Method} {context.Request.Path}{context.Request.QueryString} {context.Response.StatusCode} {elapsed:0.0}ms");
+        // 查询串里带用户名，日志里打码（user=xxx -> user=***）
+        var query = Regex.Replace(context.Request.QueryString.Value ?? "", @"(?i)(user|password|token)=[^&]*", "$1=***");
+        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {context.Request.Method} {context.Request.Path}{query} {context.Response.StatusCode} {elapsed:0.0}ms");
     }
 });
 
@@ -107,11 +137,41 @@ app.Use(async (context, next) =>
     if (!headers.ContainsKey("X-Content-Type-Options")) headers["X-Content-Type-Options"] = "nosniff";
     if (!headers.ContainsKey("X-Frame-Options")) headers["X-Frame-Options"] = "SAMEORIGIN";
     if (!headers.ContainsKey("Referrer-Policy")) headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    // 业务响应不该被中间代理缓存
+    if (context.Request.Path.StartsWithSegments("/api") && !headers.ContainsKey("Cache-Control"))
+    {
+        headers["Cache-Control"] = "no-store";
+    }
     await next();
 });
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path;
+    // 前导多斜杠路径（//api/...）用 StartsWithSegments("/api") 判不出来，会掉进 SPA 回退
+    // 返回 200 + HTML，被扫描器误判成"端点还在"。这里直接判 404 JSON。
+    // 只拦**前导**双斜杠：路径中段的双斜杠可能是合法的资产引用，不误伤。
+    var rawPath = path.Value ?? "";
+    if (rawPath.StartsWith("//", StringComparison.Ordinal))
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        await context.Response.WriteAsJsonAsync(new { ok = false, error = "接口不存在" });
+        return;
+    }
+    // 状态变更类 /api 请求做跨站校验：SameSite 按 site 判定，同主机不同端口算"同站"，
+    // 所以同 NAS 上其它服务的页面能带上本应用的 cookie 发起 CSRF。
+    // 浏览器会带 Sec-Fetch-Site；非浏览器客户端（curl 等）不带，放行。
+    if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method)
+        && path.StartsWithSegments("/api"))
+    {
+        var fetchSite = context.Request.Headers["Sec-Fetch-Site"].ToString().Trim();
+        if (fetchSite.Length > 0 && !fetchSite.Equals("same-origin", StringComparison.OrdinalIgnoreCase)
+            && !fetchSite.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { ok = false, error = "跨站请求被拒绝" });
+            return;
+        }
+    }
     // 未登录也能访问的只有健康检查、登录、以及「我是谁」——用户名列表不再是公开信息
     var protectedApi = path.StartsWithSegments("/api")
         && !path.StartsWithSegments("/api/health")
@@ -132,17 +192,40 @@ app.Use(async (context, next) =>
         return;
     }
     var auth = context.RequestServices.GetRequiredService<AuthStore>();
-    if (auth.IsDisabled(sessionUser))
+    var profile = auth.Get(sessionUser);
+    if (auth.IsDisabled(profile))
     {
         sessions.Remove(context.Request);
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         await context.Response.WriteAsJsonAsync(new { ok = false, error = "账号已停用" });
         return;
     }
+    // 账号已被删除（admin 无档案也合法）：会话立即作废，不必等 7 天过期。
+    if (profile is null && !sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase))
+    {
+        sessions.SignOut(context);
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsJsonAsync(new { ok = false, error = "账号不存在，请重新登录" });
+        return;
+    }
     if (path.StartsWithSegments("/api/admin") && !sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase))
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         await context.Response.WriteAsJsonAsync(new { ok = false, error = "admin only" });
+        return;
+    }
+    // 首次登录必须改密：服务端强制。以前只在前端拦，直接 curl 能绕过。
+    // admin 在 accounts.dat 里可能**没有档案**（还在用初始口令）——那种情况同样必须改密。
+    var mustChange = profile is not null
+        ? auth.MustChangePassword(profile)
+        : sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase);
+    if (mustChange
+        && !path.StartsWithSegments("/api/auth/session")
+        && !path.StartsWithSegments("/api/auth/change-password")
+        && !path.StartsWithSegments("/api/auth/logout"))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { ok = false, error = "首次登录请先修改密码", code = "must_change_password" });
         return;
     }
     context.Items[SessionStore.UserItemKey] = sessionUser;
@@ -161,12 +244,12 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.MapGet("/", () => Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8"));
 
-app.MapGet("/api/health", () => Results.Json(new
+app.MapGet("/api/health", () =>
 {
-    ok = true,
-    sqlite = File.Exists(paths.SqlitePath),
-    tables = QuestionBank.TryReadTableCounts(paths.SqlitePath)
-}));
+    // 真跑一条读查询：库坏了要报 not-ok，而不是"文件存在就算健康"（否则监控全绿而服务全死）。
+    // 也不再返回题库规模明细（未鉴权即可读，属信息泄露）。
+    return Results.Json(new { ok = true, sqlite = QuestionBank.ProbeHealthy(paths.SqlitePath) });
+});
 
 // 账号清单只给管理员看（/api/admin/* 由中间件强制要求管理员会话）。
 // 登录页不再需要它——它靠 /api/auth/session 判断"上次登录的人还是不是有效会话"。
@@ -226,16 +309,19 @@ app.MapPost("/api/auth/login", async (HttpContext context, AuthStore auth, Sessi
     {
         if (!user.Equals("admin", StringComparison.OrdinalIgnoreCase))
         {
-            return Results.Json(new { ok = false, error = "账号不存在，请联系管理员添加" }, statusCode: 404);
+            // 不再区分"账号不存在(404)"与"密码不正确(401)"——那是用户名枚举预言机
+            return Results.Json(new { ok = false, error = "账号或密码不正确" }, statusCode: 401);
         }
         if (password != paths.DefaultLoginPassword)
         {
-            return Results.Json(new { ok = false, error = "密码不正确" }, statusCode: 401);
+            return Results.Json(new { ok = false, error = "账号或密码不正确" }, statusCode: 401);
         }
         sessionStore.SignIn(context, user);
         return Results.Json(new { ok = true, user, mustChangePassword = true });
     }
-    if (!auth.Verify(password, profile)) return Results.Json(new { ok = false, error = "密码不正确" }, statusCode: 401);
+    if (!auth.Verify(password, profile)) return Results.Json(new { ok = false, error = "账号或密码不正确" }, statusCode: 401);
+    // 旧档案（单轮 SHA256）登录成功后自动升级为 PBKDF2 并回写
+    if (auth.NeedsHashUpgrade(profile)) auth.UpgradeHash(user, password, profile);
     sessionStore.SignIn(context, user);
     return Results.Json(new { ok = true, user, mustChangePassword = auth.MustChangePassword(profile) });
 }).RequireRateLimiting("login");
@@ -257,6 +343,8 @@ app.MapPost("/api/auth/change-password", async (HttpContext context, AuthStore a
     auth.Save();
     // 管理员口令已不再是初始口令，初始口令文件（若还在）就是过期信息。
     if (user.Equals("admin", StringComparison.OrdinalIgnoreCase)) paths.DeleteInitialAdminPasswordFile();
+    // 改密即止损：先吊销该用户全部既有会话，再为本机重新签发一张
+    sessionStore.RevokeUser(user);
     sessionStore.SignIn(context, user);
     return Results.Json(new { ok = true, user });
 }).RequireRateLimiting("login");
@@ -269,7 +357,9 @@ app.MapPost("/api/auth/logout", (HttpContext context, SessionStore sessionStore)
 
 app.MapGet("/api/user/load", async (HttpContext context, string? user, UserDataStore userData) =>
 {
-    var clean = ResolveRequestedUser(context, user);
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
     try
     {
         var loaded = await userData.LoadAsync(clean);
@@ -284,13 +374,27 @@ app.MapGet("/api/user/load", async (HttpContext context, string? user, UserDataS
 app.MapPost("/api/user/save", async (HttpContext context, string? user, UserDataStore userData) =>
 {
     var request = context.Request;
-    var clean = ResolveRequestedUser(context, user);
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
     if (request.ContentLength > 32L * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
     using var reader = new StreamReader(request.Body, request.ContentType?.Contains("charset", StringComparison.OrdinalIgnoreCase) == true ? Encoding.UTF8 : Encoding.UTF8);
     var body = await reader.ReadToEndAsync();
     if (Encoding.UTF8.GetByteCount(body) > 32 * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
     if (string.IsNullOrWhiteSpace(body)) body = "{}";
-    JsonSerializer.Deserialize<object>(body);
+    // 必须是 JSON 对象（以前接受数组/标量并落盘，导出与备份的消费者都要跟着防）
+    try
+    {
+        using var doc = JsonDocument.Parse(body);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            return Results.Json(new { ok = false, error = "用户数据必须是 JSON 对象" }, statusCode: 400);
+        }
+    }
+    catch (JsonException ex)
+    {
+        return Results.Json(new { ok = false, error = "用户数据不是有效 JSON：" + ex.Message }, statusCode: 400);
+    }
     var expectedRevision = request.Headers.IfMatch.FirstOrDefault()?.Trim('"')
         ?? Convert.ToString(request.Query["revision"], CultureInfo.InvariantCulture)
         ?? "";
@@ -305,7 +409,7 @@ app.MapPost("/api/user/save", async (HttpContext context, string? user, UserData
     }
 });
 
-app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, AuthStore auth) =>
+app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, AuthStore auth, SessionStore sessionStore) =>
 {
     var admin = CleanUserName(user);
     if (!admin.Equals("admin", StringComparison.OrdinalIgnoreCase))
@@ -334,6 +438,7 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         profile["disabledAt"] = NowText();
         auth.Set(target, profile);
         auth.Save();
+        sessionStore.RevokeUser(target);
         return Results.Json(new { ok = true, user = target, disabled = true });
     }
     if (action == "enable")
@@ -359,7 +464,7 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         auth.Set(target, profile);
         auth.Save();
         await File.WriteAllTextAsync(UserDataPath(paths, target), "{}", Encoding.UTF8);
-        return Results.Json(new { ok = true, user = target, created = true });
+        return Results.Json(new { ok = true, user = target, created = true, defaultPassword = paths.DefaultLoginPassword });
     }
     if (action == "reset-password")
     {
@@ -378,7 +483,9 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         fresh["resetAt"] = NowText();
         auth.Set(target, fresh);
         auth.Save();
-        return Results.Json(new { ok = true, user = target, resetPassword = true });
+        // 重置口令必须吊销既有会话，否则旧 cookie 还能继续用
+        sessionStore.RevokeUser(target);
+        return Results.Json(new { ok = true, user = target, resetPassword = true, defaultPassword = paths.DefaultLoginPassword });
     }
     if (action == "clear-data")
     {
@@ -391,6 +498,8 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         if (File.Exists(path)) File.Delete(path);
         auth.Remove(target);
         auth.Save();
+        // 删号后会话立即失效（否则旧 cookie 还能读写，甚至把数据文件"复活"）
+        sessionStore.RevokeUser(target);
         return Results.Json(new { ok = true, user = target, deleted = true });
     }
     return Results.Json(new { ok = false, error = "unknown action" }, statusCode: 400);
@@ -464,7 +573,8 @@ app.MapPost("/api/admin/course-update-check", async (HttpRequest request, Questi
     }
 });
 
-app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, int? courseId, bool? dryRun) =>
+app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, int? courseId, bool? dryRun, bool? force,
+    QuestionBank bank, IConfiguration configuration) =>
 {
     var admin = CleanUserName(user);
     if (!admin.Equals("admin", StringComparison.OrdinalIgnoreCase))
@@ -488,6 +598,29 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, 
                 dryRun = true,
                 message = "Docker 版已启用直连拉取；dryRun 未执行实际更新。",
             });
+        }
+        /* 拉取前先问一次上游「有没有更新」：没有就直接跳过，省掉一次几分钟的白拉。
+           检查失败（上游账号没配、网络抖动等）**不阻断拉取** —— 宁可多拉一次，
+           也不能因为检查本身出错就彻底拉不了。要强制拉取可以带 force=true。 */
+        if (force != true)
+        {
+            try
+            {
+                if (!await CourseUpdateChecker.HasUpdateAsync(bank, courseId.Value, configuration))
+                {
+                    return Results.Json(new
+                    {
+                        ok = true,
+                        skipped = true,
+                        courseId = courseId.Value,
+                        message = "该题库已是最新，未执行拉取。",
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [update-bank] 拉取前检查失败，改为直接拉取: {SafeError(ex)}");
+            }
         }
         try
         {
@@ -546,15 +679,16 @@ app.MapPost("/api/admin/clean-ads", (string? user, int? courseId) =>
     if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
+        using var gate = BankWriteGate.Enter();
         SqliteConnection.ClearAllPools();
         var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
         var backupRoot = Path.Combine(dataRoot, "_backups");
-        var backupDir = Path.Combine(backupRoot, "clean-ads-" + Timestamp());
+        var backupDir = Path.Combine(backupRoot, "clean-ads-" + TimestampUnique());
         var result = Puller.AdCleaner.CleanDatabase(paths.SqlitePath, courseId ?? 0, backupDir);
         // 未购课程的正文在拉取库，也要一起清
         var pulled = File.Exists(paths.PulledSqlitePath)
             ? Puller.AdCleaner.CleanDatabase(paths.PulledSqlitePath, courseId ?? 0,
-                Path.Combine(backupRoot, "clean-ads-pulled-" + Timestamp()))
+                Path.Combine(backupRoot, "clean-ads-pulled-" + TimestampUnique()))
             : null;
         BackupRetention.Prune(backupRoot);
         var courses = result.Courses + (pulled?.Courses ?? 0);
@@ -735,7 +869,7 @@ app.MapGet("/api/question", (HttpContext context, QuestionBank bank, AuthStore a
         : Results.Json(new { ok = false, error = "未分配该题库" }, statusCode: 403);
 });
 
-app.MapGet("/assets/{**relative}", (string relative) =>
+app.MapGet("/assets/{**relative}", (HttpContext context, string relative) =>
 {
     relative = Uri.UnescapeDataString(relative).Replace('/', Path.DirectorySeparatorChar);
     // 先查主库图片目录，再查拉取库图片目录（未购课程的题图落在 assets-pulled/ 下）。
@@ -744,7 +878,14 @@ app.MapGet("/assets/{**relative}", (string relative) =>
         var root = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         var path = Path.GetFullPath(Path.Combine(root, relative));
         if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return Results.Json(new { error = "bad path" }, statusCode: 400);
-        if (File.Exists(path)) return Results.File(path, ContentType(path));
+        if (File.Exists(path))
+        {
+            // 资产是同源提供的：SVG 等可执行内容直接顶层打开会执行脚本（绕过前端 sanitizer）。
+            // 用 CSP sandbox 锁死，并禁止嗅探。
+            context.Response.Headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            return Results.File(path, ContentType(path));
+        }
     }
     return Results.Json(new { error = "asset not found" }, statusCode: 404);
 });
@@ -761,8 +902,16 @@ internal static class AppHelpers
 {
 internal static async Task<Dictionary<string, object?>> ReadJsonBody(HttpRequest request)
 {
-    var data = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(request.Body);
-    return data ?? new Dictionary<string, object?>();
+    try
+    {
+        var data = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(request.Body);
+        return data ?? new Dictionary<string, object?>();
+    }
+    catch (JsonException ex)
+    {
+        // 交给全局异常处理 → 400，而不是裸 500 空响应体
+        throw new InvalidOperationException("请求体不是有效 JSON：" + ex.Message);
+    }
 }
 
 /// <summary>当前会话的用户名（中间件已把会话用户放进 Items；取不到返回空串）。</summary>
@@ -950,7 +1099,12 @@ internal static bool IsTruthy(string? value)
     return value is "1" or "true" or "yes" or "on";
 }
 
-internal static bool IsAdmin(string? value) => CleanUserName(value).Equals("admin", StringComparison.OrdinalIgnoreCase);
+// 空串/null 一律不是 admin。以前 CleanUserName("") 会返回 "admin"，导致 IsAdmin(null)==true。
+internal static bool IsAdmin(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return false;
+    return CleanUserName(value).Equals("admin", StringComparison.OrdinalIgnoreCase);
+}
 
 // 只返回错误文案字符串。以前返回的是对象 `{ok, error}`，而调用处写成 `error = SafeError(ex)`，
 // 于是响应体变成 `{"error":{"ok":false,"error":"…"}}` 的**嵌套对象**，
@@ -963,6 +1117,12 @@ internal static string SafeErrorText(Exception ex)
 {
     Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR: {ex}");
     if (ex is InvalidOperationException || ex is UserDataConflictException) return ex.Message;
+    // 以前这些都被压成"操作失败，请稍后重试"，用户无法自诊断；这里透传（不含机密）
+    if (ex is IOException) return "文件读写失败：" + ex.Message;
+    if (ex is UnauthorizedAccessException) return "文件权限不足：" + ex.Message;
+    if (ex is InvalidDataException) return "数据格式不正确：" + ex.Message;
+    if (ex is SqliteException) return "题库数据库操作失败：" + ex.Message;
+    if (ex is JsonException) return "JSON 格式不正确：" + ex.Message;
     return "操作失败，请稍后重试";
 }
 
@@ -971,7 +1131,14 @@ internal static string ResolveRequestedUser(HttpContext context, string? request
     var sessionUser = Convert.ToString(context.Items[SessionStore.UserItemKey], CultureInfo.InvariantCulture) ?? "";
     if (sessionUser.Length == 0) throw new UnauthorizedAccessException("登录已失效");
     if (!sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase)) return CleanUserName(sessionUser);
-    return string.IsNullOrWhiteSpace(requested) ? "admin" : CleanUserName(requested);
+    var target = string.IsNullOrWhiteSpace(requested) ? "admin" : CleanUserName(requested);
+    // 保留名（sessions.json 是会话存储，不是用户）：以前这里没查，导致
+    // ?user=sessions 能读/写会话文件本身（伪造持久凭据）。建号/分配题库都查了，这里也必须查。
+    if (IsReservedUserName(target))
+    {
+        throw new InvalidOperationException($"「{target}」是系统保留名称，不能作为账号");
+    }
+    return target;
 }
 
 internal static string NormalizeDataType(string? value)
@@ -993,6 +1160,29 @@ internal static string CleanUserName(string? value)
 internal static string UserDataPath(AppPaths paths, string user) => Path.Combine(paths.UserDataRoot, CleanUserName(user) + ".json");
 internal static string NowText() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 internal static string Timestamp() => DateTime.Now.ToString("yyyyMMdd-HHmmss");
+
+/// <summary>
+/// 备份名用：秒级时间戳 + 短随机后缀。同秒内两次备份不再撞名
+/// （旧实现是纯秒级，zip 走 FileMode.CreateNew 会直接抛，目录则被静默覆盖）。
+/// </summary>
+internal static string TimestampUnique() => DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6];
+
+/// <summary>把凭据/会话/用户数据文件收成 0600（同机其它用户读不到）。非 Linux 或挂载不支持时忽略。</summary>
+internal static void RestrictFilePermissions(string path)
+{
+    if (!OperatingSystem.IsLinux()) return;
+    try
+    {
+        if (File.Exists(path))
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+    catch
+    {
+        // 某些挂载（FUSE/NFS）不支持 chmod：忽略，不影响功能。
+    }
+}
 
 internal static void TryDeleteFile(string path)
 {
@@ -1025,11 +1215,36 @@ internal static string ContentType(string path)
 /// Cross-platform: no Access/Jet, no client DLLs, no PowerShell — which is what makes
 /// 拉取更新 usable on the Docker/NAS deployment, not just on the Windows server build.
 /// </summary>
+/// <summary>
+/// 题库写操作串行闸：拉取 / 整包上传 / 单课导入 / 清广告 同时只允许一个。
+/// 这些操作各自"先删后写"，并发交叠会把课程清成 0 题；这里用进程内锁把它们排开。
+/// </summary>
+internal static class BankWriteGate
+{
+    private static readonly SemaphoreSlim Gate = new(1, 1);
+
+    public static IDisposable Enter()
+    {
+        if (!Gate.Wait(TimeSpan.FromMinutes(15)))
+        {
+            throw new InvalidOperationException("题库正在被另一个操作占用，请等它结束后重试");
+        }
+        return new Releaser();
+    }
+
+    private sealed class Releaser : IDisposable
+    {
+        public void Dispose() => Gate.Release();
+    }
+}
+
 static class ServerBankPuller
 {
     public static object PullCourseIntoBank(AppPaths paths, IConfiguration configuration, int courseId)
     {
         if (courseId <= 0) throw new InvalidOperationException("请选择要更新的题库");
+        // 与整包上传/单课导入/清广告互斥（都是"先删后写"，交叠会把课程清成 0 题）
+        using var gate = BankWriteGate.Enter();
 
         // 课程内容在主库（导出产物里有正文）→ 就地更新主库；否则（未购课程）→ 写**拉取库**。
         // 拉取库不在"整包上传题库"的替换范围内，所以拉来的内容不会被那条链路清掉。
@@ -1040,7 +1255,7 @@ static class ServerBankPuller
 
         var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
         var backupRoot = Path.Combine(dataRoot, "_backups");
-        var backupDir = Path.Combine(backupRoot, "pull-course-" + courseId + "-" + Timestamp());
+        var backupDir = Path.Combine(backupRoot, "pull-course-" + courseId + "-" + TimestampUnique());
         Directory.CreateDirectory(backupDir);
         if (File.Exists(target))
         {
@@ -1260,16 +1475,22 @@ static class BackupRetention
                 .Select(path => new { Path = path, Updated = File.GetLastWriteTimeUtc(path) })
                 .OrderByDescending(item => item.Updated)
                 .ToList();
-            foreach (var item in entries.Skip(Math.Max(1, keepLatest)).Where(item => item.Updated < cutoff))
-            {
-                if (Directory.Exists(item.Path)) Directory.Delete(item.Path, true);
-                else if (File.Exists(item.Path)) File.Delete(item.Path);
-            }
+            // 先按数量硬截断。旧写法是"排 20 名之外**且**超过 30 天"才删，
+            // 结果当天创建的备份永远不删（线上 _backups 已涨到 1.2GB）。
+            foreach (var item in entries.Skip(Math.Max(1, keepLatest))) DeleteEntry(item.Path);
+            // 再叠加"太旧就删"，即使还在前 N 名里
+            foreach (var item in entries.Take(Math.Max(1, keepLatest)).Where(item => item.Updated < cutoff)) DeleteEntry(item.Path);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 备份清理失败: {ex.Message}");
         }
+    }
+
+    private static void DeleteEntry(string path)
+    {
+        if (Directory.Exists(path)) Directory.Delete(path, true);
+        else if (File.Exists(path)) File.Delete(path);
     }
 }
 
@@ -1350,6 +1571,7 @@ static class AdminDataTransfer
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
         if (ext != ".zip") throw new InvalidOperationException("题库上传仅支持 zip 包，包内需包含 question-bank.db 和 assets 目录");
+        using var gate = BankWriteGate.Enter();
         var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-bank-{Guid.NewGuid():N}");
         try
         {
@@ -1361,7 +1583,7 @@ static class AdminDataTransfer
             ValidateQuestionDb(sourceDb);
             var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
             Directory.CreateDirectory(dataRoot);
-            var backupDir = Path.Combine(dataRoot, "_backups", "bank-" + Timestamp());
+            var backupDir = Path.Combine(dataRoot, "_backups", "bank-" + TimestampUnique());
             Directory.CreateDirectory(backupDir);
             if (File.Exists(paths.SqlitePath)) File.Copy(paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
             if (Directory.Exists(paths.DataAssetsRoot))
@@ -1372,6 +1594,13 @@ static class AdminDataTransfer
 
             File.Copy(sourceDb, paths.SqlitePath, true);
             ReplaceDirectory(paths.DataAssetsRoot, sourceAssets);
+            // 换入后再验一次：读不通就自动回滚（坏包上传不该把服务打死）
+            if (!QuestionBank.ProbeHealthy(paths.SqlitePath))
+            {
+                var backupDb = Path.Combine(backupDir, "question-bank.db");
+                if (File.Exists(backupDb)) File.Copy(backupDb, paths.SqlitePath, true);
+                throw new InvalidOperationException("上传的题库无法正常读取（缺少必要的表/列），已自动回滚到原题库");
+            }
             return new
             {
                 ok = true,
@@ -1391,6 +1620,7 @@ static class AdminDataTransfer
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
         if (ext != ".zip") throw new InvalidOperationException("题库更新仅支持 zip 包，包内需包含 question-bank.db 和 assets 目录");
+        using var gate = BankWriteGate.Enter();
         var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-course-bank-{Guid.NewGuid():N}");
         try
         {
@@ -1405,7 +1635,7 @@ static class AdminDataTransfer
 
             var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
             Directory.CreateDirectory(dataRoot);
-            var backupDir = Path.Combine(dataRoot, "_backups", "course-" + courseId + "-" + Timestamp());
+            var backupDir = Path.Combine(dataRoot, "_backups", "course-" + courseId + "-" + TimestampUnique());
             Directory.CreateDirectory(backupDir);
             if (File.Exists(paths.SqlitePath)) File.Copy(paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
             if (Directory.Exists(paths.DataAssetsRoot))
@@ -1446,6 +1676,7 @@ static class AdminDataTransfer
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
         if (ext != ".zip") throw new InvalidOperationException("用户数据上传仅支持 zip 包");
+        using var gate = BankWriteGate.Enter();
         var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-userdata-{Guid.NewGuid():N}");
         var importDir = Path.Combine(tempDir, "import");
         try
@@ -1456,16 +1687,20 @@ static class AdminDataTransfer
             var files = CollectUserDataFiles(importDir).ToList();
             if (files.Count == 0) throw new InvalidOperationException("没有找到可导入的用户数据文件");
             foreach (var file in files) ValidateJsonFile(file.Path, file.Name);
-            var hasAccounts = files.Any(file => string.Equals(file.Name, "accounts.dat", StringComparison.OrdinalIgnoreCase));
+            var accountsFile = files.FirstOrDefault(file => string.Equals(file.Name, "accounts.dat", StringComparison.OrdinalIgnoreCase));
+            var hasAccounts = accountsFile.Path is not null;
+            // 结构校验：合法 JSON 但结构错（{"admin":"oops"} / []）会让凭据被静默清空
+            if (hasAccounts) ValidateAccountsFile(accountsFile.Path!);
 
             Directory.CreateDirectory(paths.UserDataRoot);
             var backupRoot = Path.Combine(paths.UserDataRoot, "_backups");
             Directory.CreateDirectory(backupRoot);
-            var backupZip = Path.Combine(backupRoot, "userdata-" + Timestamp() + ".zip");
+            var backupZip = Path.Combine(backupRoot, "userdata-" + TimestampUnique() + ".zip");
             using (var zip = ZipFile.Open(backupZip, ZipArchiveMode.Create))
             {
                 foreach (var file in Directory.EnumerateFiles(paths.UserDataRoot, "*", SearchOption.AllDirectories)
-                             .Where(path => !IsUnderBackup(path, backupRoot)))
+                             .Where(path => !IsUnderBackup(path, backupRoot))
+                             .Where(path => !SessionStore.IsSessionFile(path)))
                 {
                     var relative = Path.GetRelativePath(paths.UserDataRoot, file).Replace('\\', '/');
                     zip.CreateEntryFromFile(file, relative, CompressionLevel.Fastest);
@@ -1473,16 +1708,32 @@ static class AdminDataTransfer
             }
             BackupRetention.Prune(backupRoot);
 
-            foreach (var old in Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly))
+            // 先试后换：先全部写成临时名，就位后再改名；任何一步失败都不动线上文件。
+            // 旧实现是"先删光 *.json（含 sessions.json）再拷"，中途失败即丢数据。
+            var staged = new List<(string Temp, string Final)>();
+            try
             {
-                File.Delete(old);
+                foreach (var file in files)
+                {
+                    var final = Path.Combine(paths.UserDataRoot, file.Name);
+                    var temp = final + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    File.Copy(file.Path, temp, true);
+                    RestrictFilePermissions(temp);
+                    staged.Add((temp, final));
+                }
+                // 只删会被覆盖的文件：用户 json（**不含**会话文件）+ accounts.dat（若在包里）
+                foreach (var old in Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly)
+                             .Where(path => !SessionStore.IsSessionFile(path)))
+                {
+                    File.Delete(old);
+                }
+                if (hasAccounts && File.Exists(paths.AuthDataPath)) File.Delete(paths.AuthDataPath);
+                foreach (var (temp, final) in staged) File.Move(temp, final, true);
             }
-            if (hasAccounts && File.Exists(paths.AuthDataPath)) File.Delete(paths.AuthDataPath);
-
-            foreach (var file in files)
+            catch
             {
-                var target = Path.Combine(paths.UserDataRoot, file.Name);
-                File.Copy(file.Path, target, true);
+                foreach (var (temp, _) in staged) TryDeleteFile(temp);
+                throw;
             }
             auth.Reload();
             return new
@@ -1528,16 +1779,45 @@ static class AdminDataTransfer
         }
     }
 
+    /// <summary>
+    /// 校验题库包：必须能跑通**读路径的真实查询**。
+    /// 以前只对 4 张表做 count(*)，"表在但列不全"的包会通过校验，上传成功后 /api/courses 直接 500。
+    /// </summary>
     private static void ValidateQuestionDb(string path)
     {
         using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
         conn.Open();
-        foreach (var table in new[] { "course", "coursechapter", "coursesubject", "coursesubjecttype" })
+        foreach (var sql in new[]
+        {
+            "select c.icourseid, c.ccoursename, c.ihadbuy, c.dchangedate, c.dchapterchange, c.dsubjectchange, cl.ccoursecname, cl.iindex, sc.csubclassname, sc.iindex from course c left join courseclass cl on c.iclassid=cl.iclassid left join coursesubclass sc on c.isubclassid=sc.isubclassid limit 1",
+            "select ch.ichapterid, ch.cchaptername, ch.cchaptercode, ch.igrade, ch.itype, ch.icount from coursechapter ch limit 1",
+            "select s.isubjectid, s.icourseid, s.ichapterid, s.isubjecttype, s.iindex, s.ctitle, s.ianswercount, s.dupdatedate, t.csubjectname, ch.cchaptername from coursesubject s left join coursesubjecttype t on s.isubjecttype=t.isubjecttype left join coursechapter ch on s.ichapterid=ch.ichapterid limit 1",
+            "select count(*) from coursesubjecttype",
+        })
         {
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "select count(*) from " + table;
+            cmd.CommandText = sql;
             cmd.ExecuteScalar();
         }
+    }
+
+    /// <summary>
+    /// 校验 accounts.dat：必须是「账号名 → 档案对象」的 JSON 对象，且含 admin。
+    /// 以前只验"是不是 JSON"，结构错的合法 JSON（`{"admin":"oops"}` / `[]`）会通过校验，
+    /// 导入后凭据被静默清空、重启后无人能登录。
+    /// </summary>
+    private static void ValidateAccountsFile(string path)
+    {
+        Dictionary<string, Dictionary<string, object?>>? raw;
+        try
+        {
+            raw = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, object?>>>(File.ReadAllText(path, Encoding.UTF8));
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException($"accounts.dat 结构不正确（应为「账号名 → 档案对象」的对象）：{ex.Message}");
+        }
+        if (raw is null || raw.Count == 0) throw new InvalidOperationException("accounts.dat 里没有任何账号");
     }
 
     private static (string Name, int Chapters, int Subjects) ReadCourseImportInfo(string dbPath, int courseId)
@@ -1812,6 +2092,7 @@ sealed class UserDataStore
             {
                 await File.WriteAllTextAsync(temp, body, new UTF8Encoding(false));
                 File.Move(temp, path, true);
+                RestrictFilePermissions(path);
             }
             finally
             {
@@ -1862,7 +2143,7 @@ sealed class SessionStore
         EnsureLoaded();
         Remove(context.Request);
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-        _sessions[token] = new SessionRecord(CleanUserName(user), DateTimeOffset.UtcNow.Add(Lifetime));
+        _sessions[HashToken(token)] = new SessionRecord(CleanUserName(user), DateTimeOffset.UtcNow.Add(Lifetime));
         Persist();
         context.Response.Cookies.Append(CookieName, token, new CookieOptions
         {
@@ -1879,10 +2160,11 @@ sealed class SessionStore
     {
         EnsureLoaded();
         if (!request.Cookies.TryGetValue(CookieName, out var token) || string.IsNullOrWhiteSpace(token)) return "";
-        if (!_sessions.TryGetValue(token, out var record)) return "";
+        var key = HashToken(token);
+        if (!_sessions.TryGetValue(key, out var record)) return "";
         if (record.ExpiresAt <= DateTimeOffset.UtcNow)
         {
-            _sessions.TryRemove(token, out _);
+            _sessions.TryRemove(key, out _);
             Persist();
             return "";
         }
@@ -1894,9 +2176,28 @@ sealed class SessionStore
         EnsureLoaded();
         if (request.Cookies.TryGetValue(CookieName, out var token) && !string.IsNullOrWhiteSpace(token))
         {
-            if (_sessions.TryRemove(token, out _)) Persist();
+            if (_sessions.TryRemove(HashToken(token), out _)) Persist();
         }
     }
+
+    /// <summary>吊销某个用户的全部会话（改密/重置/停用/删除时调用）。返回是否真的吊销了会话。</summary>
+    public bool RevokeUser(string user)
+    {
+        EnsureLoaded();
+        var clean = CleanUserName(user);
+        var keys = _sessions
+            .Where(kv => kv.Value.User.Equals(clean, StringComparison.OrdinalIgnoreCase))
+            .Select(kv => kv.Key)
+            .ToList();
+        var removed = false;
+        foreach (var key in keys) removed |= _sessions.TryRemove(key, out _);
+        if (removed) Persist();
+        return removed;
+    }
+
+    /// <summary>会话令牌只以 SHA256 落盘：sessions.json 被读到也拿不到可直接用的 cookie 值。</summary>
+    private static string HashToken(string token)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
 
     public void SignOut(HttpContext context)
     {
@@ -1961,6 +2262,7 @@ sealed class SessionStore
                 var json = JsonSerializer.Serialize(rows);
                 File.WriteAllText(temp, json, new UTF8Encoding(false));
                 File.Move(temp, SessionFilePath(), true);
+                RestrictFilePermissions(SessionFilePath());
             }
             catch
             {
@@ -2177,7 +2479,28 @@ sealed class AuthStore
         if (salt.Length == 0 || hash.Length == 0) return false;
         var algo = GetProfileString(profile, "hashAlgo");
         var computed = algo == "pbkdf2" ? Pbkdf2Hash(password, salt) : PasswordHash(password, salt);
-        return string.Equals(computed, hash, StringComparison.OrdinalIgnoreCase);
+        return FixedTimeEqualsHex(computed, hash);
+    }
+
+    /// <summary>常量时间比较（避免时序侧信道）。</summary>
+    private static bool FixedTimeEqualsHex(string a, string b)
+    {
+        if (a.Length != b.Length) return false;
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.ASCII.GetBytes(a.ToLowerInvariant()),
+            Encoding.ASCII.GetBytes(b.ToLowerInvariant()));
+    }
+
+    /// <summary>旧档案（无 hashAlgo 或非 pbkdf2）需要在成功登录后升级哈希。</summary>
+    public bool NeedsHashUpgrade(Dictionary<string, object?> profile)
+        => !GetProfileString(profile, "hashAlgo").Equals("pbkdf2", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>把档案哈希升级为 PBKDF2（保留 disabled/courses/createdAt 等其它字段）。</summary>
+    public void UpgradeHash(string user, string password, Dictionary<string, object?> profile)
+    {
+        foreach (var pair in CreateProfile(password)) profile[pair.Key] = pair.Value;
+        Set(user, profile);
+        Save();
     }
 
     public void Save()
@@ -2186,6 +2509,7 @@ sealed class AuthStore
         {
             Directory.CreateDirectory(_paths.UserDataRoot);
             File.WriteAllText(_paths.AuthDataPath, JsonSerializer.Serialize(_auth), Encoding.UTF8);
+            RestrictFilePermissions(_paths.AuthDataPath);
         }
     }
 
@@ -2271,6 +2595,19 @@ static class CourseUpdateChecker
             }
         }
         return results;
+    }
+
+    /// <summary>
+    /// 单个题库「有没有更新」。给 update-bank 做拉取前守卫用。
+    /// 拿不到结论时返回 true（保守起见照拉，避免因为检查环节出问题就永远拉不了）。
+    /// </summary>
+    public static async Task<bool> HasUpdateAsync(QuestionBank bank, int courseId, IConfiguration configuration)
+    {
+        var results = await CheckAsync(bank, new List<int> { courseId }, configuration);
+        if (results.Count == 0) return true;
+        // CheckAsync 返回的是匿名对象，这里反射取 hasUpdate；取不到就当有更新。
+        var prop = results[0].GetType().GetProperty("hasUpdate");
+        return prop?.GetValue(results[0]) is bool has ? has : true;
     }
 
     /// <summary>"没有更新"时上游不返回 DataTable（载荷为空），这里当成 0 行而不是报错。</summary>
@@ -2363,7 +2700,13 @@ sealed class QuestionBank
 
     public static void EnsureDatabase(string sqlitePath)
     {
-        if (File.Exists(sqlitePath)) return;
+        if (File.Exists(sqlitePath))
+        {
+            // 旧库补齐列：早期自建的空库缺 ctypscount / brich，会让拉取在
+            // BankWriter.CopyMetadataFrom 处抛 "no such column: ctypscount"。
+            EnsureBankColumns(sqlitePath);
+            return;
+        }
         Directory.CreateDirectory(Path.GetDirectoryName(sqlitePath) ?? ".");
         using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sqlitePath, DefaultTimeout = 30 }.ToString());
         conn.Open();
@@ -2376,6 +2719,7 @@ sealed class QuestionBank
                 dchangedate text,
                 dchapterchange text,
                 dsubjectchange text,
+                ctypscount text,
                 iclassid integer,
                 isubclassid integer,
                 iindex integer default 0,
@@ -2419,7 +2763,8 @@ sealed class QuestionBank
                 ianswercount integer default 0,
                 iscore text,
                 dupdatedate text,
-                bstopflag integer default 0
+                bstopflag integer default 0,
+                brich integer
             );
             insert or ignore into coursesubjecttype(isubjecttype, csubjectname) values
                 (0, '单选题'),
@@ -2430,6 +2775,40 @@ sealed class QuestionBank
                 (6, '不定项选择题');
         ";
         cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// 补齐旧库缺失的列（幂等）。只在早期"自建空库"上缺这两列；真实导出库本来就有。
+    /// 失败只记日志，不阻断启动。
+    /// </summary>
+    public static void EnsureBankColumns(string sqlitePath)
+    {
+        if (!File.Exists(sqlitePath)) return;
+        try
+        {
+            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = sqlitePath, DefaultTimeout = 30 }.ToString());
+            conn.Open();
+            AddColumnIfMissing(conn, "course", "ctypscount", "text");
+            AddColumnIfMissing(conn, "coursesubject", "brich", "integer");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 补齐题库列失败（忽略）: {ex.Message}");
+        }
+    }
+
+    private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string type)
+    {
+        using (var check = conn.CreateCommand())
+        {
+            check.CommandText = "select count(*) from pragma_table_info($t) where name = $c";
+            check.Parameters.AddWithValue("$t", table);
+            check.Parameters.AddWithValue("$c", column);
+            if (Convert.ToInt32(check.ExecuteScalar(), CultureInfo.InvariantCulture) > 0) return;
+        }
+        using var alter = conn.CreateCommand();
+        alter.CommandText = $"alter table \"{table}\" add column \"{column}\" {type}";
+        alter.ExecuteNonQuery();
     }
 
     public IEnumerable<object> GetCourses(string search, bool availableOnly, HashSet<int>? allowed = null,
@@ -2496,6 +2875,41 @@ sealed class QuestionBank
             return string.IsNullOrWhiteSpace(text) ? null : text;
         }
         return (Clean(row["dchapterchange"]), Clean(row["dsubjectchange"]));
+    }
+
+    /// <summary>
+    /// 健康探针：跑真实读查询（表/列齐全才算健康），不返回规模明细。
+    /// 以前 health 只判"文件存在"，题库坏掉时 /api/courses 500 而 health 仍 200。
+    /// </summary>
+    public static bool ProbeHealthy(string sqlitePath)
+    {
+        if (!File.Exists(sqlitePath)) return false;
+        try
+        {
+            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = sqlitePath,
+                Mode = SqliteOpenMode.ReadOnly,
+                DefaultTimeout = 5,
+            }.ToString());
+            conn.Open();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "select count(*) from course c left join courseclass cl on c.iclassid=cl.iclassid";
+                cmd.ExecuteScalar();
+            }
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "select count(*) from coursesubject s left join coursesubjecttype t on s.isubjecttype=t.isubjecttype";
+                cmd.ExecuteScalar();
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] health probe failed: {ex.Message}");
+            return false;
+        }
     }
 
     public static object TryReadTableCounts(string sqlitePath)

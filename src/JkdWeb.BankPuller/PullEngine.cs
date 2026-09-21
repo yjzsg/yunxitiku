@@ -398,8 +398,7 @@ public sealed class PullEngine
                 foreach (var r in rows)
                 {
                     var tableName = r.GetValueOrDefault("ctblname") ?? "";
-                    var ext = (r.GetValueOrDefault("cextname") ?? "").Trim();
-                    if (ext.Length == 0) ext = "png";
+                    var ext = SanitizeImageExt(r.GetValueOrDefault("cextname"));
                     var b64 = r.GetValueOrDefault("pimage");
                     if (string.IsNullOrEmpty(b64)) continue;
 
@@ -443,9 +442,22 @@ public sealed class PullEngine
                     var name = parts.Length >= 2
                         ? $"{s.SubjectId}_{blockKey}_{idx}.{ext}"
                         : $"{s.SubjectId}_{blockKey}.{ext}";
+                    // 文件名片段（blockKey 来自上游 ctblname）可能含路径分隔符：
+                    // 落盘前必须确认最终路径仍在该课程的图片目录内，否则跳过（防路径穿越）。
+                    var safeDir = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                    var targetPath = Path.GetFullPath(Path.Combine(dir, name));
+                    if (!targetPath.StartsWith(safeDir, StringComparison.Ordinal))
+                    {
+                        report.Images.FilesFailed++;
+                        if (report.Images.FailedSample.Count < 8)
+                        {
+                            report.Images.FailedSample.Add($"{name}: 非法文件名，已跳过");
+                        }
+                        continue;
+                    }
                     try
                     {
-                        await File.WriteAllBytesAsync(Path.Combine(dir, name), bytes, ct).ConfigureAwait(false);
+                        await File.WriteAllBytesAsync(targetPath, bytes, ct).ConfigureAwait(false);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -510,10 +522,20 @@ public sealed class PullEngine
         using (var db = new BankWriter(o.OutDb))
         {
             if (!string.IsNullOrEmpty(o.MetaDb)) db.CopyMetadataFrom(o.MetaDb!, o.CourseId);
-            if (o.ReplaceCourse) db.DeleteCourseContent(o.CourseId);
-            report.Chapters.Written = db.InsertChapters(chapters);
-            report.Subjects.Written = db.InsertSubjects(subjects);
-            db.SetCourseWatermarks(o.CourseId, report.Chapters.NewWatermark, report.Subjects.NewWatermark);
+            if (o.ReplaceCourse)
+            {
+                // 单事务替换：delete + insert + 水位一起提交；中途失败整门课回滚，不留"删了没写"的空课。
+                var written = db.ReplaceCourse(o.CourseId, chapters, subjects,
+                    report.Chapters.NewWatermark, report.Subjects.NewWatermark);
+                report.Chapters.Written = written.Chapters;
+                report.Subjects.Written = written.Subjects;
+            }
+            else
+            {
+                report.Chapters.Written = db.InsertChapters(chapters);
+                report.Subjects.Written = db.InsertSubjects(subjects);
+                db.SetCourseWatermarks(o.CourseId, report.Chapters.NewWatermark, report.Subjects.NewWatermark);
+            }
             report.Chapters.DbRowsAfter = (int)db.Count("coursechapter", o.CourseId);
             report.Subjects.DbRowsAfter = (int)db.Count("coursesubject", o.CourseId);
         }
@@ -646,6 +668,17 @@ public sealed class PullEngine
     /// byte-for-byte. PNG payloads are cut right after the IEND chunk (the authoritative end of
     /// the stream); anything else gets trailing zero bytes stripped.
     /// </summary>
+    /// <summary>
+    /// 上游给的图片扩展名（cextname）直接拼进文件名会路径穿越：带 "/" 就能写到课程目录之外。
+    /// 只接受 1~8 位字母数字，否则退回 png。
+    /// </summary>
+    private static string SanitizeImageExt(string? raw)
+    {
+        var ext = (raw ?? "").Trim().TrimStart('.');
+        if (ext.Length is > 0 and <= 8 && ext.All(char.IsLetterOrDigit)) return ext.ToLowerInvariant();
+        return "png";
+    }
+
     private static byte[] TrimImagePadding(byte[] b)
     {
         if (b.Length > 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47)

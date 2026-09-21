@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20260919-ui6"><link rel="stylesheet" href="/drawer.css?v=4">
+  <link rel="stylesheet" href="/style.css?v=20260921-secfix1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -52,7 +52,7 @@
         <input type="checkbox" checked disabled>
         <span>第一次登录必须修改密码</span>
       </label>
-      <small>默认密码为123456</small>
+      <small>初始密码由部署配置决定（默认 123456）</small>
       <div id="changePasswordBox" class="change-password-box hidden">
         <strong>首次登录，请先修改密码</strong>
         <label>
@@ -263,7 +263,7 @@
         <span>账号名</span>
         <input id="adminUserNameInput" type="text" autocomplete="off" placeholder="请输入新用户账号名">
       </label>
-      <small>新账号默认密码为123456，首次登录必须修改密码。</small>
+      <small>新账号使用部署配置的初始密码（默认 123456），首次登录必须修改密码。</small>
       <div class="modal-actions">
         <button id="adminUserCancelBtn" type="button">取消</button>
         <button id="adminUserSaveBtn" class="primary-action" type="button">创建账号</button>
@@ -315,7 +315,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20260919-polish1"></script>
+  <script src="/app.js?v=20260921-secfix1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     if ("serviceWorker" in navigator) {

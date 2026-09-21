@@ -11,6 +11,12 @@ services:
       App__SqlitePath: /app/data/question-bank.db
       App__DataAssetsRoot: /app/data/assets
       App__UserDataRoot: /app/userdata
+      # 容器时区。不设时容器是 UTC，落盘时间戳（savedAt / changedAt / 备份目录名）会比本地早 8 小时。
+      TZ: Asia/Shanghai
+      # 初始登录口令：新建账号的初始密码，也是管理端「重置密码」的目标值。
+      # 这里给的是**公开默认值**，靠「首次登录强制改密」（服务端强制）兜底；
+      # 不想用公开默认值就删掉这一行，改到 docker-compose.override.yml 里配置（override 优先）。
+      App__DefaultLoginPassword: "123456"
       # 上游题库服务账号不在这个文件里（机密，不进仓库）：
       # 本机部署时写进 docker-compose.override.yml（见 docker-compose.override.yml.example），
       # 或用环境变量 App__BankServiceUser / App__BankServicePassword 传入。
