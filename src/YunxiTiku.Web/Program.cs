@@ -529,9 +529,9 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
 });
 
 // 按用户分配题库：读（assigned=null 表示"全部可见"）/ 写（courses=null 恢复全部）
-app.MapGet("/api/admin/user-courses", (AuthStore auth, string? user, string? target) =>
+app.MapGet("/api/admin/user-courses", (HttpContext context, AuthStore auth, string? user, string? target) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     var name = CleanUserName(target);
     if (name.Length == 0) return Results.Json(new { ok = false, error = "缺少用户名" }, statusCode: 400);
     var allowed = UserCourses.AllowedIds(auth, name);
@@ -540,8 +540,9 @@ app.MapGet("/api/admin/user-courses", (AuthStore auth, string? user, string? tar
 
 app.MapPost("/api/admin/user-courses", async (HttpRequest request, HttpContext context, AuthStore auth, string? user) =>
 {
-    /* 优先用会话身份判管理员；`?user=` 只是兼容旧前端（它曾经漏传过这个参数）。 */
-    if (!IsAdminRequest(context) && !IsAdmin(user))
+    /* 用**会话身份**判管理员。`?user=` 是客户端可控的，只看它就等于伪鉴权
+       （任何已登录用户传 `?user=admin` 就能冒充）；而且旧前端漏传参数时会误报 403。 */
+    if (!IsAdminRequest(context))
     {
         return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     }
@@ -579,7 +580,7 @@ app.MapPost("/api/admin/user-courses", async (HttpRequest request, HttpContext c
 // 检查这些课程在上游有没有更新（按增量水位各探一次章节与题目；不做整表探测）
 app.MapPost("/api/admin/course-update-check", async (HttpRequest request, QuestionBank bank, IConfiguration configuration, string? user) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(request)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
         var body = await ReadJsonBody(request);
@@ -600,11 +601,10 @@ app.MapPost("/api/admin/course-update-check", async (HttpRequest request, Questi
     }
 });
 
-app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, int? courseId, bool? dryRun, bool? force,
+app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext context, string? user, int? courseId, bool? dryRun, bool? force,
     QuestionBank bank, IConfiguration configuration) =>
 {
-    var admin = CleanUserName(user);
-    if (!admin.Equals("admin", StringComparison.OrdinalIgnoreCase))
+    if (!IsAdminRequest(context))
     {
         return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     }
@@ -688,9 +688,9 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, string? user, 
 
 // 拉取进度：POST /api/admin/update-bank 仍是同步返回最终结果，管理页在它进行期间轮询这里。
 // 没有记录（没拉过 / 进程重启过 / 已过期）时 active=false，前端据此降级成不确定态。
-app.MapGet("/api/admin/update-bank/progress", (string? user, int? courseId) =>
+app.MapGet("/api/admin/update-bank/progress", (HttpContext context, string? user, int? courseId) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     if (!courseId.HasValue || courseId.Value <= 0)
     {
         return Results.Json(new { ok = false, error = "缺少课程 ID" }, statusCode: 400);
@@ -701,9 +701,9 @@ app.MapGet("/api/admin/update-bank/progress", (string? user, int? courseId) =>
         : new { ok = true, known = true, snapshot });
 });
 
-app.MapPost("/api/admin/clean-ads", (string? user, int? courseId) =>
+app.MapPost("/api/admin/clean-ads", (HttpContext context, string? user, int? courseId) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
         using var gate = BankWriteGate.Enter();
@@ -745,15 +745,15 @@ app.MapPost("/api/admin/clean-ads", (string? user, int? courseId) =>
     }
 });
 
-app.MapGet("/api/admin/data/status", (string? user) =>
+app.MapGet("/api/admin/data/status", (HttpContext context, string? user) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     return Results.Json(AdminDataTransfer.GetStatus(paths));
 });
 
 app.MapGet("/api/admin/data/download", (HttpContext context, string? user, string? type) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
         var kind = NormalizeDataType(type);
@@ -780,7 +780,7 @@ app.MapGet("/api/admin/data/download", (HttpContext context, string? user, strin
 
 app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, string? type, AuthStore auth) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(request)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     if (!request.HasFormContentType) return Results.Json(new { ok = false, error = "请使用表单上传文件" }, statusCode: 400);
     var kind = NormalizeDataType(type);
     var form = await request.ReadFormAsync();
@@ -811,9 +811,9 @@ app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, 
     }
 });
 
-app.MapGet("/api/admin/bank-editor/questions", (QuestionBank bank, string? user, int courseId, int? chapterId, string? chapterIds, string? q, string? ids, int? limit) =>
+app.MapGet("/api/admin/bank-editor/questions", (HttpContext context, QuestionBank bank, string? user, int courseId, int? chapterId, string? chapterIds, string? q, string? ids, int? limit) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
         return Results.Json(bank.GetEditorQuestions(courseId, chapterId, ParseIdList(chapterIds), q ?? "", ParseIdList(ids), limit));
@@ -824,9 +824,9 @@ app.MapGet("/api/admin/bank-editor/questions", (QuestionBank bank, string? user,
     }
 });
 
-app.MapGet("/api/admin/bank-editor/question", (QuestionBank bank, string? user, int id) =>
+app.MapGet("/api/admin/bank-editor/question", (HttpContext context, QuestionBank bank, string? user, int id) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
         var question = bank.GetEditorQuestion(id);
@@ -840,7 +840,7 @@ app.MapGet("/api/admin/bank-editor/question", (QuestionBank bank, string? user, 
 
 app.MapPost("/api/admin/bank-editor/question", async (HttpRequest request, QuestionBank bank, string? user) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(request)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
         var body = await ReadJsonBody(request);
@@ -853,9 +853,9 @@ app.MapPost("/api/admin/bank-editor/question", async (HttpRequest request, Quest
 });
 
 // 把本地改过的题还原成服务端版本（本地改动叠层里的记录随之删除）
-app.MapPost("/api/admin/bank-editor/restore", (QuestionBank bank, string? user, int? id) =>
+app.MapPost("/api/admin/bank-editor/restore", (HttpContext context, QuestionBank bank, string? user, int? id) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     try
     {
         SqliteConnection.ClearAllPools();
@@ -1171,6 +1171,9 @@ internal static bool IsAdminRequest(HttpContext context)
     var sessionUser = Convert.ToString(context.Items[SessionStore.UserItemKey], CultureInfo.InvariantCulture) ?? "";
     return sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase);
 }
+
+/// <summary>同上，但直接收 <see cref="HttpRequest"/>——处理函数只拿到 request 时用。</summary>
+internal static bool IsAdminRequest(HttpRequest request) => IsAdminRequest(request.HttpContext);
 
 // 只返回错误文案字符串。以前返回的是对象 `{ok, error}`，而调用处写成 `error = SafeError(ex)`，
 // 于是响应体变成 `{"error":{"ok":false,"error":"…"}}` 的**嵌套对象**，
