@@ -131,6 +131,42 @@ public sealed class BankWriter : IDisposable
         }
     }
 
+    /// <summary>本库里有没有这门课的 <c>course</c> 行。</summary>
+    public bool HasCourse(long courseId)
+    {
+        using var cmd = _cn.CreateCommand();
+        cmd.CommandText = "SELECT count(*) FROM course WHERE icourseid = $c";
+        cmd.Parameters.AddWithValue("$c", courseId);
+        return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
+    }
+
+    /// <summary>
+    /// 只在**缺失**时补一行 <c>course</c>（<c>INSERT OR IGNORE</c>，不覆盖已有行——
+    /// 已有行里的 <c>ihadbuy</c> 等本地状态不能被动过）。
+    /// 用途：拉一门**主库里没有元数据**的课（例如上游有、本地没导入过的 courseId 22）。
+    /// 以前只从 metaDb 拷课程行，主库没有就什么也不写 → 拉完 9717 题，
+    /// 管理端列表里却看不到这门课（课程列表读的是 <c>course</c> 表）。
+    /// </summary>
+    public void EnsureCourseRow(UpstreamCourse course)
+    {
+        Exec("""
+            INSERT OR IGNORE INTO course
+              (icourseid, ccoursename, ihadbuy, dchangedate, dchapterchange, dsubjectchange,
+               ctypscount, iclassid, isubclassid, bstopflag, iindex)
+            VALUES ($id, $name, 0, $changed, $chapter, $subject, $typs, $class, $subclass, $stop, $index)
+            """,
+            ("$id", course.Id),
+            ("$name", course.Name ?? ""),
+            ("$changed", course.ChangedDate ?? ""),
+            ("$chapter", course.ChapterChange ?? ""),
+            ("$subject", course.SubjectChange ?? ""),
+            ("$typs", course.TypsCount ?? ""),
+            ("$class", course.ClassId ?? 0),
+            ("$subclass", course.SubClassId ?? 0),
+            ("$stop", course.Stopped ? 1 : 0),
+            ("$index", course.Index ?? 0));
+    }
+
     /// <summary>
     /// 按**列交集**从 meta 拷到本库。源库与本库 schema 可能不同（早期自建空库缺
     /// <c>ctypscount</c> / <c>brich</c>），点名列会在缺列时抛 "no such column"；

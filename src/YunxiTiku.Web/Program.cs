@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Data.Sqlite;
 using Puller = JkdWeb.BankPuller;
 using static AppHelpers;
@@ -83,7 +84,24 @@ builder.Services.AddRateLimiter(options =>
             }));
 });
 
+/* 响应压缩：学习看板 / 深度分析会拉全库题目（单科目约 3.8MB JSON）。
+   经 Cloudflare Tunnel 那条链路很慢，不压缩时前端长时间转圈、看起来像卡死。
+   开 Brotli/Gzip 后同一个响应大约降到 1/6。 */
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;   // 经反向代理时后端看到的未必是 https
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(new[] { "application/json" });
+});
+/* brotli 用 Optimal：Fastest 下它反而比 gzip 大（实测 915KB vs 720KB），
+   而浏览器优先选 brotli，等于让用户拿到最差的那个。 */
+builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Optimal);
+builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+
 var app = builder.Build();
+
+app.UseResponseCompression();   // 必须尽早：要压在静态文件与路由之前
 
 // 全局异常处理：任何未捕获异常都回 JSON，而不是 Production 下的裸 500 空响应体。
 app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
@@ -187,6 +205,11 @@ app.Use(async (context, next) =>
     var sessionUser = sessions.Resolve(context.Request);
     if (sessionUser.Length == 0)
     {
+        // 诊断用：把"浏览器到底有没有把凭据带上来"记下来。手机端「登录已失效」反复发生时，
+        // 这一行能一眼区分「凭据没送到（浏览器/代理吞 cookie）」与「送到了但服务端不认」。
+        var (hasCookie, hasHeader) = sessions.CredentialPresence(context.Request);
+        Console.WriteLine($"[session-miss] {context.Request.Path} cookie={hasCookie} header={hasHeader} " +
+                          $"origin={context.Request.Headers["Origin"]} referer={context.Request.Headers["Referer"]}");
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await context.Response.WriteAsJsonAsync(new { ok = false, error = "登录已失效，请重新登录" });
         return;
@@ -316,14 +339,14 @@ app.MapPost("/api/auth/login", async (HttpContext context, AuthStore auth, Sessi
         {
             return Results.Json(new { ok = false, error = "账号或密码不正确" }, statusCode: 401);
         }
-        sessionStore.SignIn(context, user);
-        return Results.Json(new { ok = true, user, mustChangePassword = true });
+        var token = sessionStore.SignIn(context, user);
+        return Results.Json(new { ok = true, user, mustChangePassword = true, token });
     }
     if (!auth.Verify(password, profile)) return Results.Json(new { ok = false, error = "账号或密码不正确" }, statusCode: 401);
     // 旧档案（单轮 SHA256）登录成功后自动升级为 PBKDF2 并回写
     if (auth.NeedsHashUpgrade(profile)) auth.UpgradeHash(user, password, profile);
-    sessionStore.SignIn(context, user);
-    return Results.Json(new { ok = true, user, mustChangePassword = auth.MustChangePassword(profile) });
+    var loginToken = sessionStore.SignIn(context, user);
+    return Results.Json(new { ok = true, user, mustChangePassword = auth.MustChangePassword(profile), token = loginToken });
 }).RequireRateLimiting("login");
 
 app.MapPost("/api/auth/change-password", async (HttpContext context, AuthStore auth, SessionStore sessionStore) =>
@@ -345,8 +368,8 @@ app.MapPost("/api/auth/change-password", async (HttpContext context, AuthStore a
     if (user.Equals("admin", StringComparison.OrdinalIgnoreCase)) paths.DeleteInitialAdminPasswordFile();
     // 改密即止损：先吊销该用户全部既有会话，再为本机重新签发一张
     sessionStore.RevokeUser(user);
-    sessionStore.SignIn(context, user);
-    return Results.Json(new { ok = true, user });
+    var newToken = sessionStore.SignIn(context, user);
+    return Results.Json(new { ok = true, user, token = newToken });
 }).RequireRateLimiting("login");
 
 app.MapPost("/api/auth/logout", (HttpContext context, SessionStore sessionStore) =>
@@ -515,9 +538,13 @@ app.MapGet("/api/admin/user-courses", (AuthStore auth, string? user, string? tar
     return Results.Json(new { ok = true, user = name, assigned = allowed is null ? null : allowed.OrderBy(id => id).ToList() });
 });
 
-app.MapPost("/api/admin/user-courses", async (HttpRequest request, AuthStore auth, string? user) =>
+app.MapPost("/api/admin/user-courses", async (HttpRequest request, HttpContext context, AuthStore auth, string? user) =>
 {
-    if (!IsAdmin(user)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    /* 优先用会话身份判管理员；`?user=` 只是兼容旧前端（它曾经漏传过这个参数）。 */
+    if (!IsAdminRequest(context) && !IsAdmin(user))
+    {
+        return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    }
     try
     {
         var body = await ReadJsonBody(request);
@@ -1104,6 +1131,17 @@ internal static bool IsAdmin(string? value)
 {
     if (string.IsNullOrWhiteSpace(value)) return false;
     return CleanUserName(value).Equals("admin", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// 用**会话身份**判断是不是管理员。比 <see cref="IsAdmin"/> 可信：
+/// `IsAdmin` 只看 URL 上的 `?user=`，那是客户端可控的，任何已登录用户
+/// 都能传 `?user=admin` 冒充管理员；会话身份是中间件校验过的。
+/// </summary>
+internal static bool IsAdminRequest(HttpContext context)
+{
+    var sessionUser = Convert.ToString(context.Items[SessionStore.UserItemKey], CultureInfo.InvariantCulture) ?? "";
+    return sessionUser.Equals("admin", StringComparison.OrdinalIgnoreCase);
 }
 
 // 只返回错误文案字符串。以前返回的是对象 `{ok, error}`，而调用处写成 `error = SafeError(ex)`，
@@ -2126,6 +2164,8 @@ sealed class SessionStore
         => string.Equals(Path.GetFileName(pathOrName), FileName, StringComparison.OrdinalIgnoreCase);
 
     private const string CookieName = "yunxi_session";
+    /// <summary>会话令牌的备用传输通道（见 <see cref="SignIn"/>）：cookie 被浏览器吞掉时前端改用它。</summary>
+    public const string TokenHeaderName = "X-Session-Token";
     private static readonly TimeSpan Lifetime = TimeSpan.FromDays(7);
     private readonly ConcurrentDictionary<string, SessionRecord> _sessions = new(StringComparer.Ordinal);
     private readonly AppPaths _paths;
@@ -2138,7 +2178,13 @@ sealed class SessionStore
         EnsureLoaded();
     }
 
-    public void SignIn(HttpContext context, string user)
+    /// <summary>
+    /// 签发会话，并把令牌**同时**放进 Set-Cookie 与返回给调用方的字符串里。
+    /// 只靠 cookie 不够稳：手机浏览器/内置 WebView 的"云加速"代理会吞掉 Set-Cookie，
+    /// 表现为"登录成功但紧接着 401、一直提示登录已失效"。登录响应里带回令牌后，
+    /// 前端可用 <see cref="TokenHeaderName"/> 头继续用，不再依赖浏览器是否存了 cookie。
+    /// </summary>
+    public string SignIn(HttpContext context, string user)
     {
         EnsureLoaded();
         Remove(context.Request);
@@ -2148,18 +2194,31 @@ sealed class SessionStore
         context.Response.Cookies.Append(CookieName, token, new CookieOptions
         {
             HttpOnly = true,
-            SameSite = SameSiteMode.Strict,
+            /* Lax 而不是 Strict：Strict 会让「从微信/书签/外部链接点进来」的顶级导航
+               也不带 cookie，表现为「登录成功但紧接着 401、一直提示登录已失效」。
+               Lax 会为顶级导航带上 cookie；跨站 POST 仍不带，且后端还有
+               Sec-Fetch-Site 检查兜底，CSRF 防护不受影响。 */
+            SameSite = SameSiteMode.Lax,
             Secure = context.Request.IsHttps,
             MaxAge = Lifetime,
             Path = "/",
             IsEssential = true
         });
+        return token;
     }
 
+    /// <summary>优先 cookie；浏览器没存住 cookie 时回退到 <see cref="TokenHeaderName"/> 请求头。</summary>
     public string Resolve(HttpRequest request)
     {
         EnsureLoaded();
-        if (!request.Cookies.TryGetValue(CookieName, out var token) || string.IsNullOrWhiteSpace(token)) return "";
+        var cookieUser = ResolveToken(ReadCookieToken(request));
+        if (cookieUser.Length > 0) return cookieUser;
+        return ResolveToken(ReadHeaderToken(request));
+    }
+
+    private string ResolveToken(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return "";
         var key = HashToken(token);
         if (!_sessions.TryGetValue(key, out var record)) return "";
         if (record.ExpiresAt <= DateTimeOffset.UtcNow)
@@ -2171,13 +2230,25 @@ sealed class SessionStore
         return record.User;
     }
 
+    /// <summary>请求里到底带了什么凭据（只用于 401 时打诊断日志，不记令牌本身）。</summary>
+    public (bool Cookie, bool Header) CredentialPresence(HttpRequest request)
+        => (!string.IsNullOrWhiteSpace(ReadCookieToken(request)), !string.IsNullOrWhiteSpace(ReadHeaderToken(request)));
+
+    private static string? ReadCookieToken(HttpRequest request)
+        => request.Cookies.TryGetValue(CookieName, out var token) ? token : null;
+
+    private static string? ReadHeaderToken(HttpRequest request)
+        => request.Headers.TryGetValue(TokenHeaderName, out var token) ? token.ToString() : null;
+
     public void Remove(HttpRequest request)
     {
         EnsureLoaded();
-        if (request.Cookies.TryGetValue(CookieName, out var token) && !string.IsNullOrWhiteSpace(token))
+        var removed = false;
+        foreach (var token in new[] { ReadCookieToken(request), ReadHeaderToken(request) })
         {
-            if (_sessions.TryRemove(HashToken(token), out _)) Persist();
+            if (!string.IsNullOrWhiteSpace(token) && _sessions.TryRemove(HashToken(token), out _)) removed = true;
         }
+        if (removed) Persist();
     }
 
     /// <summary>吊销某个用户的全部会话（改密/重置/停用/删除时调用）。返回是否真的吊销了会话。</summary>

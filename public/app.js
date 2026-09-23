@@ -96,6 +96,10 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const SESSION_USER_KEY = "yunxi-session-user";
 const LAST_USER_KEY = "yunxi-current-user";
+/* 会话令牌的本地副本。服务端登录时会同时下发 cookie 与 body 里的 token：
+   手机浏览器/内置 WebView 的"云加速"代理会吞掉 Set-Cookie，只靠 cookie 就会
+   「登录成功却立刻提示登录已失效」。这里存一份，后续请求用 X-Session-Token 头带上。 */
+const SESSION_TOKEN_KEY = "yunxi-session-token";
 const REVIEW_INTERVAL_DAYS = [1, 2, 4, 7, 15, 30];
 const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "待复盘"];
 const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
@@ -209,8 +213,13 @@ function setCourseTitle(value) {
 
 async function api(path, options) {
   let res;
+  const opts = { ...(options || {}) };
+  const sessionToken = localStorage.getItem(SESSION_TOKEN_KEY);
+  if (sessionToken) {
+    opts.headers = { ...(opts.headers || {}), "X-Session-Token": sessionToken };
+  }
   try {
-    res = await fetch(path, options);
+    res = await fetch(path, opts);
   } catch (err) {
     throw new Error("网络连接失败，请检查服务是否已启动");
   }
@@ -253,6 +262,7 @@ function handleSessionExpired() {
   state.storageDirty = false;
   setSaveStatus("idle");
   localStorage.removeItem(SESSION_USER_KEY);
+  localStorage.removeItem(SESSION_TOKEN_KEY);
   toast("登录已失效，请重新登录");
   state.user = "";
   state.currentCourse = null;
@@ -1041,6 +1051,8 @@ async function login() {
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({ user, password }),
   });
+  // 先落令牌再进应用：enterApp 会立刻打 /api/user/load，那一下就得带上凭据。
+  if (result.token) localStorage.setItem(SESSION_TOKEN_KEY, result.token);
   if (result.mustChangePassword) {
     state.pendingPasswordUser = result.user;
     state.pendingOldPassword = password;
@@ -1067,7 +1079,7 @@ async function changePassword() {
     toast("两次输入的新密码不一致");
     return;
   }
-  await api("/api/auth/change-password", {
+  const changed = await api("/api/auth/change-password", {
     method: "POST",
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({
@@ -1076,6 +1088,8 @@ async function changePassword() {
       newPassword,
     }),
   });
+  // 改密会吊销该用户全部旧会话并重签一张：旧令牌必须换掉，否则改完密码马上又被踢出去。
+  if (changed.token) localStorage.setItem(SESSION_TOKEN_KEY, changed.token);
   await enterApp(state.pendingPasswordUser);
   toast("密码已修改");
 }
@@ -1131,6 +1145,7 @@ async function logout() {
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   stopExamTimer();
   localStorage.removeItem(SESSION_USER_KEY);
+  localStorage.removeItem(SESSION_TOKEN_KEY);
   clearTimeout(state.saveTimer);
   state.saveTimer = null;
   state.storageDirty = false;
@@ -1413,6 +1428,7 @@ async function switchUser(name) {
     }
   }
   localStorage.removeItem(SESSION_USER_KEY);
+  localStorage.removeItem(SESSION_TOKEN_KEY);
   localStorage.setItem(LAST_USER_KEY, name);
   $("loginUserSelect").value = name;
   state.user = "";
@@ -5475,7 +5491,9 @@ function renderCourseAssignOverlay() {
 async function saveCourseAssign() {
   const assign = state.adminCourseAssign;
   if (!assign) return;
-  const result = await api("/api/admin/user-courses", {
+  /* 必须带上 ?user=：后端 user-courses 的管理员判定读的是这个查询参数，
+     漏掉就会直接 403「admin only」（GET 那两处一直带着，只有这里漏了）。 */
+  const result = await api(`/api/admin/user-courses?user=${encodeURIComponent(state.user)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ user: assign.user, courses: assign.all ? null : [...assign.selected] }),

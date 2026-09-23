@@ -522,6 +522,22 @@ public sealed class PullEngine
         using (var db = new BankWriter(o.OutDb))
         {
             if (!string.IsNullOrEmpty(o.MetaDb)) db.CopyMetadataFrom(o.MetaDb!, o.CourseId);
+            // 主库里没有这门课的 course 行（上游有、本地没导入过）→ 从上游课程目录补一行，
+            // 否则拉完题也进不了管理端列表。目录本身拉一次缓存在进程里，多门课批量拉时不会重复请求。
+            if (!db.HasCourse(o.CourseId))
+            {
+                var catalogRow = await CourseCatalog.FindAsync(soap, o.CourseId, ct).ConfigureAwait(false);
+                if (catalogRow is not null)
+                {
+                    db.EnsureCourseRow(catalogRow);
+                    report.Notes.Add($"课程 {o.CourseId} 元数据不在主库，已按上游目录补写：{catalogRow.Name}");
+                    _log($"course row synthesized from upstream catalog: {o.CourseId} = {catalogRow.Name}");
+                }
+                else
+                {
+                    report.Warnings.Add($"上游课程目录里没有课程 {o.CourseId}，该课可能不会出现在课程列表里");
+                }
+            }
             if (o.ReplaceCourse)
             {
                 // 单事务替换：delete + insert + 水位一起提交；中途失败整门课回滚，不留"删了没写"的空课。
