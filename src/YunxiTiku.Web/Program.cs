@@ -867,10 +867,38 @@ app.MapPost("/api/admin/bank-editor/restore", (QuestionBank bank, string? user, 
     }
 });
 
+/// <summary>
+/// 上游课程目录（失败**不抛**）：管理端列表宁可少几门「未拉取」的课，
+/// 也不能因为上游抖动 / 账号没配就整个列表打不开。
+/// </summary>
+static async Task<Puller.CourseCatalogSnapshot?> TryLoadUpstreamCatalogAsync(IConfiguration configuration)
+{
+    try
+    {
+        var user = Puller.BankCredentials.ResolveUser(configuration["App:BankServiceUser"]);
+        var password = Puller.BankCredentials.ResolvePassword(configuration["App:BankServicePassword"]);
+        Puller.BankCredentials.EnsureConfigured(user, password);
+        using var soap = new Puller.SoapClient(
+            Puller.BankCredentials.ResolveUrl(configuration["App:BankServiceUrl"]), user, password, 15000);
+        return await Puller.CourseCatalog.LoadFullAsync(soap);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[catalog] 上游课程目录不可用，管理端仅列本地课程：{SafeErrorText(ex)}");
+        return null;
+    }
+}
+
 // 前台题库读取一律按"该用户被分配的题库"过滤（admin / 未分配 = 全部可见）
-app.MapGet("/api/courses", (HttpContext context, QuestionBank bank, AuthStore auth, IConfiguration configuration, string? q, string? available) =>
-    Results.Json(bank.GetCourses(q ?? "", IsTruthy(available), UserCourses.AllowedIds(auth, SessionUser(context)),
-        AppHelpers.ExcludedCourseClasses(configuration))));
+app.MapGet("/api/courses", async (HttpContext context, QuestionBank bank, AuthStore auth, IConfiguration configuration, string? q, string? available) =>
+{
+    var availableOnly = IsTruthy(available);
+    // 管理端列表（不带 available=1）额外带上「上游有、本地没有」的课程，让管理员看到全部并可拉取。
+    // 上游目录不可用（没配账号 / 网络抖动）时静默降级为只列本地课程 —— 绝不能因此打不开列表。
+    var upstream = availableOnly ? null : await TryLoadUpstreamCatalogAsync(configuration);
+    return Results.Json(bank.GetCourses(q ?? "", availableOnly, UserCourses.AllowedIds(auth, SessionUser(context)),
+        AppHelpers.ExcludedCourseClasses(configuration), upstream));
+});
 
 app.MapGet("/api/chapters", (HttpContext context, QuestionBank bank, AuthStore auth, int courseId) =>
     UserCourses.IsAllowed(auth, SessionUser(context), courseId)
@@ -2883,7 +2911,8 @@ sealed class QuestionBank
     }
 
     public IEnumerable<object> GetCourses(string search, bool availableOnly, HashSet<int>? allowed = null,
-        IReadOnlyCollection<string>? excludedClasses = null)
+        IReadOnlyCollection<string>? excludedClasses = null,
+        Puller.CourseCatalogSnapshot? upstream = null)
     {
         // 按用户分配的题库范围过滤：null = 不限制；空集合 = 一门都看不到
         var allowedClause = allowed is null
@@ -2911,7 +2940,7 @@ sealed class QuestionBank
               and (@search = '' or c.ccoursename like @like or cl.ccoursecname like @like or sc.csubclassname like @like)
             order by cl.iindex, sc.iindex, c.ihadbuy desc, c.iindex",
             new Dictionary<string, object?> { ["@available"] = availableOnly ? 1 : 0, ["@search"] = search, ["@like"] = "%" + search + "%" });
-        return rows.Select(r => new
+        var list = rows.Select(r => new
         {
             id = ToInt(r["icourseid"]),
             name = ToStr(r["ccoursename"]),
@@ -2924,6 +2953,56 @@ sealed class QuestionBank
             questionCount = ToInt(r["subject_count"]),
             changedAt = MaxDateString(r["dchangedate"], r["dchapterchange"], r["dsubjectchange"])
         }).ToList();
+
+        /* 管理端列表额外列出「上游有、本地没有」的课程：本地没导入过（course 表里没有），
+           或导入了但一门题都没拉下来。这样管理员能看到上游的全部课程、直接点「拉取」，
+           不必再靠猜 ID。课程名/分类/序号取自上游课程目录（CourseCatalog）。
+           学员端（availableOnly=true）**不加**：这些课本地没有正文，加了也点不开。 */
+        if (upstream is not null && !availableOnly)
+        {
+            var localIds = list.Select(c => c.id).ToHashSet();
+            var classNames = upstream.Classes.ToDictionary(c => c.Id, c => c.Name ?? "");
+            var classIndexes = upstream.Classes.ToDictionary(c => c.Id, c => c.Index ?? 0);
+            var subNames = upstream.SubClasses.ToDictionary(c => c.Id, c => c.Name ?? "");
+            var subIndexes = upstream.SubClasses.ToDictionary(c => c.Id, c => c.Index ?? 0);
+            var excluded = excludedClasses is { Count: > 0 }
+                ? new HashSet<string>(excludedClasses, StringComparer.Ordinal)
+                : null;
+            var needle = search.Trim().ToLowerInvariant();
+            foreach (var course in upstream.Courses)
+            {
+                if (course.Stopped) continue;
+                if (localIds.Contains((int)course.Id)) continue;
+                if (allowed is not null && !allowed.Contains((int)course.Id)) continue;
+                var className = course.ClassId is { } cid && classNames.TryGetValue(cid, out var cn) ? cn : "";
+                var subName = course.SubClassId is { } sid && subNames.TryGetValue(sid, out var sn) ? sn : "";
+                // 与本地课程同一套排除规则：非常规分类（默认「合作专区」）不展示
+                if (excluded is not null && className.Length > 0 && excluded.Contains(className)) continue;
+                var courseName = course.Name ?? "";
+                if (needle.Length > 0
+                    && !courseName.ToLowerInvariant().Contains(needle, StringComparison.Ordinal)
+                    && !className.ToLowerInvariant().Contains(needle, StringComparison.Ordinal)
+                    && !subName.ToLowerInvariant().Contains(needle, StringComparison.Ordinal)
+                    && !course.Id.ToString(CultureInfo.InvariantCulture).Contains(needle, StringComparison.Ordinal)) continue;
+                list.Add(new
+                {
+                    id = (int)course.Id,
+                    name = courseName,
+                    category = className,
+                    subcategory = subName,
+                    categoryOrder = course.ClassId is { } c2 && classIndexes.TryGetValue(c2, out var ci) ? ci : 0,
+                    subcategoryOrder = course.SubClassId is { } s2 && subIndexes.TryGetValue(s2, out var si) ? si : 0,
+                    owned = false,
+                    questionCount = 0,
+                    // MaxDateString 里是 Convert.ToDateTime，空串会抛；先滤成 null
+                    changedAt = MaxDateString(
+                        NonEmpty(course.ChangedDate), NonEmpty(course.ChapterChange), NonEmpty(course.SubjectChange))
+                });
+            }
+        }
+        return list;
+
+        static string? NonEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     /// <summary>这道题属于哪门课（用于按用户分配题库的越权校验；找不到返回 0）。</summary>
