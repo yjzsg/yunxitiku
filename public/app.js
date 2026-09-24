@@ -1981,10 +1981,14 @@ function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
       .filter((item) => !courseStore.correct?.[item.id])
       .map((item) => item.id), 10);
   });
-  if (ids.length >= 30) return ids.slice(0, 60);
-  /* 未做题要「全库均匀抽」，不能取题序最前面的一段（见 sampleEvenly 注释）。 */
+  /* 未做题要「全库均匀抽」，不能取题序最前面的一段（见 sampleEvenly 注释）。
+     这里不再「弱项凑够 30 道就提前收工」——那会让题单在 30~59 之间缩水，
+     与「错题、薄弱章节和未做题自动混合」的定位不符（2026-09-24 修：
+     原 `if (ids.length >= 30) return ids.slice(0, 60)` 命中时题单只有弱项）。
+     候选池要剔除已在本单里的（④ 的薄弱章节池里可能含未做题，重叠会让实际
+     补入少于配额、凑不满 60）。 */
   pushMany(sampleEvenly(allItems
-    .filter((item) => !courseStore.done?.[item.id])
+    .filter((item) => !courseStore.done?.[item.id] && !ids.includes(Number(item.id)))
     .map((item) => item.id), 60 - ids.length, randomize));
   return ids.slice(0, 60);
 }
@@ -4393,8 +4397,9 @@ function buildSprintPracticeIds(courseStore = userCourseStore()) {
       .slice(0, 10)
       .forEach((item) => pushUnique(item.id));
   });
+  /* 同 buildSmartPracticeIds：候选剔除已在本单里的，否则重叠会把配额吃掉、凑不满 100。 */
   sampleEvenly(allItems
-    .filter((item) => !courseStore.done?.[item.id])
+    .filter((item) => !courseStore.done?.[item.id] && !ids.includes(Number(item.id)))
     .map((item) => item.id), 100 - ids.length)
     .forEach((id) => pushUnique(id));
   return ids;
