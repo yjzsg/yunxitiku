@@ -1936,6 +1936,27 @@ function getSmartPracticeIds(courseStore = userCourseStore()) {
   return ids;
 }
 
+/* 等间隔抽样：从整个候选池里均匀取 n 个，保持原有相对顺序。
+   为什么要它：题库默认题序是 order by ichaptertype, cchaptercode, iindex, isubjectid，
+   而真题卷行的 ichaptertype 是 NULL（SQLite 里 NULL 排最前）、历年真题里 2014 年编号最小，
+   于是「题序最前面那一大段」永远是 2014 真题。旧实现用 slice(0, n) 抓未做题，
+   结果每天的今日强化/考前冲刺都从 2014 真题开始，看着就是「怎么全是 14 年真题」。
+   randomize（点「重新生成」）时退化为随机抽。 */
+function sampleEvenly(list, n, randomize = false) {
+  const pool = (list || []).map(Number).filter(Boolean);
+  const want = Math.max(0, Math.floor(Number(n) || 0));
+  if (!want || !pool.length) return [];
+  if (randomize) return shuffleItems(pool).slice(0, want);
+  if (want >= pool.length) return pool;
+  const step = pool.length / want;
+  const out = [];
+  for (let i = 0; i < want; i++) {
+    const pick = pool[Math.min(pool.length - 1, Math.floor(i * step + step / 2))];
+    if (!out.includes(pick)) out.push(pick);
+  }
+  return out;
+}
+
 function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
   const ids = [];
   const randomize = !!options.randomize;
@@ -1961,9 +1982,10 @@ function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
       .map((item) => item.id), 10);
   });
   if (ids.length >= 30) return ids.slice(0, 60);
-  pushMany(allItems
+  /* 未做题要「全库均匀抽」，不能取题序最前面的一段（见 sampleEvenly 注释）。 */
+  pushMany(sampleEvenly(allItems
     .filter((item) => !courseStore.done?.[item.id])
-    .map((item) => item.id), 60 - ids.length);
+    .map((item) => item.id), 60 - ids.length, randomize));
   return ids.slice(0, 60);
 }
 
@@ -4371,10 +4393,10 @@ function buildSprintPracticeIds(courseStore = userCourseStore()) {
       .slice(0, 10)
       .forEach((item) => pushUnique(item.id));
   });
-  allItems
+  sampleEvenly(allItems
     .filter((item) => !courseStore.done?.[item.id])
-    .slice(0, 100 - ids.length)
-    .forEach((item) => pushUnique(item.id));
+    .map((item) => item.id), 100 - ids.length)
+    .forEach((id) => pushUnique(id));
   return ids;
 }
 
