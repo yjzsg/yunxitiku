@@ -1,0 +1,77 @@
+云习题库（YunxiTiku）软件许可协议
+================================
+Copyright (c) 2026 <权利人名称，请填写>　保留所有权利。
+Copyright (c) 2026 <Copyright Holder>. All Rights Reserved.
+
+本协议适用于本仓库（以下简称「本软件」）的全部源代码、文档及相关文件。
+下载、复制、安装或以任何方式使用本软件，即视为你已阅读并同意本协议全部条款；
+若不同意，请立即停止使用并删除全部副本。
+
+
+一、许可范围（免费、非商业）
+--------------------------
+在遵守本协议的前提下，授予你一项非独占、不可转让、可撤销的许可，仅限用于：
+1. 查看、阅读本软件源代码，用于学习与评估；
+2. 在个人、非商业、非公开的前提下安装与运行本软件。
+
+
+二、使用限制（未经书面许可一律禁止）
+----------------------------------
+未经权利人**事先书面授权**，你不得：
+1. 将本软件用于任何**商业用途**，包括但不限于对外销售、出租、收费服务
+   （含以部署、运维、托管、SaaS 等形式向他人收费）；
+2. 复制、发布、分发、传播本软件或其修改版本（包括但不限于上传至公开仓库、
+   网盘、论坛、社交平台等）；
+3. 对本软件进行修改、二次开发后分发；
+4. 移除、隐藏或篡改本软件中的版权声明、作者署名或本协议；
+5. 将本软件或其衍生作品，作为自己的产品或服务对外提供。
+
+
+三、商业授权
+------------
+如需将本软件用于商业用途（含部署服务、运维服务、私有化交付等），
+须事先取得权利人的**书面商业授权**。
+授权联系：<请填写联系方式，如邮箱 / 微信 / 公众号>
+
+
+四、第三方内容免责（重要）
+--------------------------
+1. 本软件**不包含任何题库数据、题目内容或第三方资源**，仅为软件工具本身。
+2. 用户通过本软件自行接入、获取或导入的任何内容，其来源合法性、版权合规性
+   **由用户自行负责**，与权利人无关。
+3. 权利人不对用户使用第三方内容的行为承担任何责任。
+
+
+五、无担保
+----------
+本软件按「现状」提供，不提供任何明示或默示的担保，包括但不限于适销性、
+特定用途适用性及不侵权担保。在任何情况下，权利人不对因使用或无法使用
+本软件而产生的任何直接或间接损失承担责任。
+
+
+六、终止
+--------
+你违反本协议任一条款，本许可自动终止，你须立即停止使用并删除本软件全部副本。
+
+
+七、适用法律
+------------
+本协议的解释与争议解决，适用中华人民共和国法律。
+
+
+------------------------------------------------------------
+English Notice
+
+This software is proprietary and source-available.
+Copyright (c) 2026 <Copyright Holder>. All Rights Reserved.
+
+You may view the source code for learning and evaluation, and run it for personal,
+non-commercial use only. Any commercial use, redistribution, modification and
+distribution, or provision as a hosted/paid service requires prior written
+permission from the copyright holder.
+
+This software contains NO question-bank data or third-party content. Users are
+solely responsible for the legality and licensing of any content they import
+or access through this software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
