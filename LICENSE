@@ -1,7 +1,7 @@
 云习题库（YunxiTiku）软件许可协议
 ================================
-Copyright (c) 2026 <权利人名称，请填写>　保留所有权利。
-Copyright (c) 2026 <Copyright Holder>. All Rights Reserved.
+Copyright (c) 2026 yjzsg　保留所有权利。
+Copyright (c) 2026 yjzsg. All Rights Reserved.
 
 本协议适用于本仓库（以下简称「本软件」）的全部源代码、文档及相关文件。
 下载、复制、安装或以任何方式使用本软件，即视为你已阅读并同意本协议全部条款；
@@ -31,7 +31,7 @@ Copyright (c) 2026 <Copyright Holder>. All Rights Reserved.
 ------------
 如需将本软件用于商业用途（含部署服务、运维服务、私有化交付等），
 须事先取得权利人的**书面商业授权**。
-授权联系：<请填写联系方式，如邮箱 / 微信 / 公众号>
+授权联系：https://github.com/yjzsg/yunxitiku/issues （通过本仓库 Issues 联系）
 
 
 四、第三方内容免责（重要）
@@ -63,12 +63,13 @@ Copyright (c) 2026 <Copyright Holder>. All Rights Reserved.
 English Notice
 
 This software is proprietary and source-available.
-Copyright (c) 2026 <Copyright Holder>. All Rights Reserved.
+Copyright (c) 2026 yjzsg. All Rights Reserved.
 
 You may view the source code for learning and evaluation, and run it for personal,
 non-commercial use only. Any commercial use, redistribution, modification and
 distribution, or provision as a hosted/paid service requires prior written
-permission from the copyright holder.
+permission from the copyright holder. Permission requests:
+https://github.com/yjzsg/yunxitiku/issues
 
 This software contains NO question-bank data or third-party content. Users are
 solely responsible for the legality and licensing of any content they import
