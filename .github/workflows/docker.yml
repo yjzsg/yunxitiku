@@ -50,6 +50,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 打几个好写的标签，回滚时不用手抄 40 位 sha。
+      # 注意 <YYYY-MM-DD> 是「当天最后一次构建」——同一天多次构建会覆盖它，
+      # 要精确定位某一次构建用 sha-<7位> 或 <YYYY-MM-DD-HHMM>。
+      - name: Compute image tags
+        id: tagmeta
+        run: |
+          echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "stamp=$(date -u +%Y-%m-%d-%H%M)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -60,5 +70,8 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:sha-${{ steps.tagmeta.outputs.short }}
+            ${{ env.IMAGE_NAME }}:${{ steps.tagmeta.outputs.date }}
+            ${{ env.IMAGE_NAME }}:${{ steps.tagmeta.outputs.stamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -168,8 +168,12 @@ http://NAS_IP:8787/api/health
   保留策略：**最多 20 份，且不超过 30 天**（超出即删）。
 - **恢复**：管理端目前**没有**一键恢复按钮。要回滚请停容器，用 `_backups/` 里对应文件覆盖
   `data/question-bank.db` / `data/assets/` / `userdata/`，再启动。
-- **镜像回滚**：默认用 `ghcr.io/yjzsg/yunxitiku:latest`。生产建议同时保留带版本/摘要的标签
-  （如 `:sha-xxxx`），出问题可指定旧标签重启。
+- **镜像回滚**：默认用 `ghcr.io/yjzsg/yunxitiku:latest`。每次构建还会推这几个标签，
+  出问题可以指定旧标签重启（改 `docker-compose.override.yml` 里的 `image:`，再 `up -d`）：
+  - `:sha-<7位commit>` —— 回滚首选，唯一且好写，例如 `:sha-b65b91e`
+  - `:<YYYY-MM-DD>` —— 当天最后一次构建（同一天多次构建会覆盖）
+  - `:<YYYY-MM-DD-HHMM>` —— 某一次具体构建
+  - `:<40位commit>` —— Actions 一直在推的完整 sha 标签
 
 ## 本地开发
 

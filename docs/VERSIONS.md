@@ -465,6 +465,35 @@ docker compose pull
 docker compose up -d
 ```
 
+### 镜像标签与回滚（2026-09-27）
+
+每次构建推这几个标签，回滚时改 `docker-compose.override.yml` 里的 `image:` 再 `up -d`：
+
+| 标签 | 用途 |
+| --- | --- |
+| `:latest` | 默认部署用的移动标签 |
+| `:sha-<7位commit>` | **回滚首选**，唯一且好写，例如 `:sha-b65b91e` |
+| `:<YYYY-MM-DD>` | 当天最后一次构建；同一天多次构建会覆盖 |
+| `:<YYYY-MM-DD-HHMM>` | 某一次具体构建（UTC） |
+| `:<40位commit>` | Actions 一直在推的完整 sha |
+
+### 本机部署从「本地构建」改成「GHCR 拉取」（2026-09-27）
+
+以前 NAS 上的部署是**本地构建**的：`docker-compose.override.yml` 里写 `image: yunxi-tiku:local`，
+靠 `docker build -t yunxi-tiku:local .` 构建，回滚靠手工打 `local-prevNN` 标签（攒到 57 个）。
+
+坑：**`docker compose build` 是空转的** —— 根 compose 和 override 都没有 `build:` 段，
+它退出码 0 但什么都不构建，镜像 ID 和日期都不变。
+
+现在改成拉 GHCR 镜像（override 里不再覆盖 `image:`）：
+
+- 部署的产物和 git 的 commit 严格对应（sha 标签就是 commit）
+- NAS 不用再编译，也不再往构建缓存里加东西
+- 清理掉了 10 个 `local-prevNN` 标签 + 构建缓存，合计约 **9.8GB**
+
+> 前提变了：**必须先 commit + push，等 Actions 构建完**才能部署。
+> 不能再像以前那样「改完源码本地构建」。
+
 ## 前端主题与玻璃层
 
 三套配色：浅色（默认）/ 暗色 / 护眼，靠 `<html data-theme>` 切换，选择存在 `localStorage["yunxi-theme"]`。
