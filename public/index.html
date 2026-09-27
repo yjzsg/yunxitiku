@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20260927-ink4"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20260927-imgview1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -316,8 +316,28 @@
       <small class="conflict-hint">推荐：先导出本地草稿，再加载服务器数据，避免进度丢失。</small>
     </div>
   </div>
+  <!-- 图片查看器：题干 / 附加题 / 解析里的图可以点开看大图。
+       题图被 `max-width: 100%` 压到容器宽度，小屏（尤其 7 寸墨水屏）上看图纸、
+       表格类题图基本没法看。选项是纯文本（escapeHtml），不会有图，所以和
+       「点选项作答」不冲突。 -->
+  <div id="imgViewer" class="img-viewer" role="dialog" aria-modal="true" aria-label="查看大图">
+    <div class="img-viewer-backdrop"></div>
+    <div id="imgViewerScroll" class="img-viewer-scroll">
+      <div class="img-viewer-canvas">
+        <img id="imgViewerImage" alt="题图">
+      </div>
+    </div>
+    <div class="img-viewer-bar">
+      <button type="button" id="ivZoomOut" title="缩小" aria-label="缩小">−</button>
+      <span id="ivZoomLabel">100%</span>
+      <button type="button" id="ivZoomIn" title="放大" aria-label="放大">＋</button>
+      <button type="button" id="ivFit" title="适应屏幕">适应</button>
+      <button type="button" id="ivActual" title="原始大小">1:1</button>
+      <button type="button" id="ivClose" title="关闭（Esc）">关闭</button>
+    </div>
+  </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20260927-ink1"></script>
+  <script src="/app.js?v=20260927-imgview1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     if ("serviceWorker" in navigator) {

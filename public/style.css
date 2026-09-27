@@ -12066,3 +12066,160 @@ summary:focus-visible,
     padding: 7px 12px !important;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   图片查看器：题干 / 附加题 / 解析里的图可以点开看大图
+   ──────────────────────────────────────────────────────────────────────────
+   题图被 `max-width: 100%` 压到容器宽度，小屏（尤其 7 寸墨水屏）上看图纸、
+   表格类题图基本没法看。交互：
+
+     点图打开 · 点空白 / 关闭按钮 / Esc 关闭
+     按钮或双指缩放 · 普通滚轮滚动、Ctrl+滚轮缩放 · 放大后拖拽平移
+
+   选项是纯文本（`escapeHtml(option.text)`），不会有图，所以和「点选项作答」不冲突。
+   放在文件最后，避免被上面的规则覆盖。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 题图给一个「可点」的提示 */
+.stem img,
+.extra img,
+.description img {
+  cursor: zoom-in;
+}
+
+.img-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 210;              /* 高于答题卡(90)、顶栏、主题抽屉 */
+  display: none;
+}
+
+.img-viewer.open { display: block; }
+
+body.img-viewer-open { overflow: hidden; }
+
+.img-viewer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.88);
+}
+
+.img-viewer-scroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* min-width/height:100% + flex 居中：图比屏幕小时居中，比屏幕大时可滚动 */
+.img-viewer-canvas {
+  min-width: 100%;
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px 18px 84px;   /* 底部给工具条让位 */
+}
+
+.img-viewer-canvas img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  height: auto;
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+.img-viewer-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  max-width: calc(100% - 16px);
+  gap: 6px;
+  padding: 6px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--glass-border);
+  background: rgba(var(--glass-rgb), 0.92);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  box-shadow: var(--glass-highlight), var(--shadow-md);
+}
+
+/* 按钮做大：墨水屏上手指点不准，40px 是最低限度。
+   nowrap 是必须的 —— 否则窄屏（632px 的 7 寸）上「适应」「关闭」会折成两行。 */
+.img-viewer-bar button {
+  min-height: 40px;
+  min-width: 46px;
+  padding: 0 12px;
+  white-space: nowrap;
+  border: 1px solid var(--border-4);
+  border-radius: var(--radius-sm);
+  background: var(--card-solid);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.img-viewer-bar button:hover { background: var(--surface-4); }
+
+.img-viewer-bar #ivClose {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-accent);
+}
+
+#ivZoomLabel {
+  min-width: 54px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+@media print {
+  .img-viewer { display: none !important; }
+}
+
+/* ── 墨水屏：不用大面积深色背景 ──────────────────────────────────────────
+   墨水屏上整屏黑既拖影又反光。改成中浅灰底 + 图片加黑框 ——
+   图（通常白底）和背景仍然分得开，而且不闪。 */
+[data-theme="ink"] .img-viewer-backdrop {
+  background: var(--ink-l2);
+}
+
+[data-theme="ink"] .img-viewer-canvas img {
+  border: 2px solid var(--ink-l5);
+  box-shadow: none;
+}
+
+[data-theme="ink"] .img-viewer-bar {
+  border-color: var(--ink-l5);
+  background: var(--ink-l0);
+}
+
+[data-theme="ink"] .img-viewer-bar button {
+  border-color: var(--ink-l5);
+  background: var(--ink-l0);
+  color: var(--text);
+}
+
+[data-theme="ink"] .img-viewer-bar button:hover {
+  background: var(--ink-l1);
+}
+
+[data-theme="ink"] .img-viewer-bar #ivClose {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+[data-theme="ink"] #ivZoomLabel {
+  color: var(--text);
+}

@@ -334,6 +334,29 @@ function shuffleItems(items) {
   return result;
 }
 
+/* 题图路径改写 ────────────────────────────────────────────────────────────
+   金考典原始题库里 `<img src>` 是**本地路径**，两种形式（实测 4995 张图）：
+
+     C:\Users\Administrator\AppData\Roaming\jinkaodian\data\20\1509065_1.jpg
+     data/23/18145350_1.png
+
+   两者都过不了 `isSafeUrl`（只放行 http(s)/ / ./ assets/ / data:image），
+   `src` 会被删掉 —— 结果就是**所有题图都显示不出来**。
+
+   后端把图片按课程挂在 `/assets/<课程id>/<文件名>`（见 Program.cs 的
+   `app.MapGet("/assets/{**relative}")`），所以这里把两种形式都改写过去。 */
+const ASSET_LOCAL_PATH = /[\\/]?data[\\/](\d+)[\\/]([^\\/]+)$/i;
+
+function normalizeAssetSrc(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  // 已经是 web URL 的直接放过
+  if (/^(?:https?:|data:|\/\/|\/|\.\/)/i.test(text)) return text;
+  const match = ASSET_LOCAL_PATH.exec(text);
+  if (!match) return text;   // 认不出来就原样交给 isSafeUrl 判
+  return `/assets/${match[1]}/${encodeURIComponent(match[2])}`;
+}
+
 function sanitizeRichHtml(html) {
   if (!html) return "";
   const allowedTags = new Set([
@@ -374,7 +397,10 @@ function sanitizeRichHtml(html) {
       if (node.getAttribute("target") === "_blank") node.setAttribute("rel", "noopener noreferrer");
     }
     if (node.tagName === "IMG") {
-      if (!isSafeUrl(node.getAttribute("src"), true)) node.removeAttribute("src");
+      // 先改写本地路径（否则下面 isSafeUrl 会把 src 删掉，图就没了）
+      const src = normalizeAssetSrc(node.getAttribute("src"));
+      if (src && isSafeUrl(src, true)) node.setAttribute("src", src);
+      else node.removeAttribute("src");
       node.setAttribute("loading", "lazy");
     }
   }
@@ -8396,7 +8422,145 @@ function isTypingTarget(target) {
   return isEditable(target) || isEditable(document.activeElement);
 }
 
+/* ── 图片查看器 ──────────────────────────────────────────────────────────
+   题干 / 附加题 / 解析里的图会被 `max-width: 100%` 压到容器宽度 ——
+   小屏（尤其 7 寸墨水屏）上看图纸、表格类题图基本没法看。这里给一个全屏查看器。
+
+   交互：点图打开 · 点空白 / 关闭按钮 / Esc 关闭 · 按钮或双指缩放 ·
+         普通滚轮滚动、Ctrl+滚轮缩放 · 放大后拖拽平移。
+
+   选项是纯文本（`escapeHtml(option.text)`），不会有图，所以和「点选项作答」不冲突。
+   ────────────────────────────────────────────────────────────────────── */
+const IV_MIN_ZOOM = 0.2;
+const IV_MAX_ZOOM = 8;
+const IV_UPSCALE_CAP = 2;      // 「适应」最多把小图放大到这个倍数，再多就是糊
+const imgViewerState = { zoom: 1, naturalW: 1 };
+
+function imageViewerOpen() {
+  return !!$("imgViewer")?.classList.contains("open");
+}
+
+function applyImageViewerZoom() {
+  const image = $("imgViewerImage");
+  if (!image) return;
+  image.style.width = Math.round(imgViewerState.naturalW * imgViewerState.zoom) + "px";
+  const label = $("ivZoomLabel");
+  if (label) label.textContent = Math.round(imgViewerState.zoom * 100) + "%";
+}
+
+function setImageViewerZoom(zoom) {
+  imgViewerState.zoom = Math.max(IV_MIN_ZOOM, Math.min(IV_MAX_ZOOM, zoom));
+  applyImageViewerZoom();
+}
+
+function stepImageViewerZoom(direction) {
+  setImageViewerZoom(imgViewerState.zoom * (direction > 0 ? 1.25 : 0.8));
+}
+
+function fitImageViewer() {
+  const image = $("imgViewerImage");
+  const scroll = $("imgViewerScroll");
+  if (!image || !scroll || !image.naturalWidth) return;
+  imgViewerState.naturalW = image.naturalWidth;
+  const pad = 40;
+  const availW = Math.max(80, scroll.clientWidth - pad);
+  const availH = Math.max(80, scroll.clientHeight - pad - 70);   // 减去工具条
+  const ratio = Math.min(availW / image.naturalWidth, availH / image.naturalHeight);
+  /* 大图缩到刚好放下；小图最多放大 IV_UPSCALE_CAP 倍（再放就是插值糊） */
+  setImageViewerZoom(ratio >= 1 ? Math.min(ratio, IV_UPSCALE_CAP) : ratio);
+  scroll.scrollTop = 0;
+  scroll.scrollLeft = 0;
+}
+
+function openImageViewer(src, alt) {
+  const viewer = $("imgViewer");
+  const image = $("imgViewerImage");
+  if (!viewer || !image || !src) return;
+  image.alt = alt || "题图";
+  image.onload = () => fitImageViewer();
+  image.src = src;
+  viewer.classList.add("open");
+  document.body.classList.add("img-viewer-open");
+  if (image.complete && image.naturalWidth) fitImageViewer();
+}
+
+function closeImageViewer() {
+  const viewer = $("imgViewer");
+  if (!viewer || !viewer.classList.contains("open")) return;
+  viewer.classList.remove("open");
+  document.body.classList.remove("img-viewer-open");
+  const image = $("imgViewerImage");
+  if (image) {
+    image.onload = null;
+    image.removeAttribute("src");   // 释放大图内存
+    image.style.width = "";
+  }
+}
+
+function bindImageViewer() {
+  const viewer = $("imgViewer");
+  const scroll = $("imgViewerScroll");
+  const image = $("imgViewerImage");
+  if (!viewer || !scroll || !image) return;
+
+  // 点空白关闭（点图本身、点工具条都不关）
+  viewer.addEventListener("click", (event) => {
+    if (event.target.closest("#imgViewerImage") || event.target.closest(".img-viewer-bar")) return;
+    closeImageViewer();
+  });
+
+  $("ivZoomIn").onclick = () => stepImageViewerZoom(1);
+  $("ivZoomOut").onclick = () => stepImageViewerZoom(-1);
+  $("ivFit").onclick = () => fitImageViewer();
+  $("ivActual").onclick = () => setImageViewerZoom(1);
+  $("ivClose").onclick = () => closeImageViewer();
+
+  // 普通滚轮留给滚动，Ctrl+滚轮才缩放（和浏览器习惯一致）
+  scroll.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    stepImageViewerZoom(event.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
+
+  // 双指缩放
+  let pinch = null;
+  const touchDistance = (touches) => Math.hypot(
+    touches[0].clientX - touches[1].clientX,
+    touches[0].clientY - touches[1].clientY
+  );
+  scroll.addEventListener("touchstart", (event) => {
+    pinch = event.touches.length === 2
+      ? { distance: touchDistance(event.touches), zoom: imgViewerState.zoom }
+      : null;
+  }, { passive: true });
+  scroll.addEventListener("touchmove", (event) => {
+    if (!pinch || event.touches.length !== 2 || !pinch.distance) return;
+    event.preventDefault();
+    setImageViewerZoom(pinch.zoom * (touchDistance(event.touches) / pinch.distance));
+  }, { passive: false });
+  scroll.addEventListener("touchend", () => { pinch = null; }, { passive: true });
+
+  // Esc 关闭：捕获阶段先处理，免得被全局快捷键抢走
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !imageViewerOpen()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeImageViewer();
+  }, true);
+
+  /* 事件委托：题干/附加题/解析每次重渲染都会换掉里面的 <img>，
+     绑在容器上就不用每次重绑。 */
+  $("questionView")?.addEventListener("click", (event) => {
+    const img = event.target?.closest?.("img");
+    if (!img || !img.getAttribute("src")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openImageViewer(img.currentSrc || img.src, img.alt);
+  });
+}
+
 function hasOpenModal() {
+  if (imageViewerOpen()) return true;
   return ["correctionModal", "adminUserModal", "printModal", "conflictModal"].some((id) => {
     const el = $(id);
     return el && !el.classList.contains("hidden");
@@ -8616,6 +8780,7 @@ if ($("conflictModal")) {
 window.addEventListener("afterprint", cleanupPrintView);
 $("zoomInBtn").onclick = () => changeZoom(0.1);
 $("zoomOutBtn").onclick = () => changeZoom(-0.1);
+bindImageViewer();
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
 document.addEventListener("fullscreenchange", updateFullscreenState);
 document.addEventListener("keydown", handleGlobalShortcuts);
