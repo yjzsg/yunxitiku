@@ -61,6 +61,7 @@ builder.Services.AddSingleton<AuthStore>();
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<UserDataStore>();
 builder.Services.AddSingleton<QuestionBank>();
+builder.Services.AddSingleton<ChapterMapStore>();
 // 反代/隧道部署时按真实客户端 IP 计数（否则限流把所有人算成一个 IP）。
 // 注意：这里信任所有代理来源——本机自托管场景够用；对外暴露时应收窄为已知反代地址。
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -749,6 +750,34 @@ app.MapGet("/api/admin/data/status", (HttpContext context, string? user) =>
 {
     if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     return Results.Json(AdminDataTransfer.GetStatus(paths));
+});
+
+// ── 章节映射（外挂，见 ChapterMapStore 的注释） ─────────────────────────────
+// 整卷类卷册（历年真题/模考/预测…）的题在题库里没有章节归属，靠外挂映射补。
+// 映射落 data/chapter-map.json，不写进 question-bank.db（整包上传会替换那个文件）。
+app.MapGet("/api/chapter-map", (ChapterMapStore chapterMap) =>
+{
+    var map = chapterMap.Load();
+    return Results.Json(new { ok = true, generatedAt = map.GeneratedAt, chapters = map.Chapters, map = map.Map });
+});
+
+app.MapGet("/api/admin/chapter-map/status", (HttpContext context, string? user, ChapterMapStore chapterMap) =>
+{
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    return Results.Json(chapterMap.Status());
+});
+
+app.MapPost("/api/admin/chapter-map/rebuild", (HttpContext context, string? user, ChapterMapStore chapterMap) =>
+{
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        return Results.Json(chapterMap.Rebuild());
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
+    }
 });
 
 app.MapGet("/api/admin/data/download", (HttpContext context, string? user, string? type) =>
@@ -3682,6 +3711,51 @@ sealed class QuestionBank
     private static string ToStr(object? value) => value is null or DBNull ? "" : Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
     private static string ToDateString(object? value) => value is null or DBNull ? "" : Convert.ToDateTime(value, CultureInfo.InvariantCulture).ToString("yyyy-MM-dd HH:mm:ss");
 
+    /// <summary>
+    /// 只读查询入口。给 <see cref="ChapterMapStore"/> 用——章节映射重建要扫全库。
+    /// </summary>
+    public List<Dictionary<string, object?>> ReadAll(string sql, Dictionary<string, object?>? parameters = null)
+        => Query(sql, parameters ?? new Dictionary<string, object?>());
+
+    /// <summary>
+    /// 题干纯文本：解密 → 去标签 → 压空白。
+    /// 章节映射按它建键，建表与查表必须走同一个函数，否则永远匹配不上。
+    /// </summary>
+    public static string PlainStem(object? title, object? updateDate)
+        => Regex.Replace(StripHtml(DecryptField(title, updateDate)), @"\s+", " ").Trim();
+
+    /// <summary>解析的纯文本。口径同 <see cref="PlainStem"/>，但读的是 cdescription。</summary>
+    public static string PlainDescription(object? description, object? updateDate)
+        => Regex.Replace(StripHtml(DecryptField(description, updateDate)), @"\s+", " ").Trim();
+
+    /// <summary>
+    /// 章节映射的键：题干去掉所有非中文/字母/数字的字符后取前 120 个。
+    /// 去标点空白是为了让「同一道题在不同卷册里的排版差异」不影响匹配。
+    /// </summary>
+    public static string StemKey(string plainStem) => TextKey(plainStem, 120);
+
+    /// <summary>解析的键。解析比题干长，取前 300 个字符。</summary>
+    public static string DescriptionKey(string plainDescription) => TextKey(plainDescription, 300);
+
+    /// <summary>把一段纯文本压成匹配键：只保留中文/字母/数字，截断到 maxChars。</summary>
+    public static string TextKey(string plain, int maxChars)
+    {
+        if (string.IsNullOrEmpty(plain)) return "";
+        var sb = new StringBuilder(maxChars);
+        foreach (var ch in plain)
+        {
+            if (sb.Length >= maxChars) break;
+            if ((ch >= '0' && ch <= '9')
+                || (ch >= 'a' && ch <= 'z')
+                || (ch >= 'A' && ch <= 'Z')
+                || (ch >= '\u4e00' && ch <= '\u9fff'))
+            {
+                sb.Append(ch >= 'A' && ch <= 'Z' ? (char)(ch + 32) : ch);
+            }
+        }
+        return sb.ToString();
+    }
+
     private static string MaxDateString(params object?[] values)
     {
         DateTime? max = null;
@@ -3693,5 +3767,439 @@ sealed class QuestionBank
         }
         return max.HasValue ? max.Value.ToString("yyyy-MM-dd HH:mm:ss") : "";
     }
+}
+
+/// <summary>外挂映射文件的内容。只含章名表和 subjectId → 章索引，不含任何题干。</summary>
+sealed class ChapterMapFile
+{
+    public int Version { get; set; } = 1;
+    public string GeneratedAt { get; set; } = "";
+    /// <summary>生成时的题库签名。与当前签名不一致说明题库换过，映射过期。</summary>
+    public string BankSignature { get; set; } = "";
+    public List<string> Chapters { get; set; } = new();
+    /// <summary>subjectId → 课本章在 Chapters 里的下标。一题多章时数组长度 &gt; 1。</summary>
+    public Dictionary<string, int[]> Map { get; set; } = new(StringComparer.Ordinal);
+    public int MappedQuestions { get; set; }
+    public int MultiChapterQuestions { get; set; }
+}
+
+/// <summary>
+/// 「整卷题 → 课本章」的外挂映射。
+///
+/// 背景：题库的 coursechapter 是四层（卷册 grade0 → 章 grade1 → 节 grade2 → 目 grade3）。
+/// 章节练习 / 章节密训 / 章节精选 这类卷册把题挂在「节」上，天然带课本章归属；
+/// 而 历年真题 / 模考 / 预测 / 高频考点 这类是**整卷**，题直接挂在「卷」上，
+/// 题库里根本没有章节这个维度（14259 题，占全库 48%）。
+///
+/// 好在整卷题里有相当一部分在章节型卷册里有一份**完全相同的题干**，那份已经归好章了 ——
+/// 按题干查表就能把章节抄过来（实测 6967 题，其中 564 题一题多章）。
+/// 刻意不做相似度猜测：那部分留一验证只有 81~88% 的精度，错归会直接污染薄弱章节统计。
+///
+/// 为什么不写进 question-bank.db：整包上传会替换那个文件，写进去就没了。
+/// 所以落成 data/chapter-map.json 这个独立文件，题库更新后由管理端重建。
+/// </summary>
+sealed class ChapterMapStore
+{
+    private readonly AppPaths _paths;
+    private readonly QuestionBank _bank;
+    private readonly object _gate = new();
+    private ChapterMapFile? _cache;
+    private string _cacheKey = "";
+
+    public ChapterMapStore(AppPaths paths, QuestionBank bank)
+    {
+        _paths = paths;
+        _bank = bank;
+    }
+
+    public string FilePath
+    {
+        get
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(_paths.SqlitePath)) ?? _paths.BaseRoot;
+            return Path.Combine(dir, "chapter-map.json");
+        }
+    }
+
+    /// <summary>题库文件签名。整包上传或重新拉取后签名会变，映射随之过期。</summary>
+    public string BankSignature()
+    {
+        static string Of(string path)
+        {
+            if (!File.Exists(path)) return "-";
+            var info = new FileInfo(path);
+            return info.Length.ToString(CultureInfo.InvariantCulture)
+                   + ":" + info.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture);
+        }
+        return Of(_paths.SqlitePath) + "|" + Of(_paths.PulledSqlitePath);
+    }
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = false,
+    };
+
+    /// <summary>读映射（带缓存）。文件缺失或读坏一律返回空映射，不抛。</summary>
+    public ChapterMapFile Load()
+    {
+        var key = CacheKey();
+        lock (_gate)
+        {
+            if (_cache is not null && _cacheKey == key) return _cache;
+            _cache = TryRead() ?? new ChapterMapFile();
+            _cacheKey = key;
+            return _cache;
+        }
+    }
+
+    private string CacheKey()
+    {
+        var path = FilePath;
+        var mapStamp = File.Exists(path)
+            ? File.GetLastWriteTimeUtc(path).Ticks.ToString(CultureInfo.InvariantCulture)
+            : "-";
+        return BankSignature() + "|" + mapStamp;
+    }
+
+    private ChapterMapFile? TryRead()
+    {
+        try
+        {
+            var path = FilePath;
+            if (!File.Exists(path)) return null;
+            var parsed = JsonSerializer.Deserialize<ChapterMapFile>(File.ReadAllText(path, Encoding.UTF8), JsonOptions);
+            if (parsed is null) return null;
+            parsed.Chapters ??= new List<string>();
+            parsed.Map ??= new Dictionary<string, int[]>(StringComparer.Ordinal);
+            parsed.BankSignature ??= "";
+            parsed.GeneratedAt ??= "";
+            return parsed;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public object Status()
+    {
+        var map = Load();
+        var stale = map.BankSignature.Length > 0 && map.BankSignature != BankSignature();
+        return new
+        {
+            ok = true,
+            present = map.Map.Count > 0,
+            stale,
+            generatedAt = map.GeneratedAt,
+            chapters = map.Chapters.Count,
+            mappedQuestions = map.MappedQuestions,
+            multiChapterQuestions = map.MultiChapterQuestions,
+            file = FilePath,
+        };
+    }
+
+    /// <summary>
+    /// 解析里的教材页码引用，如「2025教材P346」「参见教材P176」。
+    /// 整卷题里 27.6% 的解析带这个，而页码和章节几乎一一对应 ——
+    /// 用它反推章节，留一验证 99.4% 命中（票数≥5 时 100%）。
+    /// </summary>
+    private static readonly Regex PageRefRegex = new(@"(?:(\d{4})\s*教材|教材)\s*[Pp]\s*(\d{1,4})", RegexOptions.Compiled);
+
+    /// <summary>没有「教材」字样时的兜底：「参见 P176」。</summary>
+    private static readonly Regex PageAnyRegex = new(@"[Pp]\s*(\d{1,4})", RegexOptions.Compiled);
+
+    /// <summary>取解析里的页码引用。年份为空表示没写明年份（跨版本时用页码兜底）。</summary>
+    private static List<(string Year, int Page)> PageRefs(string description)
+    {
+        var result = new List<(string, int)>();
+        if (description.Length == 0) return result;
+        foreach (Match match in PageRefRegex.Matches(description))
+        {
+            if (int.TryParse(match.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var page) && page > 0)
+            {
+                result.Add((match.Groups[1].Value, page));
+            }
+        }
+        if (result.Count > 0) return result;
+        foreach (Match match in PageAnyRegex.Matches(description))
+        {
+            if (int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var page) && page > 0)
+            {
+                result.Add(("", page));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// 章名的规范形式：把任意空白（含全角空格 U+3000）压成一个半角空格再 trim。
+    ///
+    /// 题库里同一个课本的章在不同卷册里会用不同的空格写法 —— 实测课程 570 同时存在
+    /// 「第二章　安装工程计量」(U+3000) 和「第二章 安装工程计量」(半角)，
+    /// 全库去掉空白后重名的章有 102 组、涉及 414 个 chapter 节点。
+    /// 不归一化就会被当成两个不同的章，一题多章的统计直接虚高。
+    ///
+    /// 前端的 textbookChapterName 必须做同样的归一化，否则两边对不上键。
+    /// </summary>
+    public static string NormalizeChapterName(string? name)
+        => Regex.Replace(name ?? "", @"\s+", " ").Trim();
+
+    private sealed class ChapterNode
+    {
+        public int Id { get; init; }
+        public int CourseId { get; init; }
+        public int Type { get; init; }
+        public int Grade { get; init; }
+        public string Name { get; init; } = "";
+        public string Code { get; init; } = "";
+        public int ParentId { get; set; }
+    }
+
+    /// <summary>扫全库重建映射并落盘。</summary>
+    public object Rebuild()
+    {
+        if (!File.Exists(_paths.SqlitePath))
+        {
+            throw new FileNotFoundException("题库不存在，先上传或挂载 data/question-bank.db", _paths.SqlitePath);
+        }
+
+        var chapterRows = _bank.ReadAll(
+            "select ichapterid, icourseid, cchaptername, cchaptercode, igrade, itype "
+            + "from coursechapter where coalesce(bstopflag,0)=0 order by itype, cchaptercode");
+        var questionRows = _bank.ReadAll(
+            "select isubjectid, icourseid, ichapterid, ctitle, cdescription, dupdatedate "
+            + "from coursesubject where coalesce(bstopflag,0)=0");
+
+        var nodes = new List<ChapterNode>(chapterRows.Count);
+        foreach (var row in chapterRows)
+        {
+            nodes.Add(new ChapterNode
+            {
+                Id = AsInt(row, "ichapterid"),
+                CourseId = AsInt(row, "icourseid"),
+                Type = AsInt(row, "itype"),
+                Grade = AsInt(row, "igrade"),
+                Name = AsText(row, "cchaptername"),
+                Code = AsText(row, "cchaptercode"),
+            });
+        }
+        var byId = new Dictionary<int, ChapterNode>(nodes.Count);
+        foreach (var node in nodes) byId[node.Id] = node;
+
+        // 父节点判定必须和前端 buildChapterTree 逐字一致：
+        // 同课程 + 同 itype + grade 差 1 + 父 code 是子 code 的前缀且更短，
+        // 并在多个候选里取 **code 最长**的那个（前端是 .sort(b.code.length - a.code.length)[0]）。
+        // 取第一个匹配是不对的：题库里同一层级可能有两个前缀都成立，选错就会挂到别的章下。
+        foreach (var node in nodes)
+        {
+            if (node.Code.Length == 0) continue;
+            ChapterNode? best = null;
+            foreach (var candidate in nodes)
+            {
+                if (candidate.Id == node.Id) continue;
+                if (candidate.CourseId != node.CourseId || candidate.Type != node.Type) continue;
+                if (candidate.Grade != node.Grade - 1) continue;
+                if (candidate.Code.Length == 0 || candidate.Code.Length >= node.Code.Length) continue;
+                if (!node.Code.StartsWith(candidate.Code, StringComparison.OrdinalIgnoreCase)) continue;
+                if (best is null || candidate.Code.Length > best.Code.Length) best = candidate;
+            }
+            if (best is not null) node.ParentId = best.Id;
+        }
+
+        var pathCache = new Dictionary<int, List<ChapterNode>>();
+        List<ChapterNode> PathOf(int chapterId)
+        {
+            if (pathCache.TryGetValue(chapterId, out var cached)) return cached;
+            var chain = new List<ChapterNode>();
+            var current = byId.TryGetValue(chapterId, out var node) ? node : null;
+            var guard = 0;
+            while (current is not null && guard++ < 16)
+            {
+                chain.Insert(0, current);
+                current = current.ParentId != 0 && byId.TryGetValue(current.ParentId, out var parent) ? parent : null;
+            }
+            pathCache[chapterId] = chain;
+            return chain;
+        }
+
+        // 第一遍：给每道题算出章节路径，同时记下哪些卷册带「节」（depth >= 3）。
+        var parsed = new List<(int Id, int CourseId, int VolumeId, string Stem, string Desc, List<ChapterNode> Path)>(questionRows.Count);
+        var volumesWithSections = new HashSet<(int, int)>();
+        foreach (var row in questionRows)
+        {
+            var path = PathOf(AsInt(row, "ichapterid"));
+            if (path.Count < 2) continue;
+            var courseId = AsInt(row, "icourseid");
+            if (path.Count >= 3) volumesWithSections.Add((courseId, path[0].Id));
+            parsed.Add((AsInt(row, "isubjectid"), courseId, path[0].Id,
+                QuestionBank.StemKey(QuestionBank.PlainStem(row.GetValueOrDefault("ctitle"), row.GetValueOrDefault("dupdatedate"))),
+                QuestionBank.DescriptionKey(QuestionBank.PlainDescription(row.GetValueOrDefault("cdescription"), row.GetValueOrDefault("dupdatedate"))),
+                path));
+        }
+
+        // 第二遍：章节型卷册（有节）当语料，建三个索引，按可靠性从高到低用：
+        //   ① 题干指纹   —— 同一道题的排版差异最小
+        //   ② 解析指纹   —— 题干有细微差异时（题号、空格、选项换行）还能对上
+        //   ③ 教材页码   —— 解析里「2025教材P346」这种引用，反推出的章节留一验证 99.4% 命中
+        // 索引都必须**按课程**分：不同课程可能有完全相同的题干/页码却归在不同章下。
+        // 同一题干在同一课程内命中多个章 = 一题多章。
+        var stemIndex = new Dictionary<(int CourseId, string Key), HashSet<string>>();
+        var descIndex = new Dictionary<(int CourseId, string Key), HashSet<string>>();
+        var pageIndex = new Dictionary<(int CourseId, string Year, int Page), Dictionary<string, int>>();
+        var corpusRows = 0;
+        var corpusEmptyStem = 0;
+        foreach (var row in parsed)
+        {
+            // 语料来自**章节型**卷册（有节的那些），所以这里要 !Contains —— 反过来就一行都取不到。
+            if (!volumesWithSections.Contains((row.CourseId, row.VolumeId))) continue;
+            if (row.Path.Count < 3) continue;   // 只取挂在「节」上的题
+            corpusRows++;
+            if (row.Stem.Length == 0)
+            {
+                corpusEmptyStem++;
+                continue;
+            }
+            var chapter = NormalizeChapterName(row.Path[1].Name);
+
+            Add(stemIndex, (row.CourseId, row.Stem), chapter);
+            if (row.Desc.Length > 0) Add(descIndex, (row.CourseId, row.Desc), chapter);
+            foreach (var (year, page) in PageRefs(row.Desc))
+            {
+                var key = (row.CourseId, year, page);
+                if (!pageIndex.TryGetValue(key, out var votes)) pageIndex[key] = votes = new Dictionary<string, int>(StringComparer.Ordinal);
+                votes[chapter] = votes.GetValueOrDefault(chapter) + 1;
+            }
+        }
+
+        static void Add(Dictionary<(int, string), HashSet<string>> index, (int, string) key, string chapter)
+        {
+            if (!index.TryGetValue(key, out var set))
+            {
+                set = new HashSet<string>(StringComparer.Ordinal);
+                index[key] = set;
+            }
+            set.Add(chapter);
+        }
+
+        // 第三遍：整卷型卷册（无节）的题，查表抄章节。
+        var chapterNames = new List<string>();
+        var chapterIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+        int IndexOf(string name)
+        {
+            if (chapterIndex.TryGetValue(name, out var i)) return i;
+            chapterNames.Add(name);
+            chapterIndex[name] = chapterNames.Count - 1;
+            return chapterNames.Count - 1;
+        }
+
+        var map = new Dictionary<string, int[]>(StringComparer.Ordinal);
+        var multi = 0;
+        var volumeRows = 0;
+        var viaStem = 0;
+        var viaDesc = 0;
+        var viaPage = 0;
+        foreach (var row in parsed)
+        {
+            if (volumesWithSections.Contains((row.CourseId, row.VolumeId))) continue;
+            volumeRows++;
+
+            HashSet<string>? chapters = null;
+            var source = "";
+            if (row.Stem.Length > 0 && stemIndex.TryGetValue((row.CourseId, row.Stem), out var byStemHit) && byStemHit.Count > 0)
+            {
+                chapters = byStemHit;
+                source = "stem";
+            }
+            if (chapters is null && row.Desc.Length > 0 && descIndex.TryGetValue((row.CourseId, row.Desc), out var byDescHit) && byDescHit.Count > 0)
+            {
+                chapters = byDescHit;
+                source = "desc";
+            }
+            if (chapters is null && row.Desc.Length > 0)
+            {
+                // 页码：同一年份优先；同一页可能对应多个章（页码跨章），取票数最高的那个。
+                var best = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var (year, page) in PageRefs(row.Desc))
+                {
+                    if (!pageIndex.TryGetValue((row.CourseId, year, page), out var votes) || votes.Count == 0) continue;
+                    var top = votes.OrderByDescending(pair => pair.Value).First();
+                    best[top.Key] = Math.Max(best.GetValueOrDefault(top.Key), top.Value);
+                }
+                if (best.Count > 0)
+                {
+                    chapters = new HashSet<string>(best.Keys, StringComparer.Ordinal);
+                    source = "page";
+                }
+            }
+            if (chapters is null || chapters.Count == 0) continue;
+
+            var indices = chapters.Select(IndexOf).OrderBy(x => x).ToArray();
+            map[row.Id.ToString(CultureInfo.InvariantCulture)] = indices;
+            if (indices.Length > 1) multi++;
+            if (source == "stem") viaStem++;
+            else if (source == "desc") viaDesc++;
+            else viaPage++;
+        }
+
+        var payload = new ChapterMapFile
+        {
+            Version = 1,
+            GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            BankSignature = BankSignature(),
+            Chapters = chapterNames,
+            Map = map,
+            MappedQuestions = map.Count,
+            MultiChapterQuestions = multi,
+        };
+
+        var filePath = FilePath;
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? _paths.BaseRoot);
+        var temp = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(payload, JsonOptions), new UTF8Encoding(false));
+        File.Move(temp, filePath, true);
+
+        lock (_gate)
+        {
+            _cache = payload;
+            _cacheKey = CacheKey();
+        }
+
+        var volumeQuestions = parsed.Count(r => !volumesWithSections.Contains((r.CourseId, r.VolumeId)));
+        return new
+        {
+            ok = true,
+            chapters = chapterNames.Count,
+            sectionQuestions = parsed.Count - volumeQuestions,
+            volumeQuestions,
+            mappedQuestions = map.Count,
+            multiChapterQuestions = multi,
+            // 诊断用：三条信号各命中多少、语料两侧的规模。
+            // 匹配为 0 时这些数字能立刻区分「索引没建起来」和「题库里确实没有可用的重复题」。
+            corpusRows,
+            corpusEmptyStem,
+            corpusStems = stemIndex.Count,
+            corpusDescs = descIndex.Count,
+            corpusPages = pageIndex.Count,
+            volumeRows,
+            viaStem,
+            viaDesc,
+            viaPage,
+            sampleStem = parsed.FirstOrDefault(r => r.Stem.Length > 0).Stem,
+            file = filePath,
+            message = $"已重建章节映射：{volumeQuestions} 道整卷题中归入 {map.Count} 道"
+                      + (multi > 0 ? $"（其中 {multi} 道一题多章）" : ""),
+        };
+    }
+
+    private static int AsInt(Dictionary<string, object?> row, string key)
+        => row.TryGetValue(key, out var value) && value is not null and not DBNull
+            ? Convert.ToInt32(value, CultureInfo.InvariantCulture)
+            : 0;
+
+    private static string AsText(Dictionary<string, object?> row, string key)
+        => row.TryGetValue(key, out var value) && value is not null and not DBNull
+            ? Convert.ToString(value, CultureInfo.InvariantCulture) ?? ""
+            : "";
 }
 

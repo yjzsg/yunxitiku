@@ -10,6 +10,8 @@ const state = {
   analysisQuestions: [],
   analysisCourseId: 0,
   analysisLoadingCourseId: 0,
+  /* 外挂章节映射：subjectId → 课本章名数组（一题多章）。见 loadChapterMap。 */
+  chapterMap: new Map(),
   currentCourse: null,
   currentChapter: null,
   currentIndex: -1,
@@ -101,6 +103,25 @@ const LAST_USER_KEY = "yunxi-current-user";
    「登录成功却立刻提示登录已失效」。这里存一份，后续请求用 X-Session-Token 头带上。 */
 const SESSION_TOKEN_KEY = "yunxi-session-token";
 const REVIEW_INTERVAL_DAYS = [1, 2, 4, 7, 15, 30];
+/* 智能训练选题预算（2026-09-26 重构）。
+   旧实现是「装填后截断」：错题段没有上限，错题超过 60 道时整张卷子 100% 是错题、
+   新题配额恒为 0，卡片上写的「混合」是假的。现在改成「先占位再装填」：
+   弱项段各有上限，未做题有保底量，保底先扣出来，弱项再多也挤不掉。 */
+const SMART_PRACTICE_SIZE = 60;
+const SMART_PRACTICE_FLOOR_NEW = 24;      // 60 题里保证 24 道没做过的
+const SMART_QUOTA = { due: 12, repeated: 10, weak: 12 };
+const SPRINT_PRACTICE_SIZE = 100;
+const SPRINT_PRACTICE_FLOOR_NEW = 40;
+const SPRINT_QUOTA = { wrong: 25, weak: 35 };
+/* 弱项类题的轮换冷却：N 天内出现过的降到候选队尾（不是硬排除，
+   池子不够时仍然会被用上，不会出现「凑不满」）。 */
+const TRAINING_COOLDOWN_DAYS = 3;
+/* 相似错题重练：种子数 / 每个种子补几道 / 判定为「同类」所需的最少关键词命中数。
+   阈值 2 是权衡：设 1 等于没判（「万元」「2018」这种高频词命中就收），
+   设 3 以上在短题干上会一个都匹配不到。 */
+const SIMILAR_SEED_COUNT = 12;
+const SIMILAR_PER_SEED = 6;
+const SIMILAR_MIN_KEYWORD_HITS = 2;
 const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "待复盘"];
 const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
 const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
@@ -446,6 +467,9 @@ function ensureWrongReviewFields(record = {}, q = null) {
   const now = nowText();
   if (q) {
     record.courseId = q.courseId;
+    /* chapterId 必须存下来：相似错题重练要靠它判「同章节」。
+       以前只存了 chapterName，导致 chapterId 比较恒为 false，同章节判定全靠字符串相等。 */
+    record.chapterId = Number(q.chapterId || 0);
     record.chapterName = q.chapterName;
     record.type = q.type;
     record.title = stripText(q.stem).slice(0, 120);
@@ -548,10 +572,116 @@ function selectedChapterIds(chapter = state.currentChapter) {
   return Array.from(ids).filter(Boolean);
 }
 
+/* chapterPathForId 的缓存。选题逻辑会对整个题库逐题调它
+   （一次生成是几万到几十万次调用），而 findChapterPath 是递归线性扫描，
+   不缓存的话每次生成/每次 renderTraining 都会卡主线程。
+   renderChapters 每次都会重建 roots 数组，所以用数组身份做失效判断就够。 */
+let chapterPathCache = new Map();
+let chapterPathCacheRoots = null;
+
 function chapterPathForId(chapterId) {
   const id = Number(chapterId || 0);
   if (!id || !state.chapterTreeRoots) return [];
-  return findChapterPath(state.chapterTreeRoots, id);
+  if (chapterPathCacheRoots !== state.chapterTreeRoots) {
+    chapterPathCache = new Map();
+    chapterPathCacheRoots = state.chapterTreeRoots;
+  }
+  if (chapterPathCache.has(id)) return chapterPathCache.get(id);
+  const path = findChapterPath(state.chapterTreeRoots, id);
+  chapterPathCache.set(id, path);
+  return path;
+}
+
+/* 「课本章」的名字 = chapterPathForId 前两层里最深那一层的名字。
+   题库的 coursechapter 是四层：卷册(grade0) → 章(grade1) → 节(grade2) → 目(grade3)，
+   同一个课本的章在每个卷册里都有一份**独立的** chapter 记录 ——
+   实测课程 20 的「第二章 建设工程计价原理、方法及计价依据」被拆成 5 个 chapter id
+   （章节练习 / 章节真题 / 章节密训 / 章节强化 / 章节精选），合计 1085 题，
+   按 id 判「同章节」一次最多只能看到其中 356 题，漏掉 67%。
+   只有章名（「第X章 …」）是跨卷册稳定的，所以判同章节必须按名字，不能按 id。 */
+function textbookChapterName(chapterId) {
+  const path = chapterPathForId(chapterId).slice(0, 2);
+  const node = path[1] || path[0];
+  /* 归一化必须和后端 ChapterMapStore.NormalizeChapterName 一致：
+     空白（含全角空格 U+3000）压成一个半角空格再 trim。
+     题库里同一个课本的章在不同卷册里空格写法不同 ——
+     实测课程 570 同时有「第二章　安装工程计量」和「第二章 安装工程计量」，
+     不归一化就会被当成两个章，一题多章统计虚高，外挂映射的键也会对不上。 */
+  return normalizeChapterName(node?.name);
+}
+
+function normalizeChapterName(name) {
+  return String(name || "").replace(/\s+/g, " ").trim();
+}
+
+/* 外挂章节映射（后端 ChapterMapStore 生成，落 data/chapter-map.json）。
+   整卷类卷册（历年真题 / 模考 / 预测 …）的题在题库里没有章节归属，靠这张表补：
+   键是 subjectId，值是课本章名数组（同一道题可能考察多个章节，所以是数组）。
+   取不到就留空表，选题逻辑自动回落到「题自己的章节」。 */
+async function loadChapterMap() {
+  try {
+    const payload = await api("/api/chapter-map");
+    const chapters = Array.isArray(payload?.chapters) ? payload.chapters : [];
+    const map = new Map();
+    Object.entries(payload?.map || {}).forEach(([id, indices]) => {
+      const names = (indices || []).map((index) => chapters[Number(index)]).filter(Boolean);
+      if (names.length) map.set(Number(id), names);
+    });
+    state.chapterMap = map;
+    return map;
+  } catch (err) {
+    console.warn("chapter map load failed", err);
+    state.chapterMap = new Map();
+    return state.chapterMap;
+  }
+}
+
+/* 整卷型卷册的 id 集合：该卷册下**没有任何题挂到「节」**（chapterPath 长度 < 3）。
+   历年真题 / 模考 / 预测 这类卷册整卷就是一个节点，题直接挂在卷子上，没有节。
+   缓存按题目数组的身份失效（换科目或重新拉题就会重算）。 */
+let volumeTypeCache = null;
+let volumeTypeCacheSource = null;
+function volumeTypeVolumeIds(items) {
+  if (volumeTypeCacheSource === items && volumeTypeCache) return volumeTypeCache;
+  const withSections = new Set();
+  const volumes = new Set();
+  (items || []).forEach((item) => {
+    const path = chapterPathForId(item.chapterId);
+    if (path.length < 2) return;
+    const volumeId = Number(path[0].id);
+    volumes.add(volumeId);
+    if (path.length >= 3) withSections.add(volumeId);
+  });
+  const result = new Set([...volumes].filter((id) => !withSections.has(id)));
+  volumeTypeCache = result;
+  volumeTypeCacheSource = items;
+  return result;
+}
+
+/* 一道题所属的课本章名集合。来源优先级：
+     ① 外挂映射 —— 整卷题在题库里没有章节归属，只能靠它补；
+     ② 题自己挂在哪个章 —— 章节型卷册天然有；
+     ③ 都没有 → 空数组，不参与章节统计。
+   一题多章是正常的（同一道题可能考察多个章节），所以返回数组而不是单值。
+
+   ② 必须排除整卷型卷册：那些卷册里「题挂在章上」的那个「章」其实是**卷子名**
+   （「2009年一级造价工程师考试《安装计量》真题」），不是课本的章。
+   不排除的话每份真题卷都会变成一行假的「薄弱章节」。 */
+function textbookChapterKeys(item, items = null) {
+  const mapped = state.chapterMap?.get(Number(item?.id));
+  if (mapped && mapped.length) return [...new Set(mapped)];
+  const path = chapterPathForId(item?.chapterId);
+  if (path.length >= 2) {
+    const pool = items || (state.analysisQuestions.length ? state.analysisQuestions : state.questions);
+    if (!volumeTypeVolumeIds(pool).has(Number(path[0].id))) {
+      const own = normalizeChapterName(path[1].name);
+      if (own) return [own];
+    }
+    return [];
+  }
+  /* 章节树还没加载：回落到题自带的 chapterName（精度差，但总比没有强） */
+  const fallback = normalizeChapterName(item?.chapterName);
+  return fallback ? [fallback] : [];
 }
 
 function applyChapterParams(params, chapter = state.currentChapter) {
@@ -1112,6 +1242,8 @@ async function enterApp(user, options = {}) {
     state.mode = RESTORABLE_MODES.includes(savedMode) ? savedMode : "training";
   }
   await loadCourses();
+  // 外挂章节映射是选题逻辑的输入，尽量在进入应用时取好；取不到也不挡进入（回落成空表）。
+  await loadChapterMap();
   if (isAdmin()) {
     // 账号清单改成了管理员专用接口，进面板前先取一次（失败不该挡住进入应用）
     await loadUsers().catch((err) => {
@@ -1936,61 +2068,228 @@ function getSmartPracticeIds(courseStore = userCourseStore()) {
   return ids;
 }
 
-/* 等间隔抽样：从整个候选池里均匀取 n 个，保持原有相对顺序。
-   为什么要它：题库默认题序是 order by ichaptertype, cchaptercode, iindex, isubjectid，
+/* ── 智能训练轮换 ──────────────────────────────────────────────────────
+   为什么需要它：题库默认题序是 order by ichaptertype, cchaptercode, iindex, isubjectid，
    而真题卷行的 ichaptertype 是 NULL（SQLite 里 NULL 排最前）、历年真题里 2014 年编号最小，
-   于是「题序最前面那一大段」永远是 2014 真题。旧实现用 slice(0, n) 抓未做题，
-   结果每天的今日强化/考前冲刺都从 2014 真题开始，看着就是「怎么全是 14 年真题」。
-   randomize（点「重新生成」）时退化为随机抽。 */
-function sampleEvenly(list, n, randomize = false) {
-  const pool = (list || []).map(Number).filter(Boolean);
-  const want = Math.max(0, Math.floor(Number(n) || 0));
-  if (!want || !pool.length) return [];
-  if (randomize) return shuffleItems(pool).slice(0, want);
-  if (want >= pool.length) return pool;
-  const step = pool.length / want;
+   所以「题序最前面那一大段」永远是 2014 真题。用 slice(0, n) 抓题，
+   每天的今日强化/考前冲刺都会从 2014 真题开始，看着就是「怎么全是 14 年真题」。
+
+   另一个问题是旧实现没有任何跨天记忆：候选池不变、规则不变 → 每天生成的题单完全一样，
+   唯一的变量是「做对了才会被移出池」，等于「只有做对才换题」。
+   staleRank 用「最久没出现」排序解决它。
+
+   数据来源是已有的两个存储字段，不新增 schema、不改导出格式：
+     - state.storage.trainingSessions（≤80 个会话，含 ids / createdAt / dayKey）→ 生成过的题
+     - state.storage.dailyActivity（保留 90 天，courses[cid].questions）→ 实际做过的题 */
+
+/* 稳定散列：同一道题永远得到同一个 32 位数。
+   给「从没见过」的题打散顺序——它们 staleness 全相等，如果保持题库原序，
+   取前 N 道又会退回「全是 2014 真题」。刻意不用 Math.random：同一天内多次生成要一致。 */
+function stableHash(id) {
+  let h = (2166136261 ^ Number(id || 0)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 16777619) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+/* 某科目下每道题「最近一次出现在训练单或做题记录里」的日期（YYYY-MM-DD）。 */
+function buildSeenIndex(courseId = state.currentCourse?.id) {
+  const cid = Number(courseId || 0);
+  const seen = new Map();
+  const mark = (id, day) => {
+    const n = Number(id);
+    if (!n || !day) return;
+    const prev = seen.get(n);
+    if (!prev || day > prev) seen.set(n, day);
+  };
+  (state.storage.trainingSessions || []).forEach((session) => {
+    if (Number(session.courseId || 0) !== cid) return;
+    const day = session.dayKey || dateKey(parseDate(session.createdAt) || new Date());
+    normalizeSessionIds(session.ids).forEach((id) => mark(id, day));
+  });
+  Object.entries(state.storage.dailyActivity || {}).forEach(([day, bucket]) => {
+    const questions = bucket?.courses?.[String(cid)]?.questions;
+    if (questions) Object.keys(questions).forEach((id) => mark(id, day));
+  });
+  return seen;
+}
+
+function daysSinceDayKey(day) {
+  const d = parseDate(day);
+  if (!d) return Infinity;
+  d.setHours(0, 0, 0, 0);
+  return Math.round((startOfToday().getTime() - d.getTime()) / 86400000);
+}
+
+function isInCooldown(id, seen, days = TRAINING_COOLDOWN_DAYS) {
+  const day = seen.get(Number(id));
+  if (!day) return false;
+  return daysSinceDayKey(day) < days;
+}
+
+/* 候选排序器：从没出现过的排最前（同档按 stableHash 打散），其次是出现得最久远的。 */
+function staleRank(seen) {
+  return (a, b) => {
+    const av = seen.get(Number(a));
+    const bv = seen.get(Number(b));
+    if (av !== bv) {
+      if (!av) return -1;
+      if (!bv) return 1;
+      return av < bv ? -1 : 1;   // dayKey 是 YYYY-MM-DD，字符串序即时间序
+    }
+    return stableHash(a) - stableHash(b);
+  };
+}
+
+/* 统一的候选排序：冷却期内的整体降到队尾，其余按 primary（默认 staleRank）排。 */
+function orderCandidates(candidates, seen, primary = null) {
+  const cmp = primary || staleRank(seen);
+  return [...new Set((candidates || []).map(Number).filter(Boolean))].sort((a, b) => {
+    const ca = isInCooldown(a, seen) ? 1 : 0;
+    const cb = isInCooldown(b, seen) ? 1 : 0;
+    return ca - cb || cmp(a, b);
+  });
+}
+
+/* 今天「已经做过」的题 —— 同一天内不重复出题的依据。
+   注意是「做过」，不是「生成过」：旧实现读的是 trainingSessions 里记录的题单 ids，
+   那是「生成过」的口径，会把只看过一眼、一道没做的题单也算成已练。
+   后果是「生成 60 道 → 一道没做 → 进今日错题复习」会被告知「都已经练过了」，
+   而实际上根本没练过。
+   数据源用 dailyActivity 里今天这个科目的 questions（记答案时写入，见 recordPracticeActivity）。
+   跨天轮换（buildSeenIndex）仍然按「生成过 + 做过」算，两者职责不同：
+   当天去重看「有没有练」，跨天轮换看「有没有见过」。 */
+function todayServedIds(courseId = state.currentCourse?.id) {
+  const cid = Number(courseId || 0);
+  const questions = state.storage.dailyActivity?.[todayKey()]?.courses?.[String(cid)]?.questions;
+  const out = new Set();
+  if (questions) Object.keys(questions).forEach((id) => out.add(Number(id)));
+  return out;
+}
+
+/* 未做题按二级章节轮转取：每轮每章最多 1 道。
+   这是「训练其他」的关键一步——不做的话 24 道新题可能全砸在同一个章节里。
+   排除条件要同时看 done 和 wrong：正常答题路径下错题一定也是 done
+   （记答案时 courseStore.done[id] = true），但导入的旧数据不一定，两边都判才稳。 */
+function takeFreshByChapter(items, courseStore, quota, blocked, seen, randomize = false) {
+  if (quota <= 0) return [];
+  const groups = new Map();
+  items.forEach((item) => {
+    const id = Number(item.id);
+    if (!id || blocked.has(id) || courseStore.done?.[id] || courseStore.wrong?.[id]) return;
+    const path = chapterPathForId(item.chapterId).slice(0, 2);
+    const key = Number(path[path.length - 1]?.id || item.chapterId || 0);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(id);
+  });
+  const cmp = staleRank(seen);
+  const buckets = [...groups.values()].map((list) => randomize ? shuffleItems(list) : list.sort(cmp));
   const out = [];
-  for (let i = 0; i < want; i++) {
-    const pick = pool[Math.min(pool.length - 1, Math.floor(i * step + step / 2))];
-    if (!out.includes(pick)) out.push(pick);
+  for (let round = 0; out.length < quota; round++) {
+    let progressed = false;
+    for (const bucket of buckets) {
+      if (out.length >= quota) break;
+      if (round < bucket.length) {
+        out.push(bucket[round]);
+        progressed = true;
+      }
+    }
+    if (!progressed) break;
   }
   return out;
 }
 
-function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
-  const ids = [];
+/* 今日强化的选题预算表。返回 { ids, counts }，counts 给卡片文案用。
+   装填顺序：到期复习 → 反复错 → 薄弱章节 → 未做题保底 → 余量填充。
+   每一段都有上限，且任何一段装不满都不会浪费位置（后面的段顺延吃余量）。 */
+function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
   const randomize = !!options.randomize;
-  const prepare = (items) => randomize ? shuffleItems(items) : items;
-  const pushUnique = (id) => {
-    const n = Number(id);
-    if (n && !ids.includes(n)) ids.push(n);
-  };
-  const pushMany = (items, limit = items.length) => {
-    prepare(items).slice(0, limit).forEach(pushUnique);
-  };
   const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
-  pushMany(getWrongRecordsForCurrentCourse(courseStore)
-    .filter(([, item]) => isReviewDue(item) || Number(item.count || 0) >= 2)
-    .map(([id]) => id), 20);
-  pushMany(Object.keys(courseStore.wrong || {}));
-  pushMany(Object.keys(courseStore.done || {})
-    .filter((id) => !courseStore.correct?.[id]));
-  getWeakChapterRows(courseStore, allItems).slice(0, 5).forEach((chapter) => {
-    pushMany(allItems
-      .filter((item) => chapterPathForId(item.chapterId).slice(0, 2).some((node) => Number(node.id) === Number(chapter.id)))
+  const seen = buildSeenIndex();
+  const servedToday = todayServedIds();
+  const ids = [];
+  const picked = new Set();
+  const push = (id) => {
+    const n = Number(id);
+    if (!n || picked.has(n)) return false;
+    picked.add(n);
+    ids.push(n);
+    return true;
+  };
+  const take = (ordered, quota) => {
+    let added = 0;
+    for (const raw of ordered || []) {
+      if (added >= quota) break;
+      const n = Number(raw);
+      if (picked.has(n) || servedToday.has(n)) continue;
+      if (push(n)) added++;
+    }
+    return added;
+  };
+
+  const records = getWrongRecordsForCurrentCourse(courseStore);
+  const cmpStale = staleRank(seen);
+  const counts = { due: 0, repeated: 0, weak: 0, fresh: 0 };
+
+  /* ① 到期复习：到期日升序（最该复习的先来），同一天到期的按「最久没出现」轮换。 */
+  const dueList = records
+    .filter(([, item]) => isReviewDue(item))
+    .sort((a, b) => (reviewDueDate(a[1]).getTime() - reviewDueDate(b[1]).getTime()) || cmpStale(a[0], b[0]))
+    .map(([id]) => id);
+  counts.due = take(orderCandidates(dueList, seen, cmpStale), SMART_QUOTA.due);
+
+  /* ② 反复错：count≥2 且未 resolved。
+     旧实现这里只判 `isReviewDue || count≥2`，漏了 resolved，已经复习完结的题还会被捞回来。 */
+  const repeatedList = records
+    .filter(([, item]) => !item.resolved && Number(item.count || 0) >= 2)
+    .map(([id]) => id);
+  counts.repeated = take(orderCandidates(repeatedList, seen), SMART_QUOTA.repeated);
+
+  /* ③ 薄弱章节：top5 章均分配额，章内按轮换排序。
+     旧实现是章内 slice(0,10) 取题序最前 10 道，薄弱章节不变则那 10 道永远不变。 */
+  const weakChapters = getWeakChapterRows(courseStore, allItems).slice(0, 5);
+  const perChapter = Math.max(1, Math.ceil(SMART_QUOTA.weak / Math.max(1, weakChapters.length)));
+  let weakAdded = 0;
+  weakChapters.forEach((chapter) => {
+    if (weakAdded >= SMART_QUOTA.weak) return;
+    /* 按「课本章名」筛，跨卷册、一题多章 —— 见 textbookChapterKeys */
+    const candidates = allItems
+      .filter((item) => textbookChapterKeys(item).includes(chapter.key))
       .filter((item) => !courseStore.correct?.[item.id])
-      .map((item) => item.id), 10);
+      .map((item) => item.id);
+    weakAdded += take(orderCandidates(candidates, seen), Math.min(perChapter, SMART_QUOTA.weak - weakAdded));
   });
-  /* 未做题要「全库均匀抽」，不能取题序最前面的一段（见 sampleEvenly 注释）。
-     这里不再「弱项凑够 30 道就提前收工」——那会让题单在 30~59 之间缩水，
-     与「错题、薄弱章节和未做题自动混合」的定位不符（2026-09-24 修：
-     原 `if (ids.length >= 30) return ids.slice(0, 60)` 命中时题单只有弱项）。
-     候选池要剔除已在本单里的（④ 的薄弱章节池里可能含未做题，重叠会让实际
-     补入少于配额、凑不满 60）。 */
-  pushMany(sampleEvenly(allItems
-    .filter((item) => !courseStore.done?.[item.id] && !ids.includes(Number(item.id)))
-    .map((item) => item.id), 60 - ids.length, randomize));
-  return ids.slice(0, 60);
+  counts.weak = weakAdded;
+
+  /* ④ 未做题保底：先扣出保底量，再按剩余空间继续取（新题不再是「余数」）。
+     按二级章节轮转，避免整批新题砸在同一个章节。 */
+  const freshQuota = Math.max(SMART_PRACTICE_FLOOR_NEW, SMART_PRACTICE_SIZE - ids.length);
+  const freshPool = takeFreshByChapter(
+    allItems,
+    courseStore,
+    freshQuota,
+    new Set([...picked, ...servedToday]),
+    seen,
+    randomize,
+  );
+  counts.fresh = take(freshPool, freshQuota);
+
+  /* ⑤ 余量填充：题库做完了（未做题取尽）时用剩余弱项补满，不留下短题单。 */
+  if (ids.length < SMART_PRACTICE_SIZE) {
+    counts.weak += take(
+      orderCandidates([
+        ...repeatedList,
+        ...records.map(([id]) => id),
+        ...Object.keys(courseStore.done || {}).filter((id) => !courseStore.correct?.[id]),
+      ], seen),
+      SMART_PRACTICE_SIZE - ids.length,
+    );
+  }
+
+  return { ids: ids.slice(0, SMART_PRACTICE_SIZE), counts };
+}
+
+function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
+  return buildSmartPracticePlan(courseStore, options).ids;
 }
 
 function normalizeSessionIds(ids) {
@@ -3185,25 +3484,33 @@ function markResult(q) {
       record.stage = Math.min(REVIEW_INTERVAL_DAYS.length - 1, reviewStage(record) + 1);
       record.resolved = record.stage >= REVIEW_INTERVAL_DAYS.length - 1;
       record.resolvedAt = record.resolved ? nowText() : "";
+      /* 答对一次就减一次「错了几次」的计数。count 只增不减的话 count≥2 会永久成立，
+         选题时永远把它当反复错处理。 */
+      record.count = record.resolved ? 1 : Math.max(1, Number(record.count || 1) - 1);
       state.storage.wrong[q.id] = record;
       if (record.resolved) delete courseStore.wrong[q.id];
       else courseStore.wrong[q.id] = true;
     } else {
       delete courseStore.wrong[q.id];
-      if (state.storage.wrong[q.id]) {
-        state.storage.wrong[q.id].resolved = true;
-        state.storage.wrong[q.id].resolvedAt = nowText();
-        state.storage.wrong[q.id].lastReviewAt = nowText();
+      const record = state.storage.wrong[q.id];
+      if (record) {
+        record.resolved = true;
+        record.resolvedAt = nowText();
+        record.lastReviewAt = nowText();
+        record.count = 1;
       }
     }
   } else {
     delete courseStore.correct[q.id];
     courseStore.wrong[q.id] = true;
     const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
+    const wasResolved = !!record.resolved;
     record.at = nowText();
     record.wrongAt = nowText();
     record.lastReviewAt = nowText();
-    record.stage = 0;
+    /* 答错回退一档，不清零：旧实现 stage = 0 会把已经练到 15 天间隔的题一次手滑打回
+       1 天间隔，等于前面的复习全部作废。真正「毕业」过的题（resolved）才重新从 0 开始。 */
+    record.stage = wasResolved ? 0 : Math.max(0, reviewStage(record) - 1);
     record.count = Number(record.count || 0) + 1;
     record.resolved = false;
     record.resolvedAt = "";
@@ -3682,20 +3989,28 @@ function renderTraining() {
   const stats = getCourseStats();
   const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
   const today = getTodayActivity();
-  const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
+  const servedToday = todayServedIds();
+  const dueRecords = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item));
+  const dueTotal = dueRecords.length;
+  /* 今天已经在别的训练单里出过的到期错题不会再发一次（见 startDueWrongReview），
+     所以「到期错题」摘要格显示总量，而错题复习卡片显示的是「还可复习」。 */
+  const dueLeft = dueRecords.filter(([id]) => !servedToday.has(Number(id))).length;
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
   refreshDailyTrainingState();
   const smart = state.storage.smartPractice;
   const canContinueSmart = canContinueSmartPractice(smart);
   const analysisReady = state.analysisCourseId === Number(state.currentCourse?.id || 0) && state.analysisQuestions.length;
-  /* 卡片题量用「真实生成逻辑」算出来，避免文案与实际题单不符（旧实现是估算公式，
+  /* 卡片题量和题单构成都用「真实生成逻辑」算出来，避免文案与实际题单不符（旧实现是估算公式，
      实测卡片写「20 题」而点进去生成 60 题）。这里算一次给三张卡片共用，避免重复遍历题库。 */
+  const smartPlan = buildSmartPracticePlan(courseStore, {});
+  const sprintPlan = buildSprintPracticePlan(courseStore);
   const previewCounts = {
-    smart: buildSmartPracticeIds(courseStore, {}).length,
+    smart: smartPlan.ids.length,
     similar: Math.min(80, buildSimilarWrongIds(courseStore).length),
-    sprint: Math.min(100, buildSprintPracticeIds(courseStore).length),
+    sprint: sprintPlan.ids.length,
   };
-  const previewContext = { items, stats, due, weak, analysisReady, counts: previewCounts };
+  const previewMix = { smart: smartPlan.counts, sprint: sprintPlan.counts };
+  const previewContext = { items, analysisReady, counts: previewCounts, mix: previewMix };
   const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
   const similarPreview = previewPracticePlan("similar", courseStore, previewContext);
   const sprintPreview = previewPracticePlan("sprint", courseStore, previewContext);
@@ -3704,14 +4019,14 @@ function renderTraining() {
   const planOverview = hasReviewPlan
     ? buildReviewPlanOverview(stats, Object.keys(courseStore.wrong || {}).length, items)
     : { hasPlan: false, task: { ids: [], counts: {} }, days: 0, debt: 0, todayCompleted: false, todaySession: null };
-  const mainAdvice = due
-    ? `优先复习 ${due} 道到期错题`
+  const mainAdvice = dueLeft
+    ? `优先复习 ${dueLeft} 道到期错题`
     : weak[0]
       ? `优先强化 ${weak[0].name}`
       : today.total
         ? "继续做一组今日强化"
         : "建议从今日强化开始";
-  const adviceDetail = due
+  const adviceDetail = dueLeft
     ? "这些题已经到复习周期，先处理能减少反复遗忘。"
     : weak[0]
       ? `当前薄弱章节正确率 ${weak[0].rate}%，系统会优先混入相关错题和未做题。`
@@ -3743,14 +4058,14 @@ function renderTraining() {
         </div>
       ` : ""}
       <div class="training-summary-grid">
-        <div><b>${due}</b><span>到期错题</span></div>
+        <div><b>${dueTotal}</b><span>到期错题</span></div>
         <div><b>${today.total}</b><span>今日已练</span></div>
         <div><b>${weak[0] ? weak[0].rate : 0}%</b><span>${weak[0] ? escapeHtml(weak[0].name) : "暂无薄弱章节"}</span></div>
         <div><b>${Math.max(0, items.length - stats.done)}</b><span>未做题</span></div>
       </div>
       <div class="training-card-grid">
-        ${renderTrainingCard("smart", "今日强化", "错题、薄弱章节和未做题自动混合，适合每天打开就练。", smartPreview, "开始训练")}
-        ${renderTrainingCard("due", "今日错题复习", "按记忆周期推送今天该复习的错题，避免错题堆积。", `${due} 道到期`, "开始复习")}
+        ${renderTrainingCard("smart", "今日强化", "错题、薄弱章节和未做题自动混合，保证每天有一批没做过的新题。", smartPreview, "开始训练")}
+        ${renderTrainingCard("due", "今日错题复习", "按记忆周期推送今天该复习的错题，避免错题堆积。", dueLeft === dueTotal ? `${dueLeft} 道到期` : `${dueLeft} 道可复习 · 共 ${dueTotal} 道到期`, "开始复习")}
         ${renderTrainingCard("similar", "相似错题重练", "围绕反复错的章节、题型和关键词抽同类题。", similarPreview, "开始重练")}
         ${renderTrainingCard("sprint", "考前冲刺", "近 7 天错题、反复错、薄弱章节、未做题组合。", sprintPreview, "开始冲刺")}
       </div>
@@ -3781,18 +4096,25 @@ function renderTrainingCard(type, title, desc, meta, action) {
 function previewPracticePlan(type, courseStore, context = {}) {
   const items = context.items || (state.analysisQuestions.length ? state.analysisQuestions : state.questions);
   const loading = !context.analysisReady && state.analysisLoadingCourseId === Number(state.currentCourse?.id || 0);
-  const doneCount = Object.keys(courseStore.done || {}).length;
-  const wrongRecords = getWrongRecordsForCurrentCourse(courseStore);
-  const dueCount = Number(context.due || 0);
-  const weakCount = Array.isArray(context.weak) ? context.weak.length : 0;
-  const undoneCount = items.length ? Math.max(0, items.length - doneCount) : 0;
   if (loading && !items.length) return "正在计算";
   /* 题量直接取「真实生成逻辑」的结果（context.counts 由 renderTraining 预算一次），
-     不再用估算公式 —— 旧公式与 buildXxxIds 的填充逻辑不一致，文案必然对不上。 */
+     不再用估算公式 —— 旧公式与 buildXxxIds 的装填逻辑不一致，文案必然对不上。
+     构成也一并显示：这样「今天有多少新题」在点进去之前就是可见的。 */
   const count = Number(context.counts?.[type] || 0);
-  if (type === "smart") return count ? `${count} 题 · 错题优先` : "自动生成 · 错题优先";
+  const mix = context.mix?.[type] || null;
+  if (type === "smart") {
+    if (!count) return "自动生成 · 错题优先";
+    return mix
+      ? `${count} 题 · 复习${mix.due} 弱项${mix.repeated + mix.weak} 新题${mix.fresh}`
+      : `${count} 题 · 错题优先`;
+  }
   if (type === "similar") return count ? `${count} 题 · 同章同型` : "自动生成 · 同章同型";
-  if (type === "sprint") return count ? `${count} 题 · 冲刺组合` : "自动生成 · 冲刺组合";
+  if (type === "sprint") {
+    if (!count) return "自动生成 · 冲刺组合";
+    return mix
+      ? `${count} 题 · 错题${mix.wrong} 弱项${mix.weak} 新题${mix.fresh}`
+      : `${count} 题 · 冲刺组合`;
+  }
   return "";
 }
 
@@ -4028,20 +4350,29 @@ function buildDailyReport(courseStore, stats, items) {
   };
 }
 
+/* 「薄弱章节」按**课本章名**聚合，不按 chapter id。
+   题库里同一个课本的章在每个卷册（grade 0）里都有一份独立的 chapter 记录 ——
+   实测课程 20 的「第二章 建设工程计价原理、方法及计价依据」被拆成 5 个 id、合计 1085 题。
+   按 id 聚合的话，同一章的薄弱会被拆成 5 行互不相认的统计，也没法「针对某个章节做训练」。
+
+   一道题可能同时属于多个章（同一道题考察多个章节，或者整卷题靠外挂映射归了多章），
+   所以用 textbookChapterKeys 拿到集合，**每个所属章各记一次** ——
+   这道题做错了，那几个章都该算弱。
+
+   行的 key 就是课本章名，筛题用 textbookChapterKeys(item).includes(row.key)。 */
 function getWeakChapterRows(courseStore, items) {
   const answeredIds = new Set(Object.keys(courseStore.done || {}).map(Number));
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
   const byChapter = new Map();
   items.forEach((item) => {
     if (!answeredIds.has(Number(item.id))) return;
-    const path = chapterPathForId(item.chapterId).slice(0, 2);
-    const node = path[1] || path[0] || { id: item.chapterId || 0, name: item.chapterName || "未分章节" };
-    const id = Number(node.id || 0);
-    if (!id) return;
-    const row = byChapter.get(id) || { id, name: node.name || "未分章节", done: 0, correct: 0 };
-    row.done++;
-    if (correctIds.has(Number(item.id))) row.correct++;
-    byChapter.set(id, row);
+    const isCorrect = correctIds.has(Number(item.id));
+    textbookChapterKeys(item, items).forEach((key) => {
+      const row = byChapter.get(key) || { key, name: key.startsWith("#") ? "未分章节" : key, done: 0, correct: 0 };
+      row.done++;
+      if (isCorrect) row.correct++;
+      byChapter.set(key, row);
+    });
   });
   return [...byChapter.values()]
     .filter((row) => row.done >= 3)
@@ -4274,12 +4605,18 @@ async function continueSmartPractice() {
 
 async function startDueWrongReview() {
   if (!state.currentCourse) return;
+  const servedToday = todayServedIds();
   const dueIds = getWrongRecordsForCurrentCourse(userCourseStore())
     .filter(([, item]) => isReviewDue(item) && !item.resolved)
     .map(([id]) => Number(id))
     .filter(Boolean);
-  if (!dueIds.length) {
-    toast("今天没有到期错题");
+  /* 同一天内不重复出题：今天已经在别的训练单里出现过的到期错题不再发一次。
+     不补这一步的话，先做「今日强化」再做「今日错题复习」，
+     强化 A/B 段那最多 22 道错题会原封不动再来一遍（到期题 ≤12 道时是 100% 重合）。
+     只做错题复习、不碰强化的用户完全不受影响。 */
+  const fresh = dueIds.filter((id) => !servedToday.has(Number(id)));
+  if (!fresh.length) {
+    toast(dueIds.length ? `今天到期的 ${dueIds.length} 道错题都已经练过了` : "今天没有到期错题");
     return;
   }
   resetGeneratedPracticeFilters();
@@ -4290,13 +4627,15 @@ async function startDueWrongReview() {
     sourceTitle: "今日错题复习",
     courseId: state.currentCourse.id,
     courseName: state.currentCourse.name || "",
-    ids: dueIds,
+    ids: fresh,
   });
   state.mode = "wrong";
   state.wrongFilters = { ...(state.wrongFilters || {}), review: "due", status: "active" };
   setCoursePicker(false);
   await loadQuestions();
-  toast("已进入今日错题复习");
+  toast(fresh.length < dueIds.length
+    ? `已进入今日错题复习（${fresh.length} 道，另有 ${dueIds.length - fresh.length} 道今天练过了）`
+    : "已进入今日错题复习");
 }
 
 async function startSimilarWrongPractice() {
@@ -4316,31 +4655,80 @@ async function startSimilarWrongPractice() {
 }
 
 function buildSimilarWrongIds(courseStore = userCourseStore()) {
-  const wrongRecords = getWrongRecordsForCurrentCourse(courseStore)
-    .sort((a, b) => Number(b[1]?.count || 0) - Number(a[1]?.count || 0))
-    .slice(0, 12);
   const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const itemById = new Map(allItems.map((item) => [Number(item.id), item]));
+  const seen = buildSeenIndex();
+  const servedToday = todayServedIds();
+  const records = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => !item.resolved);
+  const recordById = new Map(records.map(([id, item]) => [Number(id), item]));
+  const countById = new Map(records.map(([id, item]) => [Number(id), Number(item.count || 0)]));
+  /* 种子按「错得最多」排，但冷却期内的降到队尾。
+     否则 count 最高的那 12 道永远是同一批种子，重练永远围着它们转。 */
+  const seeds = orderCandidates(
+    records.map(([id]) => id),
+    seen,
+    (a, b) => (countById.get(Number(b)) || 0) - (countById.get(Number(a)) || 0),
+  ).slice(0, 12);
   const ids = [];
-  const pushUnique = (id) => {
+  const picked = new Set();
+  const push = (id) => {
     const n = Number(id);
-    if (n && !ids.includes(n)) ids.push(n);
+    if (!n || picked.has(n) || servedToday.has(n)) return false;
+    picked.add(n);
+    ids.push(n);
+    return true;
   };
-  wrongRecords.forEach(([id, record]) => {
-    pushUnique(id);
-    const keywords = extractKeywords(record.title || "");
-    let added = 0;
+  /* 题干纯文本缓存：每个种子都要扫一遍题库，不缓存的话同一道题会被反复 strip。
+     一次调用内复用（12 个种子 → 每道题只算一次），调用结束即释放。 */
+  const textCache = new Map();
+  const textOf = (item) => {
+    const key = Number(item.id);
+    const hit = textCache.get(key);
+    if (hit !== undefined) return hit;
+    const text = fastPlainQuestionText(item);
+    textCache.set(key, text);
+    return text;
+  };
+
+  seeds.forEach((seedId) => {
+    const id = Number(seedId);
+    const record = recordById.get(id) || {};
+    push(id);
+    /* 关键词从完整题干切，不再只用 record.title —— 那是题干前 120 字，
+       长题干的区分词经常落在 120 字之后，同型题根本匹配不上。 */
+    const seedItem = itemById.get(id);
+    const keywords = extractKeywords(seedItem ? fastPlainQuestionText(seedItem) : record.title || "");
+    const seedChapterId = Number(record.chapterId || seedItem?.chapterId || 0);
+    /* 同章节 = 同一个「课本章」，按章名判，不按 chapter id —— 理由见 textbookChapterName。
+       回落到裸 chapterName 只在章节树还没加载（chapterPathForId 返回空）时用，
+       且必须两边都非空，否则空值相等会把全库都判成同章节。 */
+    const seedChapterName = textbookChapterName(seedChapterId);
+    const sameChapterOf = (item) => {
+      if (seedChapterName) return textbookChapterName(item.chapterId) === seedChapterName;
+      return !!record.chapterName && item.chapterName === record.chapterName;
+    };
+    /* 打分取前 N，不再「撞上条件就收」。
+       旧实现按题库顺序取前 6 道，且只要命中一个关键词就算同类，
+       实际抽到的常常是「同题型里题干碰巧含『万元』的前 6 道」——
+       和薄弱章节/冲刺里已经修掉的是同一个毛病。 */
+    const scored = [];
     for (const item of allItems) {
-      if (added >= 6) break;
-      if (Number(item.id) === Number(id)) continue;
-      const sameChapter = Number(item.chapterId || 0) === Number(record.chapterId || 0) || item.chapterName === record.chapterName;
-      const sameType = !record.type || item.type === record.type;
-      const text = sameChapter ? "" : fastPlainQuestionText(item);
-      const keywordHit = keywords.length && keywords.some((word) => text.includes(word));
-      if ((sameChapter || keywordHit) && sameType) {
-        pushUnique(item.id);
-        added++;
+      const qid = Number(item.id);
+      if (!qid || qid === id || picked.has(qid) || servedToday.has(qid)) continue;
+      if (record.type && item.type !== record.type) continue;
+      const sameChapter = sameChapterOf(item);
+      let hits = 0;
+      if (!sameChapter && keywords.length) {
+        const text = textOf(item);
+        for (const word of keywords) {
+          if (text.includes(word)) hits++;
+        }
       }
+      if (!sameChapter && hits < SIMILAR_MIN_KEYWORD_HITS) continue;
+      scored.push({ id: qid, score: (sameChapter ? 100 : 0) + hits });
     }
+    scored.sort((a, b) => b.score - a.score);
+    scored.slice(0, SIMILAR_PER_SEED).forEach((row) => push(row.id));
   });
   return ids;
 }
@@ -4350,8 +4738,13 @@ function fastPlainQuestionText(item) {
   return raw.includes("<") ? stripText(raw) : raw;
 }
 
+/* 切关键词。中文没有空格，只按标点 split 会让整句变成一个超长 token 被长度过滤掉
+   （实测「某公司2018年的营业收入为1000万元」整段 18 字，直接出局，关键词为空），
+   所以还要在「中文 ↔ 数字/拉丁」的边界上再切一刀。 */
 function extractKeywords(text) {
   return [...new Set(String(text || "")
+    .replace(/([\u4e00-\u9fff])([0-9A-Za-z])/g, "$1 $2")
+    .replace(/([0-9A-Za-z])([\u4e00-\u9fff])/g, "$1 $2")
     .replace(/[，。、“”‘’；：！？（）()《》【】\[\],.;:!?]/g, " ")
     .split(/\s+/)
     .map((item) => item.trim())
@@ -4375,34 +4768,82 @@ async function startSprintPractice() {
   toast("已生成考前冲刺题");
 }
 
-function buildSprintPracticeIds(courseStore = userCourseStore()) {
+/* 考前冲刺的选题预算表。和今日强化同一套机制：每段有上限、新题有保底、跨天轮换。 */
+function buildSprintPracticePlan(courseStore = userCourseStore(), options = {}) {
+  const randomize = !!options.randomize;
   const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const seen = buildSeenIndex();
+  const servedToday = todayServedIds();
   const ids = [];
-  const pushUnique = (id) => {
+  const picked = new Set();
+  const push = (id) => {
     const n = Number(id);
-    if (n && !ids.includes(n)) ids.push(n);
+    if (!n || picked.has(n)) return false;
+    picked.add(n);
+    ids.push(n);
+    return true;
   };
+  const take = (ordered, quota) => {
+    let added = 0;
+    for (const raw of ordered || []) {
+      if (added >= quota) break;
+      const n = Number(raw);
+      if (picked.has(n) || servedToday.has(n)) continue;
+      if (push(n)) added++;
+    }
+    return added;
+  };
+
+  const counts = { wrong: 0, weak: 0, fresh: 0 };
+
+  /* ① 近 7 天错题 / 反复错。「近 7 天」必须真有时间戳：旧实现的 `!at || ...`
+     让没有时间戳的老错题永远算作「近 7 天错题」，冲刺题单里塞满陈年错题。 */
   const cutoff = Date.now() - 7 * 86400000;
-  getWrongRecordsForCurrentCourse(courseStore)
+  const wrongList = getWrongRecordsForCurrentCourse(courseStore)
     .filter(([, item]) => {
-      const at = parseDate(item?.at || item?.wrongAt);
-      return !at || at.getTime() >= cutoff || Number(item.count || 0) >= 2;
+      if (item.resolved) return false;
+      const at = parseDate(item.at || item.wrongAt);
+      return (!!at && at.getTime() >= cutoff) || Number(item.count || 0) >= 2;
     })
-    .slice(0, 30)
-    .forEach(([id]) => pushUnique(id));
-  getWeakChapterRows(courseStore, allItems).slice(0, 6).forEach((chapter) => {
-    allItems
-      .filter((item) => chapterPathForId(item.chapterId).slice(0, 2).some((node) => Number(node.id) === Number(chapter.id)))
+    .map(([id]) => id);
+  counts.wrong = take(orderCandidates(wrongList, seen), SPRINT_QUOTA.wrong);
+
+  /* ② 薄弱章节：top6 章均分配额，章内按轮换排序（旧实现同样是 slice(0,10)）。 */
+  const weakChapters = getWeakChapterRows(courseStore, allItems).slice(0, 6);
+  const perChapter = Math.max(1, Math.ceil(SPRINT_QUOTA.weak / Math.max(1, weakChapters.length)));
+  let weakAdded = 0;
+  weakChapters.forEach((chapter) => {
+    if (weakAdded >= SPRINT_QUOTA.weak) return;
+    /* 同 buildSmartPracticePlan：按课本章名筛，跨卷册、一题多章 */
+    const candidates = allItems
+      .filter((item) => textbookChapterKeys(item).includes(chapter.key))
       .filter((item) => !courseStore.correct?.[item.id])
-      .slice(0, 10)
-      .forEach((item) => pushUnique(item.id));
+      .map((item) => item.id);
+    weakAdded += take(orderCandidates(candidates, seen), Math.min(perChapter, SPRINT_QUOTA.weak - weakAdded));
   });
-  /* 同 buildSmartPracticeIds：候选剔除已在本单里的，否则重叠会把配额吃掉、凑不满 100。 */
-  sampleEvenly(allItems
-    .filter((item) => !courseStore.done?.[item.id] && !ids.includes(Number(item.id)))
-    .map((item) => item.id), 100 - ids.length)
-    .forEach((id) => pushUnique(id));
-  return ids;
+  counts.weak = weakAdded;
+
+  /* ③ 未做题保底：冲刺只给错题 25 + 弱章 35，剩下 40 个位置留给没做过的题。 */
+  const freshQuota = Math.max(SPRINT_PRACTICE_FLOOR_NEW, SPRINT_PRACTICE_SIZE - ids.length);
+  const freshPool = takeFreshByChapter(
+    allItems,
+    courseStore,
+    freshQuota,
+    new Set([...picked, ...servedToday]),
+    seen,
+    randomize,
+  );
+  counts.fresh = take(freshPool, freshQuota);
+
+  if (ids.length < SPRINT_PRACTICE_SIZE) {
+    counts.wrong += take(orderCandidates(wrongList, seen), SPRINT_PRACTICE_SIZE - ids.length);
+  }
+
+  return { ids: ids.slice(0, SPRINT_PRACTICE_SIZE), counts };
+}
+
+function buildSprintPracticeIds(courseStore = userCourseStore()) {
+  return buildSprintPracticePlan(courseStore).ids;
 }
 
 function renderDeepAnalysis(courseStore, items = state.questions) {
@@ -4612,8 +5053,8 @@ function buildReviewPlanPools(courseStore, items) {
   const wrongRecords = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => !item.resolved);
   const dueIds = wrongRecords.filter(([, item]) => isReviewDue(item)).map(([id]) => Number(id)).filter(Boolean);
   const repeatedIds = wrongRecords.filter(([, item]) => Number(item.count || 0) >= 2).map(([id]) => Number(id)).filter(Boolean);
-  const weakChapterIds = new Set(getWeakChapterRows(courseStore, allItems).slice(0, 6).map((row) => Number(row.id)));
-  const isWeakItem = (item) => chapterPathForId(item.chapterId).slice(0, 2).some((node) => weakChapterIds.has(Number(node.id)));
+  const weakChapterKeys = new Set(getWeakChapterRows(courseStore, allItems).slice(0, 6).map((row) => row.key));
+  const isWeakItem = (item) => textbookChapterKeys(item).some((key) => weakChapterKeys.has(key));
   const weakProblemIds = [];
   const weakUndoneIds = [];
   const undoneIds = [];
@@ -4682,11 +5123,11 @@ function buildTodayReviewPlanTask(pools, target) {
     if (!item) return false;
     return pools.weakProblemIds.includes(Number(id)) || pools.weakUndoneIds.includes(Number(id));
   };
-  const push = (list, type, options = {}) => {
+  const push = (list, type) => {
     for (const raw of list || []) {
       const id = Number(raw);
       if (!id || seen.has(id)) continue;
-      if (!options.allowOverCap && cap && ids.length >= cap) break;
+      if (cap && ids.length >= cap) break;
       seen.add(id);
       ids.push(id);
       counts[type] = Number(counts[type] || 0) + 1;
@@ -4695,7 +5136,9 @@ function buildTodayReviewPlanTask(pools, target) {
   const importantCarryover = pools.carryoverIds.filter((id) => pools.dueIds.includes(id) || pools.repeatedIds.includes(id) || isWeakId(id));
   const ordinaryCarryover = pools.carryoverIds.filter((id) => !importantCarryover.includes(id));
   push(importantCarryover, "carryover");
-  push(pools.dueIds, "review", { allowOverCap: pools.dueIds.length > cap });
+  /* 到期题也受 cap 约束：旧实现的 allowOverCap 在到期题多于 cap 时整批灌入，
+     把「每日目标」变成摆设，第二天继续积压。 */
+  push(pools.dueIds, "review");
   push(pools.repeatedIds, "review");
   push(pools.weakProblemIds, "weak");
   push(pools.weakUndoneIds, "weak");
