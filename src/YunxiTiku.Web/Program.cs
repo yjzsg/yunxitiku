@@ -3910,9 +3910,15 @@ sealed class ChapterMapStore
     }
 
     /// <summary>
+    /// 页码信号的采信门槛：同一页码下，最高票那个章至少要占全部票数的这个比例。
+    /// 低于门槛说明这一页跨了好几个章（页码在每节重新开始），猜了基本是错的。
+    /// </summary>
+    private const double PageVoteConfidence = 0.9;
+
+    /// <summary>
     /// 解析里的教材页码引用，如「2025教材P346」「参见教材P176」。
     /// 整卷题里 27.6% 的解析带这个，而页码和章节几乎一一对应 ——
-    /// 用它反推章节，留一验证 99.4% 命中（票数≥5 时 100%）。
+    /// 用它反推章节，留一验证 99.3% 命中。
     /// </summary>
     private static readonly Regex PageRefRegex = new(@"(?:(\d{4})\s*教材|教材)\s*[Pp]\s*(\d{1,4})", RegexOptions.Compiled);
 
@@ -4128,12 +4134,18 @@ sealed class ChapterMapStore
             }
             if (chapters is null && row.Desc.Length > 0)
             {
-                // 页码：同一年份优先；同一页可能对应多个章（页码跨章），取票数最高的那个。
+                // 页码：同一页可能对应多个章（页码在每节重新开始，低页码尤其混）。
+                // 只在投票够集中时才采信 —— 实测线上题库 1566 个 (课程,年份,页码) 键里
+                // 99.0% 的最高票占比 ≥0.9，剩下那 0.6% 猜出来的基本是错的
+                // （例：某题解析写「见教材第一章第一节P1」，P1 在语料里散在三个章，
+                // 多数票投给了第五章）。宁可留空，也不写错。
                 var best = new Dictionary<string, int>(StringComparer.Ordinal);
                 foreach (var (year, page) in PageRefs(row.Desc))
                 {
                     if (!pageIndex.TryGetValue((row.CourseId, year, page), out var votes) || votes.Count == 0) continue;
+                    var total = votes.Values.Sum();
                     var top = votes.OrderByDescending(pair => pair.Value).First();
+                    if (total <= 0 || top.Value / (double)total < PageVoteConfidence) continue;
                     best[top.Key] = Math.Max(best.GetValueOrDefault(top.Key), top.Value);
                 }
                 if (best.Count > 0)
