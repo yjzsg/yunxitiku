@@ -3812,14 +3812,34 @@ sealed class ChapterMapStore
 {
     private readonly AppPaths _paths;
     private readonly QuestionBank _bank;
+    private readonly IConfiguration? _configuration;
     private readonly object _gate = new();
     private ChapterMapFile? _cache;
     private string _cacheKey = "";
 
-    public ChapterMapStore(AppPaths paths, QuestionBank bank)
+    public ChapterMapStore(AppPaths paths, QuestionBank bank, IConfiguration? configuration = null)
     {
         _paths = paths;
         _bank = bank;
+        _configuration = configuration;
+    }
+
+    /// <summary>
+    /// 重建的规模上限（题数）。超过就直接放弃，不冒险。
+    ///
+    /// 为什么需要：重建会把「主库 + 拉取库」的全部题目读进内存建索引。
+    /// 本机开发库几万题没问题，但拉取库可能是整个上游目录 ——
+    /// 实测某套部署的 <c>jkd-pulled.db</c> 有 4.68GB / 521 万题 / 659 门课，
+    /// 那种规模下这个算法会直接吃光内存。宁可没有映射，也不能把进程搞崩。
+    /// 可用 <c>App:ChapterMapMaxQuestions</c> 调整。
+    /// </summary>
+    private int MaxQuestions
+    {
+        get
+        {
+            var configured = _configuration?.GetValue<int?>("App:ChapterMapMaxQuestions");
+            return configured is > 0 ? configured.Value : 500_000;
+        }
     }
 
     public string FilePath
@@ -3978,6 +3998,19 @@ sealed class ChapterMapStore
         if (!File.Exists(_paths.SqlitePath))
         {
             throw new FileNotFoundException("题库不存在，先上传或挂载 data/question-bank.db", _paths.SqlitePath);
+        }
+
+        // 先数一遍题量再决定要不要往下走：读全库建索引是内存大户，超限直接放弃。
+        var totalQuestions = Convert.ToInt32(
+            _bank.ReadAll("select count(*) as n from coursesubject where coalesce(bstopflag,0)=0")
+                .FirstOrDefault()?.GetValueOrDefault("n") ?? 0,
+            CultureInfo.InvariantCulture);
+        if (totalQuestions > MaxQuestions)
+        {
+            throw new InvalidOperationException(
+                $"题库共 {totalQuestions} 题，超过章节映射的重建上限 {MaxQuestions} 题，已跳过。"
+                + "映射需要把全部题目读进内存建索引，这个规模会吃光内存。"
+                + "如果确实要建，调大 App:ChapterMapMaxQuestions。");
         }
 
         var chapterRows = _bank.ReadAll(
