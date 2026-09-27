@@ -14,7 +14,7 @@
         if (saved === "auto") {
           choice = "auto";
           t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        } else if (saved === "dark" || saved === "eye" || saved === "light") {
+        } else if (saved === "dark" || saved === "eye" || saved === "ink" || saved === "light") {
           t = choice = saved;
         }
       } catch (e) { /* 隐私模式下 localStorage 可能不可用，回落到浅色 */ }
@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20260924-smartmix1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20260927-ink1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -46,6 +46,7 @@
         <button type="button" data-theme-set="light">浅色</button>
         <button type="button" data-theme-set="dark">暗色</button>
         <button type="button" data-theme-set="eye">护眼</button>
+        <button type="button" data-theme-set="ink">墨水屏</button>
         <button type="button" data-theme-set="auto">跟随系统</button>
       </div>
       <label class="login-check">
@@ -108,6 +109,7 @@
               <button type="button" data-theme-set="light" title="浅色" aria-label="浅色">浅</button>
               <button type="button" data-theme-set="dark" title="暗色" aria-label="暗色">暗</button>
               <button type="button" data-theme-set="eye" title="护眼" aria-label="护眼">护</button>
+              <button type="button" data-theme-set="ink" title="墨水屏" aria-label="墨水屏">墨</button>
               <button type="button" data-theme-set="auto" title="跟随系统" aria-label="跟随系统">跟</button>
             </div>
           </div>
@@ -315,7 +317,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20260924-smartmix2"></script>
+  <script src="/app.js?v=20260927-ink1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     if ("serviceWorker" in navigator) {

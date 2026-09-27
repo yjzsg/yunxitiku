@@ -9823,13 +9823,288 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   墨水屏（e-ink）
+   ──────────────────────────────────────────────────────────────────────────
+   这一套不是「换个颜色」，是换一套表达方式 —— 墨水屏的约束和发光屏完全不同：
+
+   1. **只有灰阶**。主流墨水屏 16 级灰度，中间调会抖出脏点。
+      所以只用几个明确的档位（纯白 / #f2f2f2 / #e6e6e6 / 中灰 / 纯黑），
+      不做渐变、不做半透明叠加、不做低对比的浅灰字。
+   2. **没有玻璃**。backdrop-filter 在墨水屏上又慢又没意义（灰阶上「磨砂」看不出来），
+      全部关掉，卡片改成白底 + 黑框。
+   3. **没有动画**。一次全刷几百毫秒，过渡会拖影、闪烁。transition / animation 全关。
+   4. **没有柔和投影**。模糊阴影在灰阶上就是一团抖动，用硬边框代替。
+   5. **语义不靠色相，靠「实心 / 描边」**：
+        实心黑底白字 = 强调（主操作、正确、选中、当前）
+        白底黑框     = 次要（错误、未选中、普通卡片）
+        浅灰底       = 中性（标签、chip、次要按钮）
+      灰度下依然能一眼分清层级。
+   ══════════════════════════════════════════════════════════════════════════ */
+[data-theme="ink"] {
+  color-scheme: light;
+
+  /* ── 表面：纯白，不用半透明 ── */
+  --bg: #ffffff;
+  --bg-image: none;
+  --bg-soft: #f2f2f2;
+  --bg-rgb: 255, 255, 255;
+  --card: #ffffff;
+  --card-soft: #ffffff;
+  --card-solid: #ffffff;
+  --card-ring: #000000;
+  --surface-2: #f2f2f2;
+  --surface-3: #e8e8e8;
+  --surface-4: #dcdcdc;
+  --violet-50: #f2f2f2;
+  --question-bg: #ffffff;
+  --question-bg-rgb: 255, 255, 255;
+
+  /* ── 文字：纯黑为主，次要文字也要够深（墨水屏在强光下浅灰会糊掉）── */
+  --text: #000000;
+  --text-2: #000000;
+  --text-3: #1a1a1a;
+  --text-4: #333333;
+  --muted: #3d3d3d;
+  --muted-2: #5c5c5c;
+  --muted-3: #4a4a4a;
+  --on-accent: #ffffff;
+  --on-accent-rgb: 255, 255, 255;
+
+  /* ── 边框：这套主题的主角，代替投影 ── */
+  --border: #000000;
+  --border-2: #4d4d4d;
+  --border-3: #666666;
+  --border-4: #808080;
+  --border-strong: #000000;
+
+  /* ── 主色 = 黑。色阶里浅的那几档留给 chip / 标签底 ── */
+  --primary: #000000;
+  --primary-500: #000000;
+  --primary-600: #000000;
+  --primary-700: #000000;
+  --primary-ink: #000000;
+  --primary-50: #f2f2f2;
+  --primary-100: #e8e8e8;
+  --primary-200: #000000;
+  --primary-300: #808080;
+  --primary-rgb: 0, 0, 0;
+  --primary-50-rgb: 242, 242, 242;
+  --primary-600-rgb: 0, 0, 0;
+
+  /* ── 成功：实心黑（配合 ✓ 或反白，不靠绿）── */
+  --success: #000000;
+  --success-25: #ffffff;
+  --success-50: #ffffff;
+  --success-100: #ededed;
+  --success-200: #000000;
+  --success-300: #808080;
+  --success-500: #000000;
+  --success-700: #000000;
+  --success-800: #000000;
+
+  /* ── 警告：浅灰底 + 黑字 ── */
+  --warning: #000000;
+  --warning-50: #f5f5f5;
+  --warning-100: #ededed;
+  --warning-150: #e6e6e6;
+  --warning-200: #e0e0e0;
+  --warning-300: #cccccc;
+  --warning-400: #000000;
+  --warning-500: #808080;
+  --warning-600: #666666;
+  --warning-text: #000000;
+  --warning-text-2: #000000;
+  --warning-text-3: #000000;
+  --warning-text-4: #000000;
+
+  /* ── 危险：靠描边区分，不靠红 ── */
+  --danger: #000000;
+  --danger-25: #ffffff;
+  --danger-50: #ffffff;
+  --danger-100: #ededed;
+  --danger-200: #000000;
+  --danger-250: #333333;
+  --danger-300: #808080;
+  --danger-500: #000000;
+  --danger-700: #000000;
+  --danger-800: #000000;
+  --danger-text: #000000;
+
+  /* ── 玻璃层全部关掉：无模糊、无高光、无投影 ── */
+  --glass-rgb: 255, 255, 255;
+  --glass-border: #000000;
+  --glass-highlight: none;
+  --glass-shade: none;
+  --glass-blur: 0px;
+  --glass-sat: 100%;
+  --glass-bright: 1;
+  --glass-shadow: none;
+  --lift-shadow: none;
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+
+  /* ── 顶栏：白底黑字 + 黑框；选中项反白 ── */
+  --nav-bg: #ffffff;
+  --nav-fg: #000000;
+  --nav-fg-soft: #1a1a1a;
+  --nav-border: #000000;
+  --nav-spec: transparent;
+  --nav-shadow: none;
+  --nav-pill-bg: transparent;
+  --nav-pill-hover: #e6e6e6;
+  --nav-pill-active-bg: #000000;
+  --nav-pill-active-fg: #ffffff;
+
+  --ink-rgb: 0, 0, 0;
+  --slate-rgb: 128, 128, 128;
+  --hairline-rgb: 0, 0, 0;
+}
+
+/* ── 墨水屏专项覆盖 ──────────────────────────────────────────────────────
+   令牌换不掉的东西在这里统一关掉：硬编码的 backdrop-filter、行内阴影、
+   以及所有过渡动画（墨水屏上过渡 = 拖影 + 闪烁）。
+   焦点环用的是 outline 而不是 box-shadow，所以清 box-shadow 不影响可访问性。 */
+[data-theme="ink"] *,
+[data-theme="ink"] *::before,
+[data-theme="ink"] *::after {
+  transition: none !important;
+  animation: none !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  text-shadow: none !important;
+}
+
+/* 顶栏：把「玻璃高光 + 投影」换成一条实线 */
+[data-theme="ink"] .main-nav {
+  border-bottom: 2px solid var(--border);
+}
+
+/* 导航里那组主题按钮：底色是白的了，得改成白底黑字（原来写死白字） */
+[data-theme="ink"] .account-box .theme-switch {
+  border-color: var(--border);
+  background: transparent;
+}
+
+[data-theme="ink"] .account-box .theme-switch button {
+  color: var(--nav-fg);
+}
+
+[data-theme="ink"] .account-box .theme-switch button:hover {
+  color: var(--nav-fg);
+  background: var(--nav-pill-hover);
+}
+
+[data-theme="ink"] .account-box .theme-switch button.active {
+  background: var(--nav-pill-active-bg);
+  color: var(--nav-pill-active-fg);
+}
+
+/* 「搜索命中」原来靠 inset 阴影画一圈，清掉阴影后会失去指示 —— 改成虚线圈 */
+[data-theme="ink"] .card-cell.search-match {
+  outline: 2px dashed currentColor;
+  outline-offset: -2px;
+}
+
+/* ── 正误状态：这套主题最要紧的一处 ──────────────────────────────────────
+   其他主题靠「绿=对 / 红=错」区分，但绿和红在灰阶上是**同一种灰**，
+   照搬过来「正确」和「错误」会完全分不出来（图例里两个都是实心黑方块）。
+   改用「实心 / 虚线」这一对语言，四级灰度一眼可辨：
+
+     正确  实心黑底白字        ← 最强调
+     错误  白底 + 2px 虚线黑框
+     已做  浅灰底 + 1px 实线黑框
+     未做  白底 + 1px 灰框（默认态，不用改）
+     当前  外围灰圈（outline，不动填充，所以和上面四种都不冲突）
+   ────────────────────────────────────────────────────────────────────── */
+
+/* 答题卡小格子 */
+[data-theme="ink"] .card-cell.correct {
+  border-color: var(--border);
+  background: #000000;
+  color: #ffffff;
+}
+
+[data-theme="ink"] .card-cell.wrong {
+  border-color: var(--border);
+  border-width: 2px;
+  border-style: dashed;
+  background: #ffffff;
+  color: var(--text);
+}
+
+[data-theme="ink"] .card-cell.done {
+  border-color: var(--border);
+  background: #e6e6e6;
+  color: var(--text);
+}
+
+/* 图例小方块：和格子同一套语言 */
+[data-theme="ink"] .mark.correct {
+  background: #000000;
+  border-color: #000000;
+}
+
+[data-theme="ink"] .mark.wrong {
+  background: #ffffff;
+  border-color: #000000;
+  border-width: 2px;
+  border-style: dashed;
+}
+
+[data-theme="ink"] .mark.selected {
+  background: #e6e6e6;
+  border-color: #000000;
+}
+
+/* 选项：正确 = 浅灰底 + 2px 实线 + 粗体；错误 = 白底 + 2px 虚线。
+   大块刻意不用实心黑 —— 墨水屏上大面积纯黑滚动时拖影很明显。 */
+[data-theme="ink"] .option.correct {
+  border-color: var(--border);
+  border-width: 2px;
+  background: #e6e6e6;
+  color: var(--text);
+  font-weight: 700;
+}
+
+[data-theme="ink"] .option.correct b {
+  background: #000000;
+  color: #ffffff;
+}
+
+[data-theme="ink"] .option.wrong {
+  border-color: var(--border);
+  border-width: 2px;
+  border-style: dashed;
+  background: #ffffff;
+  color: var(--text);
+}
+
+[data-theme="ink"] .option.wrong b {
+  background: #e6e6e6;
+  color: var(--text);
+}
+
+/* 悬停态在墨水屏上没有意义（没有指针），而且会触发重绘。只保留「按下」反馈。 */
+@media (hover: none) {
+  [data-theme="ink"] button:hover,
+  [data-theme="ink"] a:hover,
+  [data-theme="ink"] [role="button"]:hover {
+    background: inherit;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    打印：无论当前主题是什么，一律回到浅色令牌（深色底打印既费墨又看不清）
    ══════════════════════════════════════════════════════════════════════════ */
 
 @media print {
   :root,
   [data-theme="dark"],
-  [data-theme="eye"] {
+  [data-theme="eye"],
+  [data-theme="ink"] {
     color-scheme: light;
 
     --bg: #ffffff;

@@ -126,12 +126,15 @@ const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "�
 const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
 const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
 
-/* ── 配色模式：浅色 / 暗色 / 护眼 ──────────────────────────────────────
-   真正的调色在 style.css 的 [data-theme="dark"|"eye"] 令牌块里；这里只负责
+/* ── 配色模式：浅色 / 暗色 / 护眼 / 墨水屏 ─────────────────────────────
+   真正的调色在 style.css 的 [data-theme="dark"|"eye"|"ink"] 令牌块里；这里只负责
    读写偏好、同步按钮状态、通知需要重绘的地方。
-   首屏防白闪靠 index.html <head> 的内联脚本（必须排在样式表之前）。 */
+   首屏防白闪靠 index.html <head> 的内联脚本（必须排在样式表之前）。
+
+   ink（墨水屏）不是「换颜色」而是换一套表达方式：只有灰阶、没有玻璃、没有动画，
+   语义靠「实心 / 描边」而不是色相。详见 style.css 里的说明。 */
 const THEME_KEY = "yunxi-theme";
-const THEME_NAMES = ["light", "dark", "eye"];
+const THEME_NAMES = ["light", "dark", "eye", "ink"];
 const THEME_AUTO = "auto";   // 跟随系统（S13）
 
 function currentTheme() {
