@@ -10956,6 +10956,14 @@ body {
     background: var(--primary-50);
   }
 
+  /* 墨水屏：其他主题的「当前标签」是主色浅底（浅色主题下是淡靛蓝），
+     在灰阶上退化成 #f2f2f2 的浅灰，白底上几乎看不出来。
+     改成反白（黑底白字），和顶栏选中项、主按钮用同一套语言。 */
+  [data-theme="ink"] .mobile-tabbar .nav-item.active {
+    color: #ffffff;
+    background: #000000;
+  }
+
   /* 让出标签栏的高度 */
   .app-shell {
     padding-bottom: calc(var(--tabbar-h) + 18px);
