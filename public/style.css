@@ -9852,8 +9852,8 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   --card-soft: #ffffff;
   --card-solid: #ffffff;
   --card-ring: #000000;
-  --surface-2: #f2f2f2;
-  --surface-3: #e8e8e8;
+  --surface-2: #ededed;
+  --surface-3: #dcdcdc;
   --surface-4: #dcdcdc;
   --violet-50: #f2f2f2;
   --question-bg: #ffffff;
@@ -10002,16 +10002,12 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   color: var(--nav-pill-active-fg);
 }
 
-/* 「搜索命中」原来靠 inset 阴影画一圈，清掉阴影后会失去指示 —— 改成虚线圈 */
-[data-theme="ink"] .card-cell.search-match {
-  outline: 2px dashed currentColor;
-  outline-offset: -2px;
-}
+/* 「搜索命中」原来靠 inset 阴影画一圈，清掉阴影后会失去指示 —— 见下面「灰阶阶梯」段 */
 
 /* ── 正误状态：这套主题最要紧的一处 ──────────────────────────────────────
    其他主题靠「绿=对 / 红=错」区分，但绿和红在灰阶上是**同一种灰**，
    照搬过来「正确」和「错误」会完全分不出来（图例里两个都是实心黑方块）。
-   改用「实心 / 虚线」这一对语言，四级灰度一眼可辨：
+   改用「实心 / 虚线 / 浅灰 / 细框」这一对语言，四级灰度一眼可辨：
 
      正确  实心黑底白字        ← 最强调
      错误  白底 + 2px 虚线黑框
@@ -10020,71 +10016,306 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
      当前  外围灰圈（outline，不动填充，所以和上面四种都不冲突）
    ────────────────────────────────────────────────────────────────────── */
 
+/* ── 灰阶阶梯 ────────────────────────────────────────────────────────────
+   全主题只有这 5 档。选值的两个约束：
+
+   1. **黑字压在任何一档上都够对比度** —— 最深的 L4 仍有 6.0:1（阈值 4.5:1）。
+   2. **相邻档位在 16 级灰度屏上要差得出至少一级** —— 16 级每级约 16/255，
+      所以相邻至少拉开 16。L0→L1 差 18、L1→L2 差 17、L2→L3 差 39、
+      L3→L4 差 44，都够。**不要为了「更细腻」把间距改小**，那在真机上会糊成一片。
+
+   规则：**同一个组件内、会同时出现的两种语义，必须落在不同档位**；
+   不同组件之间可以复用同一档，上下文会消歧。
+   下面每个组件都是按这条单独排的，不要合并 —— 合并就会塌。 */
+[data-theme="ink"] {
+  --ink-l0: #ffffff;   /* 底 / 中性 */
+  --ink-l1: #ededed;   /* 极浅：次要、默认 */
+  --ink-l2: #dcdcdc;   /* 浅：提示、一般、已做 */
+  --ink-l3: #b8b8b8;   /* 中：待处理、禁用 */
+  --ink-l4: #8c8c8c;   /* 深：强调、边框（配黑字 6.0:1） */
+  --ink-l5: #000000;   /* 实心：最强（配白字 21:1） */
+}
+
+/* 答题卡「未做」的底：其他主题是 `--surface-4`（#dcdcdc），
+   会和 ink 的 L2（已做）撞成同一级。这里显式压回纯白 + 灰框。 */
+[data-theme="ink"] .card-cell {
+  border-color: var(--ink-l4);
+  background: var(--ink-l0);
+  color: var(--text);
+}
+
+[data-theme="ink"] .mark.todo {
+  border-color: var(--ink-l4);
+  background: var(--ink-l0);
+}
+
+/* ── 选项：多选判定后这 5 种组合会**同时出现**，必须互相可分 ──────────────
+   两个通道拼出状态：
+     填充：实心黑 = 正确答案；白 = 不是
+     内圈（outline，用 currentColor 自动反色）：有 = 我选了
+   这样「漏选」和「选对」就分得开了 —— 两个都是黑底，但漏选没有内圈。 */
+[data-theme="ink"] .option {
+  border-color: var(--ink-l4);
+  background: var(--ink-l0);
+  color: var(--text);
+}
+
+[data-theme="ink"] .option.selected {
+  border: 2px solid var(--ink-l5);
+  background: var(--ink-l2);
+  color: var(--text);
+  font-weight: 700;
+  outline: 3px solid currentColor;
+  outline-offset: -8px;
+}
+
+/* 正确答案：实心黑。大块实心黑在墨水屏上滚动会有点拖影，
+   但这是「哪几个是对的」唯一够强的表达，且每题最多一个（多选两三个），可接受。 */
+[data-theme="ink"] .option.correct {
+  border: 2px solid var(--ink-l5);
+  background: var(--ink-l5);
+  color: var(--ink-l0);
+  font-weight: 700;
+}
+
+[data-theme="ink"] .option.correct b {
+  background: var(--ink-l0);
+  color: var(--ink-l5);
+}
+
+/* 我选了 + 对：黑底之上内圈自动变白 */
+[data-theme="ink"] .option.selected.correct {
+  outline-color: var(--ink-l0);
+}
+
+/* 我选了 + 错：白底 + 虚线框 + 灰字，内圈保留（表示「我选的」） */
+[data-theme="ink"] .option.wrong {
+  border: 2px dashed var(--ink-l5);
+  background: var(--ink-l0);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+[data-theme="ink"] .option.wrong b {
+  background: var(--ink-l2);
+  color: var(--muted);
+}
+
+[data-theme="ink"] .option.selected.wrong {
+  outline-color: var(--ink-l5);
+}
+
 /* 答题卡小格子 */
 [data-theme="ink"] .card-cell.correct {
-  border-color: var(--border);
-  background: #000000;
-  color: #ffffff;
+  border-color: var(--ink-l5);
+  background: var(--ink-l5);
+  color: var(--ink-l0);
 }
 
 [data-theme="ink"] .card-cell.wrong {
-  border-color: var(--border);
+  border-color: var(--ink-l5);
   border-width: 2px;
   border-style: dashed;
-  background: #ffffff;
+  background: var(--ink-l0);
   color: var(--text);
 }
 
 [data-theme="ink"] .card-cell.done {
-  border-color: var(--border);
-  background: #e6e6e6;
+  border-color: var(--ink-l5);
+  background: var(--ink-l2);
   color: var(--text);
 }
 
 /* 图例小方块：和格子同一套语言 */
 [data-theme="ink"] .mark.correct {
-  background: #000000;
-  border-color: #000000;
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
 }
 
 [data-theme="ink"] .mark.wrong {
-  background: #ffffff;
-  border-color: #000000;
+  background: var(--ink-l0);
+  border-color: var(--ink-l5);
   border-width: 2px;
   border-style: dashed;
 }
 
 [data-theme="ink"] .mark.selected {
-  background: #e6e6e6;
-  border-color: #000000;
+  background: var(--ink-l2);
+  border-color: var(--ink-l5);
 }
 
-/* 选项：正确 = 浅灰底 + 2px 实线 + 粗体；错误 = 白底 + 2px 虚线。
-   大块刻意不用实心黑 —— 墨水屏上大面积纯黑滚动时拖影很明显。 */
-[data-theme="ink"] .option.correct {
-  border-color: var(--border);
-  border-width: 2px;
-  background: #e6e6e6;
+/* 「搜索命中」原来是 inset 阴影画的圈，清掉阴影后会失去指示。
+   用**点线**圈 —— 和「错误」的虚线框区分开（实测虚线/点线在这个尺寸下能分辨）。 */
+[data-theme="ink"] .card-cell.search-match {
+  outline: 3px dotted var(--ink-l5);
+  outline-offset: -5px;
+}
+
+/* ── 掌握度徽章：三档必须可分。按「越薄弱越深」排（复习时先看需要补的）── */
+[data-theme="ink"] .mastery-badge.weak {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+[data-theme="ink"] .mastery-badge.normal {
+  background: var(--ink-l2);
+  border-color: var(--ink-l5);
+  color: var(--text);
+}
+
+[data-theme="ink"] .mastery-badge.stable {
+  background: var(--ink-l0);
+  border-color: var(--ink-l4);
+  color: var(--text);
+}
+
+/* ── 状态药丸：启用（实心）/ 停用（浅灰 + 灰字）── */
+[data-theme="ink"] .status-pill.active {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+[data-theme="ink"] .status-pill.disabled {
+  background: var(--ink-l3);
+  border-color: var(--ink-l4);
+  color: var(--muted);
+}
+
+/* 计划日：已完成 = 实心 */
+[data-theme="ink"] .plan-day.done {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+/* 课程待更新：虚线框（「需要动作」） */
+[data-theme="ink"] .course-item.stale {
+  background: var(--ink-l0);
+  border-color: var(--ink-l5);
+  border-style: dashed;
+}
+
+/* ── 答题回顾行：答对实心 / 答错虚线 ── */
+[data-theme="ink"] .review-line.correct {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+[data-theme="ink"] .review-line.correct b,
+[data-theme="ink"] .review-line.correct span {
+  color: var(--ink-l0);
+}
+
+[data-theme="ink"] .review-line.wrong {
+  background: var(--ink-l0);
+  border-color: var(--ink-l5);
+  border-style: dashed;
+  color: var(--text);
+}
+
+/* ── 保存状态：error 最重（实心）/ dirty 提示（浅灰）/ idle 最轻 ── */
+[data-theme="ink"] .save-status[data-status="idle"] {
+  background: var(--ink-l0);
+  border-color: var(--ink-l4);
+  color: var(--muted);
+}
+
+[data-theme="ink"] .save-status[data-status="dirty"] {
+  background: var(--ink-l2);
+  border-color: var(--ink-l5);
+  color: var(--text);
+}
+
+[data-theme="ink"] .save-status[data-status="error"] {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+/* ── 题库对比 chip：新增实心 / 删除虚线 ── */
+[data-theme="ink"] .bank-report-chip.added {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+[data-theme="ink"] .bank-report-chip.removed {
+  background: var(--ink-l0);
+  border-color: var(--ink-l5);
+  border-style: dashed;
+  color: var(--text);
+}
+
+[data-theme="ink"] .local-edit-pill {
+  background: var(--ink-l2);
+  border-color: var(--ink-l5);
+  color: var(--text);
+}
+
+/* ── 考试历史：对（实心）/ 错（虚线）/ 主观（浅灰）三档 ── */
+[data-theme="ink"] .exam-history-detail-row.correct {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+[data-theme="ink"] .exam-history-detail-row.wrong {
+  background: var(--ink-l0);
+  border-color: var(--ink-l5);
+  border-style: dashed;
+  color: var(--text);
+}
+
+[data-theme="ink"] .exam-history-detail-row.subjective {
+  background: var(--ink-l2);
+  border-color: var(--ink-l4);
+  color: var(--text);
+}
+
+/* ── 考试提示 / 暂停标记 ── */
+[data-theme="ink"] .exam-warning,
+[data-theme="ink"] .admin-warning {
+  background: var(--ink-l2);
+  border-color: var(--ink-l5);
+  color: var(--text);
+}
+
+[data-theme="ink"] .exam-paused-flag {
+  background: var(--ink-l5);
+  border-color: var(--ink-l5);
+  color: var(--ink-l0);
+}
+
+/* ── 管理端：警告（浅灰 + 实线）和搜索面板（更浅 + 细框）分开 ── */
+[data-theme="ink"] .search-match-panel {
+  background: var(--ink-l1);
+  border-color: var(--ink-l4);
+  color: var(--text);
+}
+
+[data-theme="ink"] .search-highlight {
+  background: var(--ink-l3);
+  color: var(--text);
+}
+
+/* ── 危险操作按钮：白底 + 2px 虚线 + 粗体。
+   实心黑留给「主操作」，危险动作靠虚线框 + 加粗提示，两者不撞。 ── */
+[data-theme="ink"] .admin-actions .danger,
+[data-theme="ink"] .admin-actions .danger:hover {
+  background: var(--ink-l0);
+  border: 2px dashed var(--ink-l5);
   color: var(--text);
   font-weight: 700;
 }
 
-[data-theme="ink"] .option.correct b {
-  background: #000000;
-  color: #ffffff;
-}
-
-[data-theme="ink"] .option.wrong {
-  border-color: var(--border);
-  border-width: 2px;
-  border-style: dashed;
-  background: #ffffff;
-  color: var(--text);
-}
-
-[data-theme="ink"] .option.wrong b {
-  background: #e6e6e6;
-  color: var(--text);
+/* 「确认答案」按钮禁用态：灰底灰字，和可用态（实心黑）分得很开 */
+[data-theme="ink"] .confirm-answer-btn:disabled {
+  background: var(--ink-l3);
+  border-color: var(--ink-l4);
+  color: var(--muted);
 }
 
 /* 悬停态在墨水屏上没有意义（没有指针），而且会触发重绘。只保留「按下」反馈。 */
