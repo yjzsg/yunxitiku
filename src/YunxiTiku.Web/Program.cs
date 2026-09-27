@@ -128,6 +128,10 @@ Directory.CreateDirectory(paths.DataAssetsRoot);
 Directory.CreateDirectory(Path.GetDirectoryName(paths.SqlitePath) ?? paths.BaseRoot);
 QuestionBank.EnsureDatabase(paths.SqlitePath);
 
+// 章节映射是外挂文件（data/chapter-map.json），不跟着题库走。
+// 首次部署 / 映射文件丢了 / 题库换过，都在后台补一次，不用手动点重建。
+app.Services.GetRequiredService<ChapterMapStore>().WarmUpInBackground();
+
 if (app.Configuration.GetValue<bool>("App:EnableHttpsRedirect"))
 {
     app.UseHttpsRedirection();
@@ -603,7 +607,7 @@ app.MapPost("/api/admin/course-update-check", async (HttpRequest request, Questi
 });
 
 app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext context, string? user, int? courseId, bool? dryRun, bool? force,
-    QuestionBank bank, IConfiguration configuration) =>
+    QuestionBank bank, IConfiguration configuration, ChapterMapStore chapterMap) =>
 {
     if (!IsAdminRequest(context))
     {
@@ -653,7 +657,10 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
         try
         {
             SqliteConnection.ClearAllPools();
-            return Results.Json(ServerBankPuller.PullCourseIntoBank(paths, app.Configuration, courseId.Value));
+            var result = ServerBankPuller.PullCourseIntoBank(paths, app.Configuration, courseId.Value);
+            // 题库换过之后章节归属要重算 —— 映射是外挂文件，不会跟着题库走。
+            chapterMap.TryRebuildQuietly("拉取更新");
+            return Results.Json(result);
         }
         catch (Exception ex)
         {
@@ -675,7 +682,9 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
         {
             await file.CopyToAsync(output);
         }
-        return Results.Json(AdminDataTransfer.ImportCourseBank(paths, tempFile, originalName, courseId.Value));
+        var result = AdminDataTransfer.ImportCourseBank(paths, tempFile, originalName, courseId.Value);
+        chapterMap.TryRebuildQuietly("题库整包上传");
+        return Results.Json(result);
     }
     catch (Exception ex)
     {
@@ -807,7 +816,7 @@ app.MapGet("/api/admin/data/download", (HttpContext context, string? user, strin
     }
 });
 
-app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, string? type, AuthStore auth) =>
+app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, string? type, AuthStore auth, ChapterMapStore chapterMap) =>
 {
     if (!IsAdminRequest(request)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     if (!request.HasFormContentType) return Results.Json(new { ok = false, error = "请使用表单上传文件" }, statusCode: 400);
@@ -828,6 +837,7 @@ app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, 
         var result = kind == "bank"
             ? AdminDataTransfer.ImportBank(paths, tempFile, originalName)
             : AdminDataTransfer.ImportUserData(paths, auth, tempFile, originalName);
+        if (kind == "bank") chapterMap.TryRebuildQuietly("题库整包上传");
         return Results.Json(result);
     }
     catch (Exception ex)
@@ -4190,6 +4200,37 @@ sealed class ChapterMapStore
             message = $"已重建章节映射：{volumeQuestions} 道整卷题中归入 {map.Count} 道"
                       + (multi > 0 ? $"（其中 {multi} 道一题多章）" : ""),
         };
+    }
+
+    /// <summary>
+    /// 题库换过（拉取更新 / 整包上传）之后重建映射。
+    /// 失败只记日志、不往上抛 —— 拉取本身已经成功了，不能因为映射重建失败就让整个操作报错。
+    /// </summary>
+    public bool TryRebuildQuietly(string reason)
+    {
+        try
+        {
+            Rebuild();
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [chapter-map] {reason}后已重建章节映射");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [chapter-map] {reason}后重建失败（不影响题库本身）: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 启动自检：映射文件缺失或已过期就在**后台**补一次，免得首次部署还要手动点重建。
+    /// 只做一次、失败不重试，也不阻塞启动。
+    /// </summary>
+    public void WarmUpInBackground()
+    {
+        if (!File.Exists(_paths.SqlitePath)) return;
+        var map = Load();
+        if (map.Map.Count > 0 && map.BankSignature == BankSignature()) return;
+        Task.Run(() => TryRebuildQuietly(map.Map.Count == 0 ? "启动自检（映射缺失）" : "启动自检（映射过期）"));
     }
 
     private static int AsInt(Dictionary<string, object?> row, string key)
