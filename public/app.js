@@ -2694,6 +2694,89 @@ async function loadCurrentQuestion() {
   state.lastLoadedQuestionKey = questionKey;
   state.lastLoadedQuestions = questions;
   if (questionChanged) scrollQuestionViewToTop();
+  prefetchAroundCurrent();
+}
+
+/* ── 题目预取 ──────────────────────────────────────────────────────────────
+   每翻一题打一次 /api/question，弱网下会明显卡顿。这里提前把前后几题取回来。
+
+   开销控制（墨水屏设备性能差，必须克制）：
+     · 只预取详情 JSON；图片单独处理（见 warmImageCache）
+     · 并发上限 2，往前最多 PREFETCH_AHEAD 题、往回 1 题
+     · 低配设备自动缩窗口：deviceMemory ≤ 2 或 hardwareConcurrency ≤ 4 → 只预取 1 题
+       且不预热图片
+     · 省流量模式（navigator.connection.saveData）直接不预取
+     · 用 requestIdleCallback 发起，不和首屏渲染抢主线程
+     · 换题单/换课程用「代次号」作废旧结果。不 abort 已发出的请求 ——
+       那要多写一套错误分支，而按代次丢弃结果效果一样
+     · 预取失败静默，真正翻到那题会正常重试
+   ────────────────────────────────────────────────────────────────────── */
+const PREFETCH_AHEAD = 3;
+const PREFETCH_CONCURRENCY = 2;
+const PREFETCH_MAX_IMAGES = 4;
+const prefetchState = { generation: 0, inflight: 0, queue: [] };
+
+function prefetchAheadCount() {
+  try {
+    if (navigator.connection?.saveData) return 0;
+    const mem = Number(navigator.deviceMemory || 0);
+    const cores = Number(navigator.hardwareConcurrency || 0);
+    if ((mem > 0 && mem <= 2) || (cores > 0 && cores <= 4)) return 1;
+  } catch (e) { /* 老浏览器没这些 API，按默认来 */ }
+  return PREFETCH_AHEAD;
+}
+
+function pumpPrefetch() {
+  while (prefetchState.inflight < PREFETCH_CONCURRENCY && prefetchState.queue.length) {
+    const job = prefetchState.queue.shift();
+    if (job.generation !== prefetchState.generation || job.item.detail) continue;
+    prefetchState.inflight += 1;
+    api(`/api/question?id=${job.item.id}`)
+      .then((detail) => {
+        if (job.generation !== prefetchState.generation) return;   // 已经换题单了，丢掉
+        job.item.detail = detail;
+        if (job.warmImages) warmImageCache(detail);
+      })
+      .catch(() => { /* 预取失败静默；真翻到那题会重新请求 */ })
+      .finally(() => { prefetchState.inflight -= 1; pumpPrefetch(); });
+  }
+}
+
+/* 把下一题的图塞进浏览器 HTTP 缓存 —— 不保留引用，避免白占内存。
+   这样翻过去时 <img> 直接命中缓存，不会先白一块再出图。 */
+function warmImageCache(detail) {
+  const html = [detail?.stem, detail?.extraQuestion, detail?.description].filter(Boolean).join(" ");
+  const re = /<img[^>]*\bsrc="([^"]+)"/gi;
+  const srcs = [];
+  let m;
+  while ((m = re.exec(html)) !== null && srcs.length < PREFETCH_MAX_IMAGES) srcs.push(m[1]);
+  for (const src of srcs) {
+    const img = new Image();
+    img.decoding = "async";
+    img.src = src;
+  }
+}
+
+function prefetchAroundCurrent() {
+  const ahead = prefetchAheadCount();
+  const generation = prefetchState.generation + 1;
+  prefetchState.generation = generation;
+  prefetchState.queue.length = 0;          // 旧的待办作废
+  if (ahead <= 0) return;
+  const questions = state.questions;
+  if (!questions?.length) return;
+  const picks = [];
+  for (let d = 1; d <= ahead; d += 1) {
+    const item = questions[state.currentIndex + d];
+    // 只给「下一题」预热图片；低配设备（ahead===1）连图也不预热
+    if (item && !item.detail) picks.push({ item, generation, warmImages: d === 1 && ahead > 1 });
+  }
+  const prev = questions[state.currentIndex - 1];
+  if (prev && !prev.detail) picks.push({ item: prev, generation, warmImages: false });
+  if (!picks.length) return;
+  prefetchState.queue = picks;
+  if (typeof requestIdleCallback === "function") requestIdleCallback(pumpPrefetch, { timeout: 1500 });
+  else setTimeout(pumpPrefetch, 150);
 }
 
 function renderAll() {
