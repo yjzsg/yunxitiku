@@ -3686,10 +3686,30 @@ sealed class QuestionBank
 
     private static string RemoveOptions(string html)
     {
-        var text = StripHtml(html).Replace("\r", "\n");
-        var match = Regex.Match(text, @"(?m)(?:^|\n)\s*[A-H][\.\u3001\uff0e:：]\s*");
-        if (!match.Success) return html;
-        return WebUtility.HtmlEncode(text[..match.Index].Trim()).Replace("\n", "<br>");
+        /* 题干里的选项列表是按行排的（NormalizeHtml 已经把 \n 转成 <br>），
+           所以按 <br> 切行，找到第一行「以 A. / B、 开头」的，把它和后面的都丢掉。
+
+           这里**不能**再走 StripHtml + HtmlEncode 的老路子 —— 那会把题干里的
+           <img> 连同 HTML 一起丢掉。线上有 2237 道题的题图挂在题干上，凡是题干
+           里带选项列表的，题图全被那一步吃掉；像
+             <img src=".../1509093_0.jpg">\n \nA. 109.9 B. 110.3\n...
+           这种「题干就是一张图」的题，整段 stem 直接变成空串。 */
+        var parts = Regex.Split(html, @"(?i)(<br\s*/?>)");
+        var cut = -1;
+        for (var i = 0; i < parts.Length; i += 2)
+        {
+            if (IsOptionLineStart(parts[i])) { cut = i; break; }
+        }
+        if (cut < 0) return html;
+        if (cut == 0) return "";                 // 整段就是选项，没有题干
+        var kept = string.Concat(parts.Take(cut)).Trim();
+        return kept.Length > 0 ? kept : html;
+    }
+
+    private static bool IsOptionLineStart(string line)
+    {
+        var text = StripHtml(line).TrimStart();
+        return Regex.IsMatch(text, @"^[A-H][\.\u3001\uff0e:：]\s*");
     }
 
     private static string NormalizeHtml(string html)
