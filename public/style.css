@@ -12594,3 +12594,34 @@ body.img-viewer-open { overflow: hidden; }
   background: var(--ink-l0);
   color: var(--text);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机端「操作」展开：6 个按钮换成网格
+   ──────────────────────────────────────────────────────────────────────────
+   展开后有 6 个按钮：上一题 / 下一题 / 收起 / 笔记 / 收藏本题 / 纠错。
+   原来几条规则只写了 `grid-template-columns: repeat(2~3, …)`，
+   但 `.question-actions` 的 `display` 一直是 **flex** ——
+   grid-template-columns 在 flex 容器上完全无效（实测：computed 值是
+   `repeat(3, minmax(0px,1fr))`，但 display 是 flex，6 个按钮仍挤在一行）。
+   结果每个按钮只有 50~55px 宽，「收藏本题」4 个字直接顶出按钮外。
+
+   放在文件末尾，靠顺序压过上面那几条。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (max-width: 760px) {
+  /* 必须带 !important：上面 @media(max-width:760px) 里有一条
+       `.question-actions { display: flex !important; flex-wrap: nowrap !important; }`
+     把 display 锁成了 flex。不加 !important 的话，同属性比较时那条永远赢，
+     grid-template-columns 就一直是死代码。
+     靠 `body.mobile-actions-open` 的更高特异性(0,3,0) + 文件顺序压过它。 */
+  body.mobile-actions-open .question-actions {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 7px !important;
+  }
+
+  body.mobile-actions-open .question-actions > button {
+    min-width: 0;
+    padding: 0 6px;
+    font-size: 13px;
+  }
+}
