@@ -268,9 +268,40 @@ app.UseDefaultFiles(new DefaultFilesOptions
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = publicFiles,
+    OnPrepareResponse = ctx =>
+    {
+        /* 缓存策略必须显式给，不能一个 Cache-Control 都不发。
+           以前所有静态资源只带 Last-Modified，浏览器就按「启发式缓存」自己算新鲜期
+           （Chrome 取 Last-Modified 到现在的 10%）。index.html 越老窗口越长 ——
+           结果新版本部署几小时后，浏览器还在直接用旧 HTML，于是引用旧的 ?v=，
+           CSS/JS 全是旧的，用户看到的就是「改了没生效」，只能手动强刷。
+
+           规则：
+             · HTML 和 sw.js 一律 no-cache（每次回源校验，命中 304 也很快）
+             · 带 ?v= 的资源可以长缓存 —— URL 本身就是版本号，发新版就是新 URL
+             · 其余（favicon.svg / manifest.json 这类没有版本号的）也走 no-cache，
+               否则改了发不出去 */
+        var headers = ctx.Context.Response.Headers;
+        var name = ctx.File.Name;
+        var versioned = ctx.Context.Request.Query.ContainsKey("v");
+        if (versioned && !name.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
+            && !name.Equals("sw.js", StringComparison.OrdinalIgnoreCase))
+        {
+            headers.CacheControl = "public, max-age=31536000, immutable";
+        }
+        else
+        {
+            headers.CacheControl = "no-cache";
+        }
+    },
 });
 
-app.MapGet("/", () => Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8"));
+app.MapGet("/", (HttpContext context) =>
+{
+    // 首页决定引用哪个 ?v=，必须每次回源校验（见上面 OnPrepareResponse 的注释）
+    context.Response.Headers.CacheControl = "no-cache";
+    return Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8");
+});
 
 app.MapGet("/api/health", () =>
 {
