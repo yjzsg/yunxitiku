@@ -12500,3 +12500,97 @@ body.img-viewer-open { overflow: hidden; }
   height: 36px;
   min-height: 0;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   标签：自定义添加 / 删除
+   ──────────────────────────────────────────────────────────────────────────
+   存储层本来就有（state.storage.tagLabels + state.storage.tags，
+   addQuestionTag 会往 tagLabels 里塞），缺的只是入口，所以这里只补 UI。
+   ══════════════════════════════════════════════════════════════════════════ */
+/* `.tag-section` 的父级其实是两种布局：
+     顶层  .tag-section         → flex + wrap（<strong> 56px + 按钮区 flex:1）
+     面板里 .question-tag-panel .tag-section → grid（58px + minmax(0,1fr)）
+   两种都要让这一行独占整行：
+     flex 父级用 flex-basis:100%，grid 父级用 grid-column:1/-1。
+   只写其中一个的话，另一种布局下这一行会掉进 58px 那列，输入框被压成一条缝。 */
+.tag-add-row {
+  flex: 1 1 100%;
+  display: flex;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.question-tag-panel .tag-add-row {
+  grid-column: 1 / -1;
+}
+
+.tag-add-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-pill);
+  background: var(--card-solid);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.tag-add-row input:focus {
+  border-color: var(--primary);
+  outline: none;
+}
+
+.tag-add-row button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 自定义标签：胶囊右边紧贴一个 × 用来删掉整个标签。
+   用 :has() 只对「带 × 的」去掉右侧圆角，默认标签保持完整胶囊。 */
+.tag-chip-wrap {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.tag-chip-wrap:has(.tag-chip-del) .quick-mark {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.tag-chip-del {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-2);
+  border-left: 0;
+  border-top-right-radius: var(--radius-pill);
+  border-bottom-right-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.tag-chip-del:hover {
+  color: var(--danger);
+  border-color: var(--danger-200);
+  background: var(--danger-50);
+}
+
+[data-theme="ink"] .tag-add-row input {
+  border-color: var(--ink-l5);
+  background: var(--ink-l0);
+}
+
+[data-theme="ink"] .tag-chip-del {
+  border-color: var(--ink-l5);
+  background: var(--ink-l0);
+  color: var(--text);
+}

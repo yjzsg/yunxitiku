@@ -3001,8 +3001,19 @@ function renderQuestionTags(q) {
       <div class="tag-section">
         <strong>标签</strong>
         <div class="tag-button-grid">
-          ${renderToggleGroup(DEFAULT_TAG_LABELS, "data-toggle-tag", currentTags)}
-          ${currentTags.filter((label) => !DEFAULT_TAG_LABELS.includes(label)).map((label) => `<button type="button" class="quick-mark active" data-toggle-tag="${escapeHtml(label)}">${escapeHtml(label)} ×</button>`).join("")}
+          ${tagLabels().map((label) => {
+            const active = currentTags.includes(label);
+            const custom = !DEFAULT_TAG_LABELS.includes(label);
+            return `<span class="tag-chip-wrap">`
+              + `<button type="button" class="quick-mark ${active ? "active" : ""}" data-toggle-tag="${escapeHtml(label)}">${escapeHtml(label)}</button>`
+              // 自定义标签多一个小 × 用来彻底删掉这个标签（默认标签不给删）
+              + (custom ? `<button type="button" class="tag-chip-del" data-delete-tag-label="${escapeHtml(label)}" title="删除这个标签" aria-label="删除标签 ${escapeHtml(label)}">×</button>` : "")
+              + `</span>`;
+          }).join("")}
+        </div>
+        <div class="tag-add-row">
+          <input id="tagAddInput" type="text" maxlength="12" placeholder="新建标签，回车添加" autocomplete="off">
+          <button id="tagAddBtn" type="button">添加</button>
         </div>
       </div>
       <div class="tag-section">
@@ -3023,6 +3034,33 @@ function renderQuestionTags(q) {
   $("tagPanelToggleBtn").onclick = () => setMobileTagsOpen(!state.mobileTagsOpen);
   panel.querySelectorAll("[data-toggle-tag]").forEach((btn) => {
     btn.onclick = () => toggleQuestionTag(q.id, btn.dataset.toggleTag);
+  });
+  // 新建标签：回车或点「添加」都行。输入框里打字不会被全局快捷键抢（isTypingTarget 挡着）
+  const tagInput = $("tagAddInput");
+  const submitNewTag = () => {
+    const label = (tagInput?.value || "").trim();
+    if (!label) {
+      toast("请输入标签名");
+      tagInput?.focus();
+      return;
+    }
+    if (label.length > 12) {
+      toast("标签名最多 12 个字");
+      return;
+    }
+    addQuestionTag(q.id, label);   // 内部会 scheduleSave + renderQuestion
+  };
+  if (tagInput) {
+    tagInput.onkeydown = (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+      submitNewTag();
+    };
+  }
+  if ($("tagAddBtn")) $("tagAddBtn").onclick = submitNewTag;
+  panel.querySelectorAll("[data-delete-tag-label]").forEach((btn) => {
+    btn.onclick = () => deleteTagLabel(btn.dataset.deleteTagLabel);
   });
   panel.querySelectorAll("[data-confidence]").forEach((btn) => {
     btn.onclick = () => setQuestionConfidence(q.id, btn.dataset.confidence);
@@ -3133,6 +3171,23 @@ function removeQuestionTag(questionId, label) {
   scheduleSave();
   renderQuestion();
   renderTagFilterOptions();
+}
+
+/* 彻底删掉一个自定义标签（连同它在所有题目上的标记）。
+   默认标签（DEFAULT_TAG_LABELS）不给删 —— 它们是内置的分类，删了会让筛选下拉变空。
+   删之前确认一下：这个操作会波及所有题，不只是当前这道。 */
+function deleteTagLabel(rawLabel) {
+  const label = String(rawLabel || "").trim();
+  if (!label || DEFAULT_TAG_LABELS.includes(label)) return;
+  const count = (state.storage.tags?.[label] || []).length;
+  const detail = count ? `\n\n有 ${count} 道题用了这个标签，会一并去掉。` : "";
+  if (!confirm(`删除标签「${label}」？${detail}`)) return;
+  if (state.storage.tags) delete state.storage.tags[label];
+  state.storage.tagLabels = (state.storage.tagLabels || []).filter((item) => item !== label);
+  scheduleSave();
+  renderQuestion();
+  renderTagFilterOptions();
+  toast(`已删除标签「${label}」`);
 }
 
 function renderTagFilterOptions() {
