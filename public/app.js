@@ -6763,10 +6763,12 @@ function renderBankEditorDetail() {
         <span>题目 / 选项</span>
         <textarea id="bankEditorTitleInput" rows="8">${escapeHtml(detail.title || "")}</textarea>
       </label>
+      <div class="bank-editor-preview" id="bankEditorTitlePreview"></div>
       <label>
         <span>附加题干 / 案例材料</span>
         <textarea id="bankEditorQuestionInput" rows="5">${escapeHtml(detail.question || "")}</textarea>
       </label>
+      <div class="bank-editor-preview" id="bankEditorQuestionPreview"></div>
       <label>
         <span>答案</span>
         <textarea id="bankEditorAnswerInput" rows="3">${escapeHtml(detail.answer || "")}</textarea>
@@ -6775,8 +6777,38 @@ function renderBankEditorDetail() {
         <span>解析</span>
         <textarea id="bankEditorDescriptionInput" rows="6">${escapeHtml(detail.description || "")}</textarea>
       </label>
+      <div class="bank-editor-preview" id="bankEditorDescriptionPreview"></div>
     </div>
   `;
+}
+
+/* 富文本字段下面那块「学生看到的样子」预览。
+   原来只有 textarea —— 题干里的 <img> 只是一段字面文本，管理员根本看不到图，
+   纠错时无法判断图片对不对。预览里图片可以点开看大图（和做题页共用查看器）。
+
+   注意：预览走 sanitizeRichHtml（含本地路径改写），但**只用于显示**，
+   保存时提交的仍是 textarea 里的原文，不会把改写后的路径写回题库。 */
+function bindBankEditorPreviews() {
+  const pairs = [
+    ["bankEditorTitleInput", "bankEditorTitlePreview"],
+    ["bankEditorQuestionInput", "bankEditorQuestionPreview"],
+    ["bankEditorDescriptionInput", "bankEditorDescriptionPreview"],
+  ];
+  for (const [inputId, previewId] of pairs) {
+    const input = $(inputId);
+    const preview = $(previewId);
+    if (!input || !preview) continue;
+    const paint = () => {
+      const html = sanitizeRichHtml(input.value || "");
+      preview.innerHTML = html.trim()
+        ? html
+        : '<span class="bank-editor-preview-empty">（空）</span>';
+    };
+    // 每敲一个字都跑净化器对长题干太费，防抖一下
+    const schedule = typeof debounce === "function" ? debounce(paint, 220) : paint;
+    input.oninput = schedule;
+    paint();
+  }
 }
 
 function bindAdminBankEditorActions() {
@@ -6808,6 +6840,7 @@ function bindAdminBankEditorActions() {
   if (saveBtn) saveBtn.onclick = () => saveBankEditorQuestion().catch((err) => toast(err.message));
   const restoreBtn = $("bankEditorRestoreBtn");
   if (restoreBtn) restoreBtn.onclick = () => restoreBankEditorQuestion().catch((err) => toast(err.message));
+  bindBankEditorPreviews();
   maybeAutoLoadBankEditor();
 }
 
@@ -8632,10 +8665,12 @@ function bindImageViewer() {
   }, true);
 
   /* 事件委托：题干/附加题/解析每次重渲染都会换掉里面的 <img>，
-     绑在容器上就不用每次重绑。 */
-  $("questionView")?.addEventListener("click", (event) => {
+     绑在容器上就不用每次重绑。题库编辑器的预览区也走同一条路 ——
+     管理员纠错时要能点开题图看清楚。 */
+  document.addEventListener("click", (event) => {
     const img = event.target?.closest?.("img");
     if (!img || !img.getAttribute("src")) return;
+    if (!img.closest("#questionView, .bank-editor-preview")) return;
     event.preventDefault();
     event.stopPropagation();
     openImageViewer(img.currentSrc || img.src, img.alt);

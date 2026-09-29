@@ -3286,8 +3286,11 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   color: var(--muted);
 }
 
+/* 1320 在 1280 宽的窗口里装不下（容器 1244），会横滚。
+   而横滚时粘性操作列会盖住左边「提交时间」的文字。收到 1180 让它直接装下；
+   更窄的屏上仍然会横滚，那时粘性列才发挥作用。 */
 .admin-correction-table {
-  min-width: 1320px;
+  min-width: 1180px;
 }
 
 .admin-correction-table .correction-note {
@@ -12222,4 +12225,94 @@ body.img-viewer-open { overflow: hidden; }
 
 [data-theme="ink"] #ivZoomLabel {
   color: var(--text);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   题库编辑器的富文本预览
+   ──────────────────────────────────────────────────────────────────────────
+   原来题干/解析只有 textarea —— 里面的 <img> 就是一段字面文本，管理员纠错时
+   根本看不到题图。这里在字段下面加一块「学生看到的样子」。
+   放在文件最后，避免被前面的规则覆盖。
+   ══════════════════════════════════════════════════════════════════════════ */
+.bank-editor-preview {
+  margin: -2px 0 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  max-height: 380px;
+  overflow: auto;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.bank-editor-preview::before {
+  content: "学生看到的样子";
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.bank-editor-preview img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  cursor: zoom-in;
+}
+
+.bank-editor-preview-empty {
+  color: var(--muted-2);
+  font-size: 13px;
+}
+
+[data-theme="ink"] .bank-editor-preview {
+  border-color: var(--ink-l5);
+  background: var(--ink-l1);
+}
+
+[data-theme="ink"] .bank-editor-preview img {
+  border: 2px solid var(--ink-l5);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   管理端宽表格：操作列固定在右侧
+   ──────────────────────────────────────────────────────────────────────────
+   纠错表 min-width 1320px，在 1280 宽的窗口里装不下要横向滚 ——
+   操作列正好在最右边，不固定的话「删除」会被切在边界外，得先横滚才能点到。
+   （border-collapse 必须是 separate 才能 sticky，.admin-table 已经是。）
+   ══════════════════════════════════════════════════════════════════════════ */
+.admin-table th:last-child,
+.admin-table td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: var(--card);
+  box-shadow: -1px 0 0 var(--border);
+}
+
+.admin-table th:last-child {
+  z-index: 3;                 /* 表头本身 sticky top，要压在内容列之上 */
+  background: var(--bg);
+}
+
+.admin-table tbody tr:hover td:last-child {
+  background: var(--card-soft);
+}
+
+[data-theme="ink"] .admin-table th:last-child,
+[data-theme="ink"] .admin-table td:last-child {
+  background: var(--ink-l0);
+  box-shadow: -2px 0 0 var(--ink-l5);
+}
+
+[data-theme="ink"] .admin-table th:last-child {
+  background: var(--ink-l1);
+}
+
+[data-theme="ink"] .admin-table tbody tr:hover td:last-child {
+  background: var(--ink-l1);
 }
