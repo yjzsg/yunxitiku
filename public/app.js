@@ -1051,12 +1051,22 @@ function setMobileActions(open) {
     $("mobileToolsBtn").textContent = state.mobileToolsOpen ? "收起" : "工具";
     $("mobileToolsBtn").setAttribute("aria-expanded", String(state.mobileToolsOpen));
   }
+  syncAnswerCardSpace();   // 卡片可能刚被收起，预留空间要跟着更新
 }
 
 function setMobileTools(open) {
   state.mobileToolsOpen = !!open;
   if (state.mobileToolsOpen) {
     state.mobileActionsOpen = false;
+    /* 矮屏上「工具面板 + 展开的答题卡」会把读题区挤没。
+       实测 360×640：顶栏 57 + 工具面板 208 + 按钮行 36 + 答题卡 294 + 标签栏 64
+       = 659px > 640px，题干只剩 53px，等于看不到题。
+       工具面板是「我要做操作」的临时浮层，这时答题卡不是主角，直接收起。
+       （「操作 / 工具」本来就已经互斥，这里只是把同一条规则延伸到答题卡。） */
+    if (!state.answerCardCollapsed && toolsSqueezeQuestion()) {
+      state.answerCardUserTouched = true;   // 别让 applyResponsiveAnswerCard 又展开回去
+      setAnswerCardCollapsed(true);
+    }
   }
   document.body.classList.toggle("mobile-actions-open", state.mobileActionsOpen);
   document.body.classList.toggle("mobile-tools-open", state.mobileToolsOpen);
@@ -1068,6 +1078,19 @@ function setMobileTools(open) {
     $("mobileToolsBtn").textContent = state.mobileToolsOpen ? "收起" : "工具";
     $("mobileToolsBtn").setAttribute("aria-expanded", String(state.mobileToolsOpen));
   }
+  syncAnswerCardSpace();   // 卡片可能刚被收起，预留空间要跟着更新
+}
+
+/* 展开工具面板后，读题区还剩多少？低于 MIN_QUESTION_PX 就算「挤到一起」。
+   固定开销：顶栏 57 + 工具面板 208（10 个按钮两列）+ 按钮行 36 + 标签栏 64
+             + 展开的答题卡 46vh（上限 460px，和 CSS 里的 max-height 对齐）。 */
+function toolsSqueezeQuestion() {
+  const MIN_QUESTION_PX = 180;
+  const h = window.innerHeight || document.documentElement.clientHeight || 0;
+  if (!h) return false;
+  const cardH = Math.min(h * 0.46, 460);
+  const overhead = 57 + 208 + 36 + 64 + cardH;
+  return h - overhead < MIN_QUESTION_PX;
 }
 
 function shouldAutoCollapseAnswerCard() {

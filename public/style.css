@@ -8772,6 +8772,12 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
     border-radius: var(--radius) !important;
     background: var(--card) !important;
     box-shadow: var(--shadow-md) !important;
+    /* 矮屏兜底：面板本身最多占 45vh，超了内部滚动。
+       否则 10 个按钮在小屏上会把整个屏幕吃光（见 app.js 的 toolsSqueezeQuestion）。 */
+    max-height: 45vh !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   body.mobile-tools-open .toolbar > button {
@@ -12415,5 +12421,44 @@ body.img-viewer-open { overflow: hidden; }
 
   [data-theme="ink"] .admin-correction-table td.admin-actions {
     border-top-color: var(--ink-l5);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机端：展开的答题卡要抬到底部标签栏上方
+   ──────────────────────────────────────────────────────────────────────────
+   上面 `@media (max-width: 1440px)` 给答题卡的是 `position: fixed; bottom: 8px`，
+   而底部标签栏是 `bottom: 10px`、高 54px，且 z-index 96 > 卡片的 90 ——
+   于是展开的答题卡下半截（题号网格）被标签栏盖住，点不到。
+
+   文件靠上那条 `@supports not (backdrop-filter)` 里有同样的修正，但它只在浏览器
+   **不支持**磨砂时生效。实测（Chrome，supportsBackdrop = true）：
+     .question-pane  transform: none   → 根本不是 fixed 的包含块
+     卡片实际 bottom = 836（视口 844 − 8）→ 贴的是【视口】底部
+   所以那个判断是反的，这里无条件补一条（放文件末尾，靠顺序压过上面的 8px）。 */
+@media screen and (max-width: 760px) {
+  /* ══════════════════════════════════════════════════════════════════════════
+     答题卡和底部标签栏都在底部，同时出现必然互相压
+     ──────────────────────────────────────────────────────────────────────────
+     卡片 z-index 90 < 标签栏 96，所以展开的答题卡下半截（题号网格）被标签栏
+     盖住，点不到。
+
+     试过把卡片抬到标签栏上方（bottom: calc(--tabbar-h + 18px)）：标签栏是不压了，
+     但卡片又压住了「上一题 / 下一题 / 操作」，而且矮屏上预留高度算不准 ——
+     360×640 上读题区只剩 72px。（还踩了个反馈循环：实测卡片位置写进 CSS 变量
+     → 改 padding → 卡片位置变 → 观测器再写变量，卡片直接跳到屏幕顶部。）
+
+     所以换个方向：**展开答题卡时把标签栏让出来**。两者本来就是互斥的用法
+     （挑题 vs 换板块），收起答题卡标签栏就回来。
+     ══════════════════════════════════════════════════════════════════════════ */
+  body:not(.answer-card-collapsed) .mobile-tabbar {
+    display: none;
+  }
+
+  /* 兜底：不管预留算得准不准，按钮行都压在答题卡之上（卡片 z-index 90）。
+     层级：标签栏 96 > 按钮行 95 > 答题卡 90。 */
+  .question-actions {
+    position: relative;
+    z-index: 95;
   }
 }
