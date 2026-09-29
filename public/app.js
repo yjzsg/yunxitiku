@@ -6194,14 +6194,14 @@ function renderAdminCorrectionTable(rows) {
         <tbody>
           ${corrections.map((item) => `
             <tr>
-              <td><span class="status-pill ${item.status === "resolved" ? "active" : "disabled"}">${item.status === "resolved" ? "已处理" : "待处理"}</span></td>
-              <td class="admin-user-cell">${escapeHtml(item.user)}</td>
-              <td>${escapeHtml(item.courseName || "")}<span>${escapeHtml(item.chapterName || "")}</span></td>
-              <td><b>${escapeHtml(String(item.questionNo || item.questionId || ""))}</b><span>${escapeHtml(item.title || "")}</span></td>
-              <td>${escapeHtml(item.type || "其他")}</td>
-              <td class="correction-note">${escapeHtml(item.note || "")}</td>
-              <td>${escapeHtml(item.at || "未记录")}</td>
-              <td class="admin-actions">
+              <td data-label="状态"><span class="status-pill ${item.status === "resolved" ? "active" : "disabled"}">${item.status === "resolved" ? "已处理" : "待处理"}</span></td>
+              <td data-label="账号" class="admin-user-cell">${escapeHtml(item.user)}</td>
+              <td data-label="题库/章节"><div>${escapeHtml(item.courseName || "")}<span>${escapeHtml(item.chapterName || "")}</span></div></td>
+              <td data-label="题目"><div><b>${escapeHtml(String(item.questionNo || item.questionId || ""))}</b><span>${escapeHtml(item.title || "")}</span></div></td>
+              <td data-label="问题类型">${escapeHtml(item.type || "其他")}</td>
+              <td data-label="说明" class="correction-note">${escapeHtml(item.note || "")}</td>
+              <td data-label="提交时间">${escapeHtml(item.at || "未记录")}</td>
+              <td data-label="操作" class="admin-actions">
                 <button data-bank-editor-open="${escapeHtml(item.questionId || "")}" data-editor-course="${escapeHtml(item.courseId || "")}">编辑题库</button>
                 <button data-correction-action="${item.status === "resolved" ? "reopen" : "resolve"}" data-user="${escapeHtml(item.user)}" data-correction-id="${escapeHtml(item.id)}">${item.status === "resolved" ? "转待处理" : "标记处理"}</button>
                 <button class="danger" data-correction-action="delete" data-user="${escapeHtml(item.user)}" data-correction-id="${escapeHtml(item.id)}">删除</button>

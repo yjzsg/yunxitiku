@@ -12316,3 +12316,104 @@ body.img-viewer-open { overflow: hidden; }
 [data-theme="ink"] .admin-table tbody tr:hover td:last-child {
   background: var(--ink-l1);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   窄屏：纠错表变卡片列表
+   ──────────────────────────────────────────────────────────────────────────
+   表 8 列、min-width 1180。窗口窄于 ~1280 时容器装不下要横滚，而横滚时
+   粘性操作列会盖住左边的「提交时间」（实测 win=1200 就开始盖）。
+
+   与其让用户横滚，不如把每行拆成一张卡片 —— `<td>` 上的 data-label 当标签。
+   这样任何宽度都不需要横向滚动。断点 1279 与上面的 min-width 对齐。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (max-width: 1279px) {
+  .admin-correction-table {
+    min-width: 0;
+  }
+
+  .admin-correction-table thead {
+    display: none;              /* 卡片模式不需要表头，标签由 data-label 给 */
+  }
+
+  .admin-correction-table,
+  .admin-correction-table tbody,
+  .admin-correction-table tr,
+  .admin-correction-table td {
+    display: block;
+    width: auto;
+    min-width: 0;
+  }
+
+  /* 关掉粘性列。选择器要写到 td:last-child 才压得住上面那条同名规则
+     （同特异性，靠文件顺序取胜）。 */
+  .admin-correction-table td,
+  .admin-correction-table td:last-child,
+  .admin-correction-table th:last-child {
+    position: static;
+    box-shadow: none;
+    background: transparent;
+  }
+
+  .admin-correction-table tr {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+  }
+
+  .admin-correction-table tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .admin-correction-table tbody tr:hover td {
+    background: transparent;    /* hover 整行变色在卡片模式下会很花 */
+  }
+
+  .admin-correction-table td {
+    display: grid;
+    grid-template-columns: 76px 1fr;
+    gap: 10px;
+    align-items: start;
+    padding: 5px 0;
+    border-bottom: 0;
+    white-space: normal;
+  }
+
+  .admin-correction-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.7;
+  }
+
+  /* 胶囊/按钮这类不该被 grid 的 1fr 列拉满 */
+  .admin-correction-table td > .status-pill {
+    justify-self: start;
+  }
+
+  /* 操作行：按钮占满整行，和上面用一条线隔开 */
+  .admin-correction-table td.admin-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .admin-correction-table td.admin-actions::before {
+    flex: 0 0 76px;
+    line-height: 2.2;
+  }
+
+  [data-theme="ink"] .admin-correction-table tr {
+    border-color: var(--ink-l5);
+    background: var(--ink-l0);
+  }
+
+  [data-theme="ink"] .admin-correction-table td.admin-actions {
+    border-top-color: var(--ink-l5);
+  }
+}
