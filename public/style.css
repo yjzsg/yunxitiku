@@ -8626,7 +8626,7 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
   .answer-card-wrap .card-page-content {
     grid-template-columns: repeat(auto-fit, 34px) !important;
     grid-auto-rows: 34px !important;
-    justify-content: center;
+    justify-content: flex-start;
     max-height: 96px !important;
     min-height: 0;
   }
@@ -8859,7 +8859,7 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
   .answer-card-wrap .card-page-content {
     grid-template-columns: repeat(auto-fit, 36px);
     grid-auto-rows: 36px;
-    justify-content: center;
+    justify-content: flex-start;
     max-height: 30vh;
     min-height: 74px;
   }
@@ -12467,29 +12467,32 @@ body.img-viewer-open { overflow: hidden; }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   答题卡格子：固定尺寸 + 整行居中
+   答题卡格子：固定尺寸 + 左对齐
    ──────────────────────────────────────────────────────────────────────────
    原来（>760px）是 `repeat(auto-fill, minmax(34~38px, 1fr))` 且没有 grid-auto-rows：
 
    1. **行高被撑满** —— 单行 + 容器有确定高度时，`auto` 行会被拉满。
       实测 1280 宽：格子 34×71，又高又窄，很难看。
-   2. **列数按容器宽度铺满** —— 1390 宽的容器会铺出 40 个 34px 的列，
-      最后一页只有 6 格时就靠左挤成一小撮，右边空一大片。
+   2. **列数按容器宽度铺满** —— 1390 宽的容器会铺出 40 个 34px 的列。
 
-   改成 **flex + wrap + 居中**：
+   改成 **flex + wrap + 左对齐**：
      · 格子固定 36px 见方，所有页、所有宽度一致（翻页时不会忽大忽小）
-     · 格子少的页整行居中，看起来是有意为之，而不是「没铺满」
+     · 左对齐，像数字键盘一样从左上角排 —— 翻页时格子的位置稳定，
+       不会因为这一页格子少就整块漂到中间
+
+   （中间试过 `justify-content: center`：格子少的页看着「有意为之」，
+     但翻页时整块左右跳，反而更乱。用户明确要左对齐。）
 
    为什么不用 grid：`auto-fill` 会把整行铺满空轨道，`justify-content` 完全不起作用；
-   换 `auto-fit` 后行为还不一致 —— 实测 1920 宽能塌缩空轨道并居中，1390 宽
-   （落在 @media(max-width:1440) 里）却仍是 32 条轨道、格子挤在左边。
+   换 `auto-fit` 后行为还不一致 —— 实测 1920 宽能塌缩空轨道，1390 宽
+   （落在 @media(max-width:1440) 里）却仍是 32 条轨道。
    flex 只排真实存在的格子，不存在这个问题。
    放在文件末尾；上面各媒体查询里的 grid-* 规则在 flex 下自然失效。
    ══════════════════════════════════════════════════════════════════════════ */
 .answer-card-wrap .card-page-content {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   align-content: flex-start;
   gap: 7px;
 }
