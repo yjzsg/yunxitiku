@@ -3971,7 +3971,10 @@ function renderAnswerCardPage(options = {}) {
     if (index === state.currentIndex) btn.classList.add("current");
     if (Number(item.id) === Number(state.lastMarkedQuestionId)) btn.classList.add("just-marked");
     if (matched.has(index)) btn.classList.add("search-match");
-    if (hasAnswer(item.id)) btn.classList.add("done");
+    /* 答题卡只表达三态：正确 / 错误 / 未做。
+       用户明确要求「已做就是正确+错误」—— 不再单独显示「已做」。
+       原来那个黄色「已做」只在「答了但还没判定」时出现（统一验证模式下
+       答完没交卷），和「做过就是有对错」的直觉打架，看着很迷惑。 */
     if (state.submitted || isQuestionVerified(item.id)) {
       // 「未作答」单独一个 `todo` —— 以前打的是 `wrong`，交卷后「没做」和「做错」
       // 长得一模一样（都是红色），扫漏题时根本分不出来。
@@ -3979,14 +3982,14 @@ function renderAnswerCardPage(options = {}) {
       // 所以这里只需要换类名，不需要额外样式。
       if (!hasAnswer(item.id)) btn.classList.add("todo");
       else if (item.detail) btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
-    } else {
-      /* 没交卷、这题也没单独验证过 —— 但**历史上**做对/做错过。
-         用户要求默认就把对错显示出来，不要只显示「做过」。
+    } else if (courseStore.correct?.[item.id]) {
+      /* 没交卷、这题也没单独验证过，但**历史上**做对/做错过。
          数据本来就有（courseStore.correct / wrong，markResult 一直在维护），
          以前只喂给统计和错题本，没接到答题卡上。
-         这里不依赖 item.detail（它可能还没加载），直接查记录，省一次请求。 */
-      if (courseStore.correct?.[item.id]) btn.classList.add("correct");
-      else if (courseStore.wrong?.[item.id]) btn.classList.add("wrong");
+         不依赖 item.detail（它可能还没加载），直接查记录，省一次请求。 */
+      btn.classList.add("correct");
+    } else if (courseStore.wrong?.[item.id]) {
+      btn.classList.add("wrong");
     }
     btn.onclick = async () => {
       const transitionId = (state.modeTransitionId || 0) + 1;
@@ -4011,7 +4014,12 @@ function renderAnswerCardPage(options = {}) {
 
 function updateStats() {
   const total = state.questions.length;
-  const done = state.questions.filter((q) => hasAnswer(q.id)).length;
+  const courseStore = userCourseStore();
+  /* 「已完成」= 有对错结果（正确 + 错误），和答题卡的三态保持一致。
+     用户明确要求「已做就是正确+错误」。以前这里数的是「有作答记录」，
+     于是统一验证模式下「答完但还没交卷」的题会被算进已完成，
+     而答题卡上它们显示成「未做」，两边对不上。 */
+  const done = state.questions.filter((q) => courseStore.correct?.[q.id] || courseStore.wrong?.[q.id]).length;
   setText("totalCount", total);
   setText("doneCount", done);
   setText("todoCount", Math.max(0, total - done));

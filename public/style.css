@@ -12706,6 +12706,19 @@ body.tag-panel-open::before {
   content: none;
 }
 
+/* 按钮必须在**所有宽度**都显示。
+   以前桌面端是「body 常显 + 按钮藏起来」（有一条无条件的
+   `.tag-panel-toggle { display: none }`），只有 ≤760px 才显示按钮。
+   现在 body 改成弹窗了，按钮再藏就整个标签入口消失 ——
+   实测桌面端 computed display 是 none，页面上找不到「标签」。
+   !important 是因为那条隐藏规则是无条件写的，且 button 基础规则也在竞争。 */
+.question-tag-panel .tag-panel-toggle {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
 [data-theme="ink"] .tag-panel-body {
   border: 2px solid var(--ink-l5);
   background: var(--ink-l0);
