@@ -985,6 +985,15 @@ app.MapGet("/api/questions", (HttpContext context, QuestionBank bank, AuthStore 
         ? Results.Json(bank.GetQuestions(courseId, chapterId, ParseIdList(chapterIds), typeId, q ?? "", order ?? "", limit, ParseIdList(ids)))
         : Results.Json(new { ok = false, error = "未分配该题库" }, statusCode: 403));
 
+/* 只回「题目 id → 章节 id」的扁平数组，给前端补章节树的「已做」统计用。
+   为什么不复用 /api/questions：那个接口每道题都带题干（还要解密），
+   一门课几千题就是 2MB+；这里只有两个整数，小一个数量级。
+   格式：[qid1, cid1, qid2, cid2, ...] —— 比对象数组再小一半。 */
+app.MapGet("/api/question-chapters", (HttpContext context, QuestionBank bank, AuthStore auth, int courseId) =>
+    UserCourses.IsAllowed(auth, SessionUser(context), courseId)
+        ? Results.Json(bank.GetQuestionChapterPairs(courseId))
+        : Results.Json(new { ok = false, error = "未分配该题库" }, statusCode: 403));
+
 app.MapGet("/api/question", (HttpContext context, QuestionBank bank, AuthStore auth, int id) =>
 {
     var question = bank.GetQuestion(id);
@@ -3247,6 +3256,26 @@ sealed class QuestionBank
         });
         if (search.Length > 0) items = items.Where(i => i.title.Contains(search, StringComparison.OrdinalIgnoreCase));
         return items.Take(effectiveLimit).ToList();
+    }
+
+    /// <summary>
+    /// 整门课的「题目 id → 章节 id」映射，扁平数组 [qid, cid, qid, cid, ...]。
+    /// 前端拿它补章节树的「已做」统计：本地只记了做过的题目 id，
+    /// 不知道每题属于哪一章，翻一遍题目又太慢。
+    /// </summary>
+    public object GetQuestionChapterPairs(int courseId)
+    {
+        var rows = Query(@"
+            select isubjectid, ichapterid from coursesubject
+            where icourseid=@courseId and coalesce(bstopflag, 0)=0",
+            new Dictionary<string, object?> { ["@courseId"] = courseId });
+        var flat = new List<int>(rows.Count * 2);
+        foreach (var r in rows)
+        {
+            flat.Add(ToInt(r["isubjectid"]));
+            flat.Add(ToInt(r["ichapterid"]));
+        }
+        return new { ok = true, courseId, count = rows.Count, pairs = flat };
     }
 
     public object? GetQuestion(int id)

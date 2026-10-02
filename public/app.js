@@ -1873,6 +1873,26 @@ function rememberQuestionChapters(items, courseStore = userCourseStore()) {
   if (changed) scheduleSave();
 }
 
+/* 一次性把整门课的 qid → chapterId 补全。
+   老用户第一次打开时映射是空的，章节树的「已做」会全是 0；
+   靠翻题慢慢攒太慢（得一道道点过去）。接口只回 [qid, cid, ...] 的扁平数组，
+   一门课几千题也就百来 KB，比拉完整题目列表小一个数量级。
+   每门课只拉一次，用 questionChapterFilled 记住（即使某门课一道题都没有也记，
+   免得每次开都白拉一次）。 */
+async function backfillQuestionChapters(courseId) {
+  const id = Number(courseId || 0);
+  if (!id) return;
+  const store = userCourseStore(id);
+  if (store.questionChapterFilled) return;
+  const res = await api(`/api/question-chapters?courseId=${id}`);
+  const pairs = Array.isArray(res?.pairs) ? res.pairs : [];
+  const map = (store.questionChapter ||= {});
+  for (let i = 0; i + 1 < pairs.length; i += 2) map[pairs[i]] = pairs[i + 1];
+  store.questionChapterFilled = true;
+  scheduleSave();
+  if (Number(state.currentCourse?.id) === id) renderChapters();
+}
+
 /* 整棵树的「已做」数：把 done 里的题按映射归到章，再逐级累加到父章。
    一次算完整棵树 —— 每个节点各遍历一遍 done 的话，树一大就明显卡。 */
 function buildChapterDoneIndex(roots, courseStore = userCourseStore()) {
@@ -2061,6 +2081,8 @@ async function loadQuestions() {
   if (requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId) return;
   // 记下 qid → chapterId，章节树的「已做/总数」靠它
   rememberQuestionChapters(items, courseStore);
+  // 老用户的映射是空的，异步补一次（不阻塞渲染）
+  backfillQuestionChapters(state.currentCourse.id).catch(() => { /* 补不上就算了，翻题也会慢慢攒 */ });
   if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
   const shuffleKey = JSON.stringify({
