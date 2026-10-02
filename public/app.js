@@ -1143,22 +1143,12 @@ function setMobileTagsOpen(open) {
     const btn = $("tagPanelToggleBtn");
     if (btn) btn.setAttribute("aria-expanded", String(state.mobileTagsOpen));
   }
-  // body 上挂个类，给「点空白关闭」的遮罩用（见 style.css 的 body.tag-panel-open::before）
-  document.body.classList.toggle("tag-panel-open", state.mobileTagsOpen);
 }
 
-/* 标签面板改成浮层弹窗后，点面板外面 / 按 Esc 都要关掉。
-   以前是内联展开，点哪儿都不会关，没有这个问题。
-   注意：点击面板内部的按钮（含切换按钮）不算「外面」。 */
+/* 标签面板是**就地展开**（不是弹窗），所以点外面不关 —— 关了反而碍事：
+   用户正一边看题一边打标签，点一下题目就把面板收了很烦。
+   只保留 Esc 关闭。 */
 function bindTagPanelDismiss() {
-  document.addEventListener("click", (event) => {
-    if (!state.mobileTagsOpen) return;
-    const panel = $("questionTagPanel");
-    if (!panel) return;
-    // 点在遮罩（body::before）上时 target 是 body，不在 panel 里 → 关闭 ✓
-    if (panel.contains(event.target)) return;
-    setMobileTagsOpen(false);
-  }, true);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !state.mobileTagsOpen) return;
     event.preventDefault();

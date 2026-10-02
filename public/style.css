@@ -12651,40 +12651,21 @@ body.img-viewer-open { overflow: hidden; }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   标签面板：默认收起成按钮，点开弹窗
+   标签面板：默认收起成按钮，点击**就地展开**
    ──────────────────────────────────────────────────────────────────────────
-   以前是内联展开 —— 桌面端把题目往下推，手机端也是。用户要求：
-   平时只剩一个按钮，点开才弹窗。
+   中间试过改成模态弹窗（position:fixed 居中 + 遮罩），用户否掉了：
+   弹窗盖住题目，没法边看题边打标签；而且「点击展开就好」，不需要遮罩。
 
-   把 .tag-panel-body 改成固定定位的浮层，默认 display:none，`.open` 才显示。
-   放在文件末尾，压过上面各断点里的内联布局（那些规则很多，逐个改容易漏）。
+   所以：body 默认 display:none，`.open` 就地展开（跟着文档流把下面推下去）。
+   放在文件末尾，压过上面各断点里的内联布局 —— 那些规则很多，逐个改容易漏，
+   而这里只有「收起 / 展开」两个状态，用 !important 一次盖掉更稳。
 
-   层级：遮罩 115 < 面板 125（面板整体抬到遮罩之上，否则切换按钮点不到，
-   第二次点它就没法关闭了）。
+   配套：按钮必须在**所有宽度**都显示。以前桌面端是「body 常显 + 按钮藏起来」
+   （有一条无条件的 `.tag-panel-toggle { display: none }`），只有 ≤760px 才显示。
+   现在 body 默认收起了，按钮再藏就整个标签入口消失。
    ══════════════════════════════════════════════════════════════════════════ */
-.question-tag-panel {
-  position: relative;
-  z-index: 125;
-}
-
 .tag-panel-body {
-  /* 必须 !important：上面有几条 `#questionBody:not(.exam-case-split) .tag-panel-body`
-     之类的高特异性规则（ID + 伪类 + 类），不加重的话收起态仍是 grid ——
-     实测收起时 computed display 还是 "grid"，弹窗关不掉。 */
   display: none !important;
-  position: fixed;
-  z-index: 120;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: min(600px, calc(100vw - 24px));
-  max-height: min(72vh, 620px);
-  overflow: auto;
-  padding: 16px;
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  background: var(--card-solid);
-  box-shadow: var(--glass-shadow);
 }
 
 .question-tag-panel.open .tag-panel-body {
@@ -12692,26 +12673,6 @@ body.img-viewer-open { overflow: hidden; }
   gap: 10px;
 }
 
-/* 点空白关闭用的遮罩（点击由 app.js 的 bindTagPanelDismiss 处理） */
-body.tag-panel-open::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 115;
-  background: rgba(15, 23, 42, 0.34);
-}
-
-/* 弹窗里不需要「展开/收起」那个小箭头 —— 关掉就是收起 */
-.question-tag-panel.open .tag-panel-toggle::after {
-  content: none;
-}
-
-/* 按钮必须在**所有宽度**都显示。
-   以前桌面端是「body 常显 + 按钮藏起来」（有一条无条件的
-   `.tag-panel-toggle { display: none }`），只有 ≤760px 才显示按钮。
-   现在 body 改成弹窗了，按钮再藏就整个标签入口消失 ——
-   实测桌面端 computed display 是 none，页面上找不到「标签」。
-   !important 是因为那条隐藏规则是无条件写的，且 button 基础规则也在竞争。 */
 .question-tag-panel .tag-panel-toggle {
   display: inline-flex !important;
   align-items: center;
@@ -12719,9 +12680,9 @@ body.tag-panel-open::before {
   width: 100%;
 }
 
-[data-theme="ink"] .tag-panel-body {
-  border: 2px solid var(--ink-l5);
-  background: var(--ink-l0);
+/* 展开后不需要「+」那个小箭头 —— 关掉就是收起 */
+.question-tag-panel.open .tag-panel-toggle::after {
+  content: none;
 }
 
 /* 墨水屏上不用半透明深色遮罩（大面积深色拖影 + 反光），改用中浅灰 */
