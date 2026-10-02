@@ -3084,10 +3084,7 @@ function renderQuestionTags(q) {
     </button>
     <div class="tag-panel-body">
       <div class="tag-section">
-        <!-- 这一段的「标签」标题由上面那个切换按钮承担，这里留空占位：
-             不写内容但保留 58px 的标签列，chips 才能和下面几段对齐。
-             写「标签」的话页面上会同时出现两个「标签」，看着像两套 UI 打架。 -->
-        <strong aria-hidden="true"></strong>
+        <strong>标签</strong>
         <div class="tag-button-grid">
           ${tagLabels().map((label) => {
             const active = currentTags.includes(label);
@@ -3965,31 +3962,28 @@ function renderAnswerCardPage(options = {}) {
     if (Number(item.id) === Number(state.lastMarkedQuestionId)) btn.classList.add("just-marked");
     if (matched.has(index)) btn.classList.add("search-match");
     /* 答题卡只表达三态：正确 / 错误 / 未做。
-       用户明确要求「已做就是正确+错误」—— 不再单独显示「已做」。
-       原来那个黄色「已做」只在「答了但还没判定」时出现（统一验证模式下
-       答完没交卷），和「做过就是有对错」的直觉打架，看着很迷惑。 */
-    if (state.submitted || isQuestionVerified(item.id)) {
-      // 「未作答」单独一个 `todo` —— 以前打的是 `wrong`，交卷后「没做」和「做错」
-      // 长得一模一样（都是红色），扫漏题时根本分不出来。
-      // `todo` 沿用 `.card-cell` 的默认中性外观（见 style.css 里的说明），
-      // 所以这里只需要换类名，不需要额外样式。
-      if (!hasAnswer(item.id)) btn.classList.add("todo");
-      else if (item.detail) btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
-    } else {
-      /* 没交卷、这题也没单独验证过，但**历史上**有对错结果。
-         三个来源都要看，少一个就会漏：
-           1. courseStore.correct  —— 本课程答对过
-           2. courseStore.wrong    —— 本课程答错过
-           3. state.storage.wrong  —— 错题本记录（**跨课程**，resolved 表示已经练会了）
-         实测：只查 courseStore 的话，错题本里从别的课程/模式攒下的错题
-         在答题卡上是白的，看起来就是「历史对错没生效」。
-         不依赖 item.detail（它可能还没加载），直接查记录，省一次请求。 */
-      const wrongRecord = state.storage.wrong?.[item.id];
-      if (courseStore.correct?.[item.id] || wrongRecord?.resolved) {
-        btn.classList.add("correct");
-      } else if (courseStore.wrong?.[item.id] || wrongRecord) {
-        btn.classList.add("wrong");
-      }
+       判定**优先用已落盘的记录**，不要靠 item.detail：
+         · courseStore.correct / wrong —— 本课程
+         · state.storage.wrong[qid]    —— 错题本（跨课程，resolved 表示已经练会）
+       item.detail 只有当前题才有，用 isAnswerCorrect(item.detail) 判的话，
+       「已作答但 detail 没加载」的题一个类都拿不到 → 格子上显示成「未做」。
+       用户报的「已做的题在答题卡上全是未做」就是这个原因。
+
+       只有「交卷了但这题没作答」才单独标 `todo`（沿用 .card-cell 默认中性外观），
+       扫漏题时能和「做错」区分开 —— 以前两者都是红色，根本分不出来。 */
+    const wrongRecord = state.storage.wrong?.[item.id];
+    const recordedRight = !!courseStore.correct?.[item.id] || !!wrongRecord?.resolved;
+    const recordedWrong = !!courseStore.wrong?.[item.id] || (!!wrongRecord && !wrongRecord.resolved);
+
+    if (state.submitted && !hasAnswer(item.id)) {
+      btn.classList.add("todo");
+    } else if (recordedRight) {
+      btn.classList.add("correct");
+    } else if (recordedWrong) {
+      btn.classList.add("wrong");
+    } else if (item.detail && hasAnswer(item.id)) {
+      // 记录还没落盘的极端情况（刚作答、还没走 markResult），用当前 detail 兜底
+      btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
     }
     btn.onclick = async () => {
       const transitionId = (state.modeTransitionId || 0) + 1;
@@ -7700,6 +7694,14 @@ async function submitPaper(autoSubmit = false) {
       const subjectiveHint = subjective ? `，主观题 ${subjective} 道需人工核对` : "";
       toast(`已提交：${correct}/${checked} 题正确${subjectiveHint}`);
     }
+    /* 弹出成绩面板。练习模式（真题/章节练习这类纸质卷）原来只弹一个几秒就消失的
+       toast，考试模式只有顶栏一行小字 —— 用户要的是「交卷后算出具体得分」，
+       所以两种模式都给一个能看清构成的持久面板。 */
+    showSubmitResult({
+      score, totalScore, correct, checked,
+      total: submitQuestions.length,
+      rate, subjective, autoSubmit,
+    });
   } finally {
     if (state.submitToken === submitToken) {
       state.submitting = false;
@@ -8450,6 +8452,49 @@ function formatRelativeTime(value) {
 function formatScore(value) {
   const n = Number(value || 0);
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+/* 交卷成绩面板。
+   原来交卷后得分只在两个地方露面：
+     · 练习模式 —— 一个几秒就消失的 toast
+     · 考试模式 —— 顶栏 #examStatus 里一行小字
+   看完就没了，也没法回看「对了几道、错了几道、几道没做」。
+   分数本来就算好了（submitQuestions 那一轮循环里的
+   score / totalScore / correct / checked / subjective），这里只是显示出来。
+
+   exam 模式下顶栏那行仍然保留（考试中/已交卷都能看到）。 */
+function showSubmitResult(payload) {
+  const host = $("submitResult");
+  if (!host) return;
+  const {
+    score = 0, totalScore = 0, correct = 0, checked = 0,
+    total = 0, rate = 0, subjective = 0, autoSubmit = false,
+  } = payload || {};
+  const pct = totalScore > 0 ? Math.round((score / totalScore) * 100) : 0;
+  const wrong = Math.max(0, checked - correct - subjective);
+  const unanswered = Math.max(0, total - checked);
+  setText("submitResultTitle", autoSubmit ? "时间到，已自动交卷" : "交卷完成");
+  const body = host.querySelector(".submit-result-body");
+  if (body) {
+    body.innerHTML = `
+      <div class="submit-result-score">
+        <b>${formatScore(score)}</b><span>/ ${formatScore(totalScore)} 分</span>
+      </div>
+      <div class="submit-result-rate">得分率 ${pct}%</div>
+      <dl class="submit-result-grid">
+        <div><dt>题目总数</dt><dd>${total}</dd></div>
+        <div><dt>已作答</dt><dd>${checked}</dd></div>
+        <div><dt>答对</dt><dd class="is-right">${correct}</dd></div>
+        <div><dt>答错</dt><dd class="is-wrong">${wrong}</dd></div>
+        <div><dt>未作答</dt><dd>${unanswered}</dd></div>
+        <div><dt>正确率</dt><dd>${rate}%</dd></div>
+      </dl>
+      ${subjective ? `<p class="submit-result-note">含 ${subjective} 道主观题，需人工核对，未计入得分。</p>` : ""}
+    `;
+  }
+  host.classList.remove("hidden");
+  const closeBtn = $("submitResultCloseBtn");
+  if (closeBtn) closeBtn.onclick = () => host.classList.add("hidden");
 }
 
 function formatSeconds(value) {

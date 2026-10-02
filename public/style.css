@@ -12666,6 +12666,11 @@ body.img-viewer-open { overflow: hidden; }
    ══════════════════════════════════════════════════════════════════════════ */
 .tag-panel-body {
   display: none !important;
+  /* 和上面的切换按钮拉开距离，别糊在一起 —— 用户要的是「按钮和内容有间隔」，
+     不是把内容里「标签」那两个字删掉（我上一版理解错了）。 */
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(var(--hairline-rgb), 0.72);
 }
 
 .question-tag-panel.open .tag-panel-body {
@@ -12683,4 +12688,130 @@ body.img-viewer-open { overflow: hidden; }
 /* 展开后不需要「+」那个小箭头 —— 关掉就是收起 */
 .question-tag-panel.open .tag-panel-toggle::after {
   content: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   交卷成绩面板
+   ──────────────────────────────────────────────────────────────────────────
+   原来交卷后得分只在「几秒就消失的 toast」或「顶栏一行小字」里露面，
+   看不清构成（对几道、错几道、几道没做）。这里给一个持久的面板。
+   复用项目里已有的 modal 视觉（img-viewer 那套遮罩 + 卡片）。
+   ══════════════════════════════════════════════════════════════════════════ */
+.submit-result {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.submit-result.hidden {
+  display: none;
+}
+
+.submit-result-card {
+  width: min(420px, 100%);
+  padding: 20px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--card-solid);
+  box-shadow: var(--glass-shadow);
+  text-align: center;
+}
+
+.submit-result-card h3 {
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.submit-result-score {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.submit-result-score b {
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--primary);
+}
+
+.submit-result-score span {
+  font-size: 15px;
+  color: var(--text-3);
+}
+
+.submit-result-rate {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.submit-result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid rgba(var(--hairline-rgb), 0.72);
+}
+
+.submit-result-grid > div {
+  display: grid;
+  gap: 3px;
+}
+
+.submit-result-grid dt {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.submit-result-grid dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.submit-result-grid dd.is-right {
+  color: var(--success-700);
+}
+
+.submit-result-grid dd.is-wrong {
+  color: var(--danger-600);
+}
+
+.submit-result-note {
+  margin: 12px 0 0;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.submit-result-close {
+  width: 100%;
+  min-height: 38px;
+  margin-top: 16px;
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: var(--on-accent);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+[data-theme="ink"] .submit-result {
+  background: var(--ink-l2);
+}
+
+[data-theme="ink"] .submit-result-card {
+  border: 2px solid var(--ink-l5);
+  background: var(--ink-l0);
 }
