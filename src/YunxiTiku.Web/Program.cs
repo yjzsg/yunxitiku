@@ -3220,7 +3220,7 @@ sealed class QuestionBank
 
         var parameters = new Dictionary<string, object?> { ["@courseId"] = courseId };
         var sql = @"
-            select s.isubjectid, s.icourseid, s.ichapterid, s.isubjecttype, s.iindex,
+            select s.isubjectid, s.icourseid, s.ichapterid, s.isubjecttype, s.iindex, s.iscore,
                    s.ctitle, s.ianswercount, s.dupdatedate, t.csubjectname, ch.cchaptername
             from coursesubject s
             left join coursesubjecttype t on s.isubjecttype=t.isubjecttype
@@ -3251,6 +3251,10 @@ sealed class QuestionBank
             type = ToStr(r["csubjectname"]),
             subjectType = ToInt(r["isubjecttype"]),
             index = ToInt(r["iindex"]),
+            /* 卷面分值。题库里 100% 的题都有（实测 29738/29738），
+               且和真题卷面完全吻合：造价管理真题 60×1 + 20×2 = 100 分。
+               前端组卷算分要用，以前这个接口没带，只能拿题型写死的值。 */
+            score = ToStr(r["iscore"]),
             title = StripHtml(DecryptField(r["ctitle"], r["dupdatedate"])),
             answerCount = ToInt(r["ianswercount"])
         });

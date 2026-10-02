@@ -781,11 +781,22 @@ function examChaptersFromIds(ids) {
     }));
 }
 
+/* 每题分值。优先级：
+     1. state.exam.scoreMap —— 模拟考场组卷时按题型显式设的分值，最权威
+     2. q.score             —— 题库自带的 iscore，100% 的题都有，
+                               且和真题卷面完全吻合（实测造价管理真题
+                               60×1 + 20×2 = 100 分，正是卷面满分）
+     3. 按题型的兜底值       —— 老数据 / 字段缺失时用
+
+   以前只有第 1 和第 3 条，第 3 条把主观题算成 0 分 ——
+   案例真题那 8 道每题 20 分的题，交卷显示「0/0 分」。 */
 function getQuestionScore(q) {
   if (state.exam?.scoreMap?.[q.id] != null) return Number(state.exam.scoreMap[q.id]);
+  const bankScore = Number(q?.score);
+  if (Number.isFinite(bankScore) && bankScore > 0) return bankScore;
+  if (isSubjective(q)) return 0;
   if (Number(q.subjectType) === 1) return 2;
   if (Number(q.subjectType) === 6) return 1.5;
-  if (isSubjective(q)) return 0;
   return 1;
 }
 
