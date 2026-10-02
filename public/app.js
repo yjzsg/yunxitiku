@@ -3084,7 +3084,10 @@ function renderQuestionTags(q) {
     </button>
     <div class="tag-panel-body">
       <div class="tag-section">
-        <strong>标签</strong>
+        <!-- 这一段的「标签」标题由上面那个切换按钮承担，这里留空占位：
+             不写内容但保留 58px 的标签列，chips 才能和下面几段对齐。
+             写「标签」的话页面上会同时出现两个「标签」，看着像两套 UI 打架。 -->
+        <strong aria-hidden="true"></strong>
         <div class="tag-button-grid">
           ${tagLabels().map((label) => {
             const active = currentTags.includes(label);
@@ -3972,14 +3975,21 @@ function renderAnswerCardPage(options = {}) {
       // 所以这里只需要换类名，不需要额外样式。
       if (!hasAnswer(item.id)) btn.classList.add("todo");
       else if (item.detail) btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
-    } else if (courseStore.correct?.[item.id]) {
-      /* 没交卷、这题也没单独验证过，但**历史上**做对/做错过。
-         数据本来就有（courseStore.correct / wrong，markResult 一直在维护），
-         以前只喂给统计和错题本，没接到答题卡上。
+    } else {
+      /* 没交卷、这题也没单独验证过，但**历史上**有对错结果。
+         三个来源都要看，少一个就会漏：
+           1. courseStore.correct  —— 本课程答对过
+           2. courseStore.wrong    —— 本课程答错过
+           3. state.storage.wrong  —— 错题本记录（**跨课程**，resolved 表示已经练会了）
+         实测：只查 courseStore 的话，错题本里从别的课程/模式攒下的错题
+         在答题卡上是白的，看起来就是「历史对错没生效」。
          不依赖 item.detail（它可能还没加载），直接查记录，省一次请求。 */
-      btn.classList.add("correct");
-    } else if (courseStore.wrong?.[item.id]) {
-      btn.classList.add("wrong");
+      const wrongRecord = state.storage.wrong?.[item.id];
+      if (courseStore.correct?.[item.id] || wrongRecord?.resolved) {
+        btn.classList.add("correct");
+      } else if (courseStore.wrong?.[item.id] || wrongRecord) {
+        btn.classList.add("wrong");
+      }
     }
     btn.onclick = async () => {
       const transitionId = (state.modeTransitionId || 0) + 1;
