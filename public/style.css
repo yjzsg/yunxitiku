@@ -12684,8 +12684,3 @@ body.img-viewer-open { overflow: hidden; }
 .question-tag-panel.open .tag-panel-toggle::after {
   content: none;
 }
-
-/* 墨水屏上不用半透明深色遮罩（大面积深色拖影 + 反光），改用中浅灰 */
-html[data-theme="ink"] body.tag-panel-open::before {
-  background: var(--ink-l2);
-}
