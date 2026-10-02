@@ -1143,6 +1143,28 @@ function setMobileTagsOpen(open) {
     const btn = $("tagPanelToggleBtn");
     if (btn) btn.setAttribute("aria-expanded", String(state.mobileTagsOpen));
   }
+  // body 上挂个类，给「点空白关闭」的遮罩用（见 style.css 的 body.tag-panel-open::before）
+  document.body.classList.toggle("tag-panel-open", state.mobileTagsOpen);
+}
+
+/* 标签面板改成浮层弹窗后，点面板外面 / 按 Esc 都要关掉。
+   以前是内联展开，点哪儿都不会关，没有这个问题。
+   注意：点击面板内部的按钮（含切换按钮）不算「外面」。 */
+function bindTagPanelDismiss() {
+  document.addEventListener("click", (event) => {
+    if (!state.mobileTagsOpen) return;
+    const panel = $("questionTagPanel");
+    if (!panel) return;
+    // 点在遮罩（body::before）上时 target 是 body，不在 panel 里 → 关闭 ✓
+    if (panel.contains(event.target)) return;
+    setMobileTagsOpen(false);
+  }, true);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !state.mobileTagsOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setMobileTagsOpen(false);
+  }, true);
 }
 
 function updateFullscreenState() {
@@ -1759,14 +1781,23 @@ async function loadChapters() {
 
 function renderChapters() {
   $("chapterList").innerHTML = "";
+  const courseStore = userCourseStore();
+
+  /* 先建树再算「全部章节」的总数 —— state.chapters 是**扁平**的，
+     每个节点上没有 children，直接拿它调 chapterTotalCount 会炸
+     （chapterTotalCount 要递归 children）。 */
+  const roots = buildChapterTree(state.chapters);
+  state.chapterTreeRoots = roots;
+  state.chapterDoneIndex = buildChapterDoneIndex(roots, courseStore);
+
   const all = document.createElement("button");
   all.className = "chapter-item" + (!state.currentChapter ? " active" : "");
-  all.textContent = "全部章节";
+  const allTotal = roots.reduce((sum, chapter) => sum + chapterTotalCount(chapter), 0);
+  const allDone = Object.keys(courseStore.done || {}).length;
+  all.innerHTML = `<span>全部章节</span><small>(${allDone}/${allTotal})</small>`;
   all.onclick = () => selectChapter(null);
   $("chapterList").appendChild(all);
 
-  const roots = buildChapterTree(state.chapters);
-  state.chapterTreeRoots = roots;
   state.chapterTreeIndex = new Map();
   const indexTree = (items) => items.forEach((item) => {
     state.chapterTreeIndex.set(Number(item.id), item);
@@ -1825,6 +1856,45 @@ function chapterTotalCount(chapter) {
   return Number(chapter.questionCount || 0) + chapter.children.reduce((sum, child) => sum + chapterTotalCount(child), 0);
 }
 
+/* ── 章节树的「已做」统计 ────────────────────────────────────────────────
+   courseStore.done 只记了题目 id，不知道它属于哪一章，所以先建一份
+   qid → chapterId 的映射。列表接口每道题都带 chapterId，顺手存下来即可
+   （纯数字对，几千题也就几十 KB，跟着用户数据一起同步）。 */
+function rememberQuestionChapters(items, courseStore = userCourseStore()) {
+  if (!Array.isArray(items) || !items.length) return;
+  const map = (courseStore.questionChapter ||= {});
+  let changed = false;
+  for (const item of items) {
+    const qid = Number(item?.id || 0);
+    const cid = Number(item?.chapterId || 0);
+    if (!qid || !cid) continue;
+    if (map[qid] !== cid) { map[qid] = cid; changed = true; }
+  }
+  if (changed) scheduleSave();
+}
+
+/* 整棵树的「已做」数：把 done 里的题按映射归到章，再逐级累加到父章。
+   一次算完整棵树 —— 每个节点各遍历一遍 done 的话，树一大就明显卡。 */
+function buildChapterDoneIndex(roots, courseStore = userCourseStore()) {
+  const map = courseStore.questionChapter || {};
+  const done = courseStore.done || {};
+  const direct = new Map();
+  for (const qid of Object.keys(done)) {
+    const cid = Number(map[qid] || 0);
+    if (!cid) continue;
+    direct.set(cid, (direct.get(cid) || 0) + 1);
+  }
+  const totals = new Map();
+  const walk = (node) => {
+    let n = direct.get(Number(node.id)) || 0;
+    for (const child of node.children || []) n += walk(child);
+    totals.set(Number(node.id), n);
+    return n;
+  };
+  roots.forEach(walk);
+  return totals;
+}
+
 function childChapterIds(chapter) {
   const ids = [];
   const visit = (node) => {
@@ -1862,7 +1932,8 @@ function renderChapterNodes(nodes, container) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "chapter-item";
-    btn.innerHTML = `<span>${escapeHtml(chapter.name)}</span><small>(${chapterTotalCount(chapter)})</small>`;
+    const chapterDone = state.chapterDoneIndex?.get(Number(chapter.id)) || 0;
+    btn.innerHTML = `<span>${escapeHtml(chapter.name)}</span><small>(${chapterDone}/${chapterTotalCount(chapter)})</small>`;
     if (hasChildren) btn.title = "点击加载本目录及全部子目录题目，左侧按钮展开或收起";
     btn.onclick = () => {
       selectChapter(chapter);
@@ -1988,6 +2059,8 @@ async function loadQuestions() {
   const requestedCourseId = Number(state.currentCourse?.id);
   let items = await api(`/api/questions?${params}`);
   if (requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId) return;
+  // 记下 qid → chapterId，章节树的「已做/总数」靠它
+  rememberQuestionChapters(items, courseStore);
   if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
   const shuffleKey = JSON.stringify({
@@ -3884,6 +3957,14 @@ function renderAnswerCardPage(options = {}) {
       // 所以这里只需要换类名，不需要额外样式。
       if (!hasAnswer(item.id)) btn.classList.add("todo");
       else if (item.detail) btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
+    } else {
+      /* 没交卷、这题也没单独验证过 —— 但**历史上**做对/做错过。
+         用户要求默认就把对错显示出来，不要只显示「做过」。
+         数据本来就有（courseStore.correct / wrong，markResult 一直在维护），
+         以前只喂给统计和错题本，没接到答题卡上。
+         这里不依赖 item.detail（它可能还没加载），直接查记录，省一次请求。 */
+      if (courseStore.correct?.[item.id]) btn.classList.add("correct");
+      else if (courseStore.wrong?.[item.id]) btn.classList.add("wrong");
     }
     btn.onclick = async () => {
       const transitionId = (state.modeTransitionId || 0) + 1;
@@ -8977,6 +9058,7 @@ window.addEventListener("afterprint", cleanupPrintView);
 $("zoomInBtn").onclick = () => changeZoom(0.1);
 $("zoomOutBtn").onclick = () => changeZoom(-0.1);
 bindImageViewer();
+bindTagPanelDismiss();
 $("fullscreenBtn").onclick = () => toggleFullscreen().catch((err) => toast(err.message || "无法进入全屏"));
 document.addEventListener("fullscreenchange", updateFullscreenState);
 document.addEventListener("keydown", handleGlobalShortcuts);
