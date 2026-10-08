@@ -12814,22 +12814,6 @@ body.img-viewer-open { overflow: hidden; }
   font-weight: 700;
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   答题卡「收起/展开」按钮：任何宽度下都不许文字溢出
-   ──────────────────────────────────────────────────────────────────────────
-   用户报「手机窄窗口下展开答题卡后，收起答题卡按钮文字超出了」。
-   我在 300→1390px 扫了一遍（展开态 + 收起态）都没复现 —— 按钮 242px、
-   文字 55px，余量很大。所以这里加的是**兜底**：
-   即使某些设备字体更宽 / 有缩放，也只会省略号收尾，不会顶出按钮外。
-   ══════════════════════════════════════════════════════════════════════════ */
-.answer-card-collapse-btn {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-  flex-shrink: 0;
-}
-
 [data-theme="ink"] .submit-result {
   background: var(--ink-l2);
 }
@@ -12837,4 +12821,41 @@ body.img-viewer-open { overflow: hidden; }
 [data-theme="ink"] .submit-result-card {
   border: 2px solid var(--ink-l5);
   background: var(--ink-l0);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   触摸设备：去掉「粘住」的 hover 阴影
+   ──────────────────────────────────────────────────────────────────────────
+   用户报「操作时，例如选择选项时按下的那一刻的阴影，是长方形，与按钮不匹配」。
+   放大截图确认：选项后面确实浮着**第二个更大的圆角矩形**，和选项本身的
+   边框明显是两层。
+
+   原因不是阴影画错了，而是 **:hover 在触屏上会粘住** ——
+   手指点一下选项，抬手后 :hover 依然生效，于是
+     · box-shadow: var(--shadow-sm)（0 6px 18px，很大很软）
+     · transform: translateY(-1px)（整块上浮）
+   一直留着，看起来就像按钮后面多了一个对不齐的方框。
+
+   修法：只在「真的能悬停」的设备上保留 hover 效果；
+   触摸设备改用 :active —— 按下的那一刻有反馈，抬手就恢复。
+   注意排除 `.active`（那是选中态，不是 hover）。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media (hover: none) {
+  .option:hover {
+    box-shadow: none;
+    transform: none;
+    border-color: var(--border);
+    background: rgba(var(--glass-rgb), 0.92);
+  }
+
+  button:hover:not(.active) {
+    box-shadow: none;
+  }
+
+  /* 换成按下即时的反馈：轻微内缩 + 主色浅底，抬手就恢复 */
+  .option:active {
+    transform: scale(0.985);
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+  }
 }
