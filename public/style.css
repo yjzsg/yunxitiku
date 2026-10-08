@@ -1593,6 +1593,14 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   border-color: var(--muted);
 }
 
+/* 图例「已做」：已作答、但还没判定（练习模式统一验证 / 模拟考场）。
+   与 .card-cell.done **逐值同色**（同上一条的道理）。
+   这套值本来就在 `.mark.selected` 里用着，所以不复用新色。 */
+.mark.done {
+  background: var(--warning-150);
+  border-color: var(--warning-500);
+}
+
 .answer-card {
   display: block;
   max-height: none;
@@ -10255,7 +10263,10 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   border-style: dashed;
 }
 
-[data-theme="ink"] .mark.selected {
+/* 「已做」在墨水里跟 .card-cell.done 同值（--ink-l2 + --ink-l5），
+   和上面那个「选中」也是同一套灰 —— 所以并进这条。 */
+[data-theme="ink"] .mark.selected,
+[data-theme="ink"] .mark.done {
   background: var(--ink-l2);
   border-color: var(--ink-l5);
 }
@@ -13023,5 +13034,127 @@ textarea,
   .option:focus:not(:focus-visible),
   .card-cell:focus:not(:focus-visible) {
     outline: none !important;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   触屏可用性修复（2026-10-08）
+   ──────────────────────────────────────────────────────────────────────────
+   全部写在文件末尾，靠「同特异性 + 写在后面」生效，不改上面任何已有声明。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── ① 读题区：保留双指缩放 ───────────────────────────────────────────────
+   题图被 `max-width: 100%` 压到屏宽后，图纸 / 表格类题图必须能捏合放大。
+   `pan-y` 继续负责上下滚动与左右滑动翻题，`pinch-zoom` 放开双指缩放。
+   （覆盖 L1134 `.question-view { touch-action: pan-y }`） */
+.question-view {
+  touch-action: pan-y pinch-zoom;
+}
+
+/* ── ② 滚动容器：滚到端点不带动外层 / 不触发浏览器横向后退 ────────────────
+   写法与既有的 `.admin-table-wrap`（L5600）、`.img-viewer-scroll`（L12246）一致。 */
+.card-page-content,
+.admin-toolbar,
+.admin-view-tabs {
+  overscroll-behavior: contain;
+}
+
+@media (max-width: 760px) {
+
+  /* ── ③ iOS 聚焦放大整页：表单控件字号统一提到 16px ─────────────────────
+     iOS Safari 对 font-size < 16px 的 input/select/textarea 在聚焦时强制
+     放大整页且收起键盘不还原。**只改 font-size**，不动 height / padding。
+     覆盖：`.tag-add-row input`(13px)、`.search-panel input/select`(14px)、
+     `.wrong-filter-panel select`(14px)、`.plan-form input`(12px)、
+     `.bank-editor-*`(14px)。 */
+  .tag-add-row input,
+  .search-panel input,
+  .search-panel select,
+  .wrong-filter-panel select,
+  .plan-form input,
+  .bank-editor-filters select,
+  .bank-editor-filters input,
+  .bank-editor-form input,
+  .bank-editor-form textarea,
+  .bank-editor-chapter-fields input {
+    font-size: 16px;
+  }
+
+  /* ── ④ 标签胶囊：实测 48×26 → 高 44px、字号 13px ──────────────────────
+     26px 不是来自全局 `button { min-height: var(--control-h) }`（(0,0,1)，40px），
+     而是被 L7523 `.question-tag-panel .quick-mark { min-height: 26px }`（(0,2,0)）
+     压掉了 —— class 组合的特异性高于裸元素选择器，所以全局 40px 从未生效。
+     这里用同特异性 (0,2,0) + 写在后面覆盖，不动 `.tag-section` /
+     `.tag-button-grid` 的父级网格结构（58px 标签列 + 1fr 按钮区照旧）。 */
+  .question-tag-panel .quick-mark {
+    min-height: 44px;
+    padding-block: 6px;
+    font-size: 13px;
+  }
+
+  /* ── ⑤ 删除自定义标签的 ×：30×30 → ≥44×44，并与左侧胶囊拉开 6px ───────
+     误触会直接删标签，所以间隙比尺寸更要紧。
+     `.tag-chip-wrap` 是 `inline-flex; align-items: stretch`，× 会跟着胶囊被
+     一起撑到同一高度；间隙用 margin-left，` :has()` 的圆角拼接逻辑原样不动。 */
+  .tag-chip-wrap .tag-chip-del {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 12px;
+    margin-left: 6px;
+  }
+
+  /* ── ⑥ 顶栏图标（工具 ⚙ / 头像）：38×38 → 44×44，保持正方形 ───────────
+     只改尺寸不改列宽布局（`.main-nav` 在 ≤760px 是 flex，不设固定网格行高）。 */
+  .main-nav .account-box .account-btn,
+  .main-nav > #mobileToolsBtn {
+    width: 44px !important;
+    min-width: 44px !important;
+    height: 44px !important;
+    min-height: 44px !important;
+  }
+
+  /* ── ⑦ 答题卡底部：翻页按钮 / 收起按钮，实测高 26px → 44px ──────────── */
+  .card-page-btn {
+    min-height: 44px;
+  }
+
+  /* 折叠态的两条既有规则（L8739 / L8988 / L9019）都带 !important，
+     所以这里也必须带，并且用 (0,3,1) 压过后两条。 */
+  .answer-card-wrap .answer-card-collapse-btn,
+  body.answer-card-collapsed .answer-card-wrap .answer-card-collapse-btn {
+    min-height: 44px !important;
+  }
+
+  /* 上面两个按钮各多占 18px（共 36px），而答题卡的高度上限
+     `max-height: min(178px, 30dvh)`（L8730）本来就刚好卡在内容高度上，
+     不补的话题号格会从 2 行掉到 1 行（截图实测）。这里同步放宽上限，
+     把多出来的 36px 补给题号格；收起态的 44px（L9014，特异性更高）不受影响。 */
+  body:not(.admin-view) .answer-card-wrap {
+    max-height: min(214px, 36dvh) !important;
+  }
+}
+
+/* ── ⑧ 触摸设备：主要点击目标的按下反馈 ───────────────────────────────────
+   手机上 `:hover` 不生效，而全站只有 `button:active { transform: translateY(1px) }`
+   一条通用反馈（1px，基本看不出来）。这里给主要点击目标补一个克制的按下缩放。
+   ⚠️ 守卫：`.card-cell` 的选中态是 `.current`、`.mobile-tabbar .nav-item` 是
+   `.active` —— 加 `:not(...)` 守卫，绝不覆盖真正的选中态。 */
+@media (hover: none) {
+  .card-cell:active:not(.current),
+  .mobile-tabbar .nav-item:active:not(.active) {
+    transform: scale(0.98);
+  }
+
+  .quick-mark:active,
+  .card-page-btn:active,
+  .answer-card-collapse-btn:active,
+  .account-btn:active,
+  .mobile-tools-btn:active,
+  .tag-panel-toggle:active,
+  .modal-head button:active,
+  .modal-actions button:active,
+  .admin-view-btn:active,
+  .exam-chapter-actions button:active {
+    transform: scale(0.98);
   }
 }

@@ -4001,9 +4001,18 @@ function renderAnswerCardPage(options = {}) {
       btn.classList.add("correct");
     } else if (recordedWrong) {
       btn.classList.add("wrong");
-    } else if (item.detail && hasAnswer(item.id)) {
-      // 记录还没落盘的极端情况（刚作答、还没走 markResult），用当前 detail 兜底
-      btn.classList.add(isAnswerCorrect(item.detail) ? "correct" : "wrong");
+    } else if (hasAnswer(item.id)) {
+      /* 已作答、但还没判定（练习模式统一验证、或模拟考场）——
+         用中性的「已做」，既不泄露对错，也和其他页同状态的题保持一致。
+
+         原来这里写的是 `item.detail && hasAnswer(...)` 然后按
+         isAnswerCorrect(item.detail) 加 correct/wrong：
+         item.detail **只有当前题（±预取的几道）才有**，所以
+           · 当前格答完立刻变绿/变红 —— 提前泄露对错，
+             而此时 updateStats 还显示「已完成 0 题」；
+           · 翻过页的同状态题却显示「未做」—— 同一个状态两种显示。
+         上面那段注释本来就写着「不要靠 item.detail」，代码没跟上。 */
+      btn.classList.add("done");
     }
     btn.onclick = async () => {
       const transitionId = (state.modeTransitionId || 0) + 1;

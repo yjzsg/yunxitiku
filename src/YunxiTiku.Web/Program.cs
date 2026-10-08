@@ -1018,6 +1018,10 @@ app.MapGet("/assets/{**relative}", (HttpContext context, string relative) =>
             // 用 CSP sandbox 锁死，并禁止嗅探。
             context.Response.Headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
             context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            // 题图 URL 不带内容哈希，不能长缓存：改了图 URL 不变，长缓存会一直发旧图。
+            // 用 no-cache 而不是 no-store：Results.File 会带 Last-Modified（实测不带 ETag），
+            // 浏览器每次回源校验，文件没变就 304，既不做启发式缓存也不重发整张图。
+            context.Response.Headers.CacheControl = "no-cache";
             return Results.File(path, ContentType(path));
         }
     }
@@ -1027,7 +1031,15 @@ app.MapGet("/assets/{**relative}", (HttpContext context, string relative) =>
 // 未知的 /api/* 要回 404 JSON，而不是掉进下面的 SPA 回退：
 // 回退会给出 200 + HTML，容易被误判成「端点还在」。
 app.MapFallback("/api/{**rest}", () => Results.Json(new { ok = false, error = "接口不存在" }, statusCode: 404));
-app.MapFallback(() => Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8"));
+app.MapFallback((HttpContext context) =>
+{
+    // SPA 回退同样发 index.html，缓存策略必须和 MapGet("/") 一致（见上面 OnPrepareResponse 的注释）。
+    // 不显式发的话这里一个 Cache-Control 都没有，浏览器按启发式缓存 index.html，
+    // 新版本部署后用户还在用旧 HTML，于是引用旧的 ?v=。
+    // HEAD / 也落到这里（MapGet("/") 不匹配 HEAD 方法），所以首页的 HEAD 同样靠这一处。
+    context.Response.Headers.CacheControl = "no-cache";
+    return Results.File(Path.Combine(paths.PublicRoot, "index.html"), "text/html; charset=utf-8");
+});
 
 app.Run();
 return 0;
@@ -1935,11 +1947,20 @@ static class AdminDataTransfer
     {
         using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
         conn.Open();
+        // 列清单必须和读路径的真实 SELECT 对齐（QuestionBank 的各 Get* 方法）。
+        // 探针漏一列，缺该列的旧包就能通过校验，上传成功之后接口才 500。
+        // 对齐口径：读路径全部 SQL（含 JOIN / WHERE / ORDER BY）引用到的列并集；
+        // 探针自身 JOIN 键/WHERE 已覆盖的列不重复列（例如 c.iclassid、s.isubjecttype）。
         foreach (var sql in new[]
         {
-            "select c.icourseid, c.ccoursename, c.ihadbuy, c.dchangedate, c.dchapterchange, c.dsubjectchange, cl.ccoursecname, cl.iindex, sc.csubclassname, sc.iindex from course c left join courseclass cl on c.iclassid=cl.iclassid left join coursesubclass sc on c.isubclassid=sc.isubclassid limit 1",
-            "select ch.ichapterid, ch.cchaptername, ch.cchaptercode, ch.igrade, ch.itype, ch.icount from coursechapter ch limit 1",
-            "select s.isubjectid, s.icourseid, s.ichapterid, s.isubjecttype, s.iindex, s.ctitle, s.ianswercount, s.dupdatedate, t.csubjectname, ch.cchaptername from coursesubject s left join coursesubjecttype t on s.isubjecttype=t.isubjecttype left join coursechapter ch on s.ichapterid=ch.ichapterid limit 1",
+            // course / courseclass / coursesubclass ← GetCourses（ORDER BY c.iindex，WHERE coalesce(c.bstopflag,0)）
+            "select c.icourseid, c.ccoursename, c.ihadbuy, c.dchangedate, c.dchapterchange, c.dsubjectchange, c.iindex, c.bstopflag, cl.ccoursecname, cl.iindex, sc.csubclassname, sc.iindex from course c left join courseclass cl on c.iclassid=cl.iclassid left join coursesubclass sc on c.isubclassid=sc.isubclassid limit 1",
+            // coursechapter ← GetChapters / GetChapterPath / BuildChapterMap（WHERE icourseid、coalesce(bstopflag,0)）
+            "select ch.ichapterid, ch.icourseid, ch.cchaptername, ch.cchaptercode, ch.igrade, ch.itype, ch.icount, ch.bstopflag from coursechapter ch limit 1",
+            // coursesubject ← GetQuestions / GetQuestion / GetQuestionChapterPairs / GetEditorQuestions / GetEditorQuestion / BuildChapterMap
+            // （s.bstopflag / s.ichaptertype 只见于读路径的 WHERE、ORDER BY，但缺列同样会 500，所以也要进 SELECT 清单）
+            "select s.isubjectid, s.icourseid, s.ichapterid, s.isubjecttype, s.iindex, s.ichaptertype, s.iscore, s.ctitle, s.cquestion, s.canswer, s.cdescription, s.ianswercount, s.dupdatedate, s.bstopflag, t.csubjectname, ch.cchaptername from coursesubject s left join coursesubjecttype t on s.isubjecttype=t.isubjecttype left join coursechapter ch on s.ichapterid=ch.ichapterid limit 1",
+            // coursesubjecttype 的列（isubjecttype / csubjectname）已被上面那条的 JOIN 与 t.csubjectname 覆盖，这里只验表在不在
             "select count(*) from coursesubjecttype",
         })
         {
