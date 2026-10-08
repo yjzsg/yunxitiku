@@ -12859,3 +12859,43 @@ body.img-viewer-open { overflow: hidden; }
     background: var(--primary-50);
   }
 }
+
+/* ===== 手机上点选项冒出来的「方框」 =====
+   那**不是** box-shadow，是浏览器自带的**点击高亮**（tap highlight）。
+   安卓上这块高亮**不跟随 border-radius** —— 圆角按钮上就画出一个直角方框，
+   看着就像按钮背后垫了一张方形的纸。
+
+   项目里只有科目名那几处单独关掉了（.course-title、导航里的科目名），
+   其它按钮、尤其 .option 全都没关，所以点选项时才冒方框。
+
+   全局关掉即可。键盘可访问性不受影响：焦点反馈仍由
+   button:focus-visible 那条 2px 焦点环负责（.option 另有自己的 :active）。 */
+html,
+body,
+button,
+[role="button"],
+a,
+summary,
+label,
+input,
+select,
+textarea,
+.option,
+.card-cell,
+.mobile-tabbar button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 顺带堵住另一个可能画方框的东西：有些移动端浏览器（iOS Safari）
+   点一下按钮会让它进入 :focus，万一 :focus-visible 也跟着匹配上，
+   就会多画一个焦点环。触摸设备上只保留真正来自键盘的焦点环。 */
+@media (hover: none) {
+  button:focus:not(:focus-visible),
+  [role="button"]:focus:not(:focus-visible),
+  a:focus:not(:focus-visible),
+  summary:focus:not(:focus-visible),
+  .option:focus:not(:focus-visible),
+  .card-cell:focus:not(:focus-visible) {
+    outline: none !important;
+  }
+}
