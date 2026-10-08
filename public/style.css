@@ -207,12 +207,25 @@ button {
   transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-button:hover,
+/* `.active` 是「真的选中」，必须一直在。
+   hover 只是「鼠标扫过 / 手指点过一下」—— 触屏上 :hover 会在抬手后
+   一直粘着，而它原本和 `.active` 共用同一套声明，于是点过一次的按钮
+   看起来和真选中一模一样，再也分不出来（点「提交」也会一直亮着）。
+   所以把 hover 关进 @media (hover: hover)：只有真有指针的设备才生效。 */
 button.active {
   border-color: var(--primary-200);
   background: var(--primary-50);
   color: var(--primary-ink);
   box-shadow: var(--shadow-xs);
+}
+
+@media (hover: hover) {
+  button:hover {
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+    color: var(--primary-ink);
+    box-shadow: var(--shadow-xs);
+  }
 }
 
 button:active {
@@ -499,14 +512,26 @@ body.is-admin .admin-only {
   transition: background-color 0.2s ease, left 0.2s ease, right 0.2s ease;
 }
 
-.nav-item:hover,
+/* 导航底色是主色：用「加深」而不是「提亮」做选中底，白字才够对比
+   （提亮会把底变成浅靛，白字掉到 3.7:1）。
+
+   原来 :hover 和 .active 共用这一套声明 —— 触屏上 :hover 抬手后还粘着，
+   于是「手指点过的那个」和「真的选中的那个」长得一模一样，
+   看着像同时选中了两页。把 hover 关进 @media (hover: hover)。 */
 .nav-item.active {
   border: 0;
-  /* 导航底色是主色：用「加深」而不是「提亮」做选中底，白字才够对比
-     （提亮会把底变成浅靛，白字掉到 3.7:1） */
   background: rgba(0, 0, 0, 0.2);
   color: var(--on-accent);
   box-shadow: none;
+}
+
+@media (hover: hover) {
+  .nav-item:hover {
+    border: 0;
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--on-accent);
+    box-shadow: none;
+  }
 }
 
 .nav-item.active::after {
@@ -625,18 +650,20 @@ body.is-admin .admin-only {
   min-width: 84px;
 }
 
-.toolbar button:hover,
-.question-actions button:hover,
-.card-page-btn:hover,
-.search-match-panel button:hover,
-.exam-chapter-actions button:hover,
-.admin-view-btn:hover,
-.admin-actions button:hover,
-.modal-head button:hover,
-.modal-actions button:hover {
-  border-color: var(--primary-200);
-  background: var(--primary-50);
-  color: var(--primary-ink);
+@media (hover: hover) {
+  .toolbar button:hover,
+  .question-actions button:hover,
+  .card-page-btn:hover,
+  .search-match-panel button:hover,
+  .exam-chapter-actions button:hover,
+  .admin-view-btn:hover,
+  .admin-actions button:hover,
+  .modal-head button:hover,
+  .modal-actions button:hover {
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+    color: var(--primary-ink);
+  }
 }
 
 #searchToggleBtn::before,
@@ -798,10 +825,12 @@ body.admin-view .workspace {
   box-shadow: none;
 }
 
-.course-item:hover {
-  border-color: var(--border);
-  background: var(--bg);
-  box-shadow: none;
+@media (hover: hover) {
+  .course-item:hover {
+    border-color: var(--border);
+    background: var(--bg);
+    box-shadow: none;
+  }
 }
 
 .course-item.active {
@@ -887,9 +916,11 @@ body.admin-view .workspace {
   box-shadow: none;
 }
 
-.chapter-toggle:not(:disabled):hover {
-  background: var(--primary-100);
-  border-color: var(--primary-300);
+@media (hover: hover) {
+  .chapter-toggle:not(:disabled):hover {
+    background: var(--primary-100);
+    border-color: var(--primary-300);
+  }
 }
 
 .chapter-toggle:disabled {
@@ -917,11 +948,20 @@ body.admin-view .workspace {
   box-shadow: none;
 }
 
-.chapter-item:hover,
+/* 同上：「选中的章节」和「手指点过一下」原本是同一套声明，
+   手机上分不出到底切没切过去，看着像同时选中两章。 */
 .chapter-row.active .chapter-item {
   border-color: var(--primary-200);
   background: var(--primary-50);
   color: var(--primary-ink);
+}
+
+@media (hover: hover) {
+  .chapter-item:hover {
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+    color: var(--primary-ink);
+  }
 }
 
 .chapter-row.active .chapter-toggle {
@@ -967,10 +1007,12 @@ body.admin-view .workspace {
   box-shadow: 0 10px 22px rgba(var(--primary-rgb), 0.22);
 }
 
-.picker-done-btn:hover {
-  border-color: transparent;
-  background: var(--primary-600);
-  color: var(--on-accent);
+@media (hover: hover) {
+  .picker-done-btn:hover {
+    border-color: transparent;
+    background: var(--primary-600);
+    color: var(--on-accent);
+  }
 }
 
 .picker-done-btn:disabled {
@@ -1189,10 +1231,14 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   min-height: 62px;
 }
 
-.option:hover {
-  border-color: var(--primary-200);
-  background: var(--card);
-  box-shadow: var(--shadow-sm);
+/* 触屏上点过的选项会一直保留这层阴影和上浮，看着像按钮后面垫了块方形的纸。
+   只在真有指针的设备上给 hover 效果；触摸下的按下反馈交给 .option:active。 */
+@media (hover: hover) {
+  .option:hover {
+    border-color: var(--primary-200);
+    background: var(--card);
+    box-shadow: var(--shadow-sm);
+  }
 }
 
 .option b {
@@ -1476,10 +1522,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   box-shadow: 0 10px 22px rgba(var(--primary-rgb), 0.22);
 }
 
-.confirm-answer-btn:hover {
-  border-color: transparent;
-  background: var(--primary-600);
-  color: var(--on-accent);
+@media (hover: hover) {
+  .confirm-answer-btn:hover {
+    border-color: transparent;
+    background: var(--primary-600);
+    color: var(--on-accent);
+  }
 }
 
 .confirm-answer-btn:disabled {
@@ -1895,9 +1943,11 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   font-weight: 800;
 }
 
-.exam-chapter-list label:hover {
-  border-color: var(--primary-200);
-  background: var(--primary-50);
+@media (hover: hover) {
+  .exam-chapter-list label:hover {
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+  }
 }
 
 .exam-chapter-list span {
@@ -2014,11 +2064,13 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   padding: 11px 20px;
 }
 
-.primary-action:hover {
-  border-color: transparent;
-  color: var(--on-accent);
-  background: var(--primary-600);
-  box-shadow: 0 14px 28px rgba(var(--primary-rgb), 0.3);
+@media (hover: hover) {
+  .primary-action:hover {
+    border-color: transparent;
+    color: var(--on-accent);
+    background: var(--primary-600);
+    box-shadow: 0 14px 28px rgba(var(--primary-rgb), 0.3);
+  }
 }
 
 .primary-action.secondary,
@@ -2029,10 +2081,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   box-shadow: var(--shadow-xs);
 }
 
-.primary-action.secondary:hover,
-.primary-action.compact:hover {
-  background: var(--primary-50);
-  color: var(--primary-ink);
+@media (hover: hover) {
+  .primary-action.secondary:hover,
+  .primary-action.compact:hover {
+    background: var(--primary-50);
+    color: var(--primary-ink);
+  }
 }
 
 .primary-action.compact {
@@ -3687,11 +3741,17 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     margin-right: 6px;
   }
 
+}
+
+@media (max-width: 760px) and (hover: hover) {
   .mobile-tools-btn:hover {
     background: var(--primary-600);
     border-color: var(--primary-ink);
     color: var(--on-accent);
   }
+}
+
+@media (max-width: 760px) {
 
   body.mobile-tools-open .toolbar {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4448,9 +4508,15 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     color: var(--on-accent);
   }
 
+}
+
+@media screen and (hover: hover) {
   .primary-action:hover {
     background: var(--primary-600);
   }
+}
+
+@media screen {
 
   .app-shell {
     min-width: 0;
@@ -4580,6 +4646,9 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     background: var(--card);
   }
 
+}
+
+@media screen and (hover: hover) {
   .toolbar button:hover,
   .question-actions button:hover,
   .card-page-btn:hover,
@@ -4589,6 +4658,9 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .modal-actions button:hover {
     transform: translateY(-1px);
   }
+}
+
+@media screen {
 
   .workspace {
     padding: 16px;
@@ -4629,10 +4701,16 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   }
 
+}
+
+@media screen and (hover: hover) {
   .course-item:hover,
   .chapter-item:hover {
     transform: translateY(-1px);
   }
+}
+
+@media screen {
 
   .course-item.active,
   .chapter-row.active .chapter-item {
@@ -4779,9 +4857,15 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   }
 
+}
+
+@media screen and (hover: hover) {
   .card-cell:hover {
     transform: translateY(-1px);
   }
+}
+
+@media screen {
 
   .card-cell.current {
     outline-color: rgba(var(--primary-rgb), 0.54);
@@ -4807,6 +4891,9 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
   }
 
+}
+
+@media screen and (hover: hover) {
   .exam-rule-list > div:hover,
   .exam-chapter-list label:hover,
   .analysis-grid div:hover,
@@ -4815,6 +4902,9 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .question-tag-panel:hover {
     box-shadow: var(--shadow-sm);
   }
+}
+
+@media screen {
 
   .admin-dashboard {
     background: transparent;
@@ -6985,9 +7075,11 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   box-shadow: 0 1px 2px rgba(var(--ink-rgb), 0.08) !important;
 }
 
-.chapter-toggle:not(:disabled):hover {
-  border-color: var(--primary) !important;
-  background: var(--primary-50) !important;
+@media (hover: hover) {
+  .chapter-toggle:not(:disabled):hover {
+    border-color: var(--primary) !important;
+    background: var(--primary-50) !important;
+  }
 }
 
 .chapter-toggle::before,
@@ -7324,11 +7416,13 @@ body.panel-page .question-view {
   transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.question-tag-panel .quick-mark:hover {
-  transform: translateY(-1px);
-  border-color: var(--primary-200);
-  background: var(--primary-50);
-  color: var(--primary-ink);
+@media (hover: hover) {
+  .question-tag-panel .quick-mark:hover {
+    transform: translateY(-1px);
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+    color: var(--primary-ink);
+  }
 }
 
 .question-tag-panel .quick-mark.active {
@@ -7675,10 +7769,12 @@ body:not(.admin-view).picker-open .question-pane {
   transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.chapter-toggle:not(:disabled):hover,
-.exam-chapter-toggle:not(:disabled):hover,
-.analysis-toggle:not(:disabled):hover {
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .chapter-toggle:not(:disabled):hover,
+  .exam-chapter-toggle:not(:disabled):hover,
+  .analysis-toggle:not(:disabled):hover {
+    transform: translateY(-1px);
+  }
 }
 
 .chapter-toggle::before,
@@ -8754,10 +8850,16 @@ body:not(.admin-view).answer-card-collapsed .question-pane {
     font-weight: 700 !important;
   }
 
+}
+
+@media screen and (max-width: 1280px) and (hover: hover) {
   .main-nav > #mobileToolsBtn:hover {
     background: rgba(0, 0, 0, 0.32) !important;
     color: var(--on-accent) !important;
   }
+}
+
+@media screen and (max-width: 1280px) {
 
   body.mobile-tools-open .toolbar {
     display: grid !important;
@@ -10004,9 +10106,11 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   color: var(--nav-fg);
 }
 
-[data-theme="ink"] .account-box .theme-switch button:hover {
-  color: var(--nav-fg);
-  background: var(--nav-pill-hover);
+@media (hover: hover) {
+  [data-theme="ink"] .account-box .theme-switch button:hover {
+    color: var(--nav-fg);
+    background: var(--nav-pill-hover);
+  }
 }
 
 [data-theme="ink"] .account-box .theme-switch button.active {
@@ -10469,9 +10573,11 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   white-space: nowrap;
 }
 
-.theme-switch button:hover {
-  color: var(--text-3);
-  background: var(--surface-4);
+@media (hover: hover) {
+  .theme-switch button:hover {
+    color: var(--text-3);
+    background: var(--surface-4);
+  }
 }
 
 .theme-switch button.active {
@@ -10499,9 +10605,11 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   color: var(--on-accent);
 }
 
-.account-box .theme-switch button:hover {
-  color: var(--on-accent);
-  background: rgba(0, 0, 0, 0.16);
+@media (hover: hover) {
+  .account-box .theme-switch button:hover {
+    color: var(--on-accent);
+    background: rgba(0, 0, 0, 0.16);
+  }
 }
 
 .account-box .theme-switch button.active {
@@ -10686,9 +10794,11 @@ body {
   color: currentColor;
 }
 
-.main-nav .nav-item:hover {
-  background: var(--nav-pill-hover);
-  color: var(--nav-fg);
+@media (hover: hover) {
+  .main-nav .nav-item:hover {
+    background: var(--nav-pill-hover);
+    color: var(--nav-fg);
+  }
 }
 
 .main-nav .nav-item.active {
@@ -10734,9 +10844,11 @@ body {
   color: var(--nav-fg-soft) !important;
 }
 
-.main-nav .theme-switch button:hover {
-  color: var(--nav-fg) !important;
-  background: var(--nav-pill-hover) !important;
+@media (hover: hover) {
+  .main-nav .theme-switch button:hover {
+    color: var(--nav-fg) !important;
+    background: var(--nav-pill-hover) !important;
+  }
 }
 
 .main-nav .theme-switch button.active {
@@ -10756,9 +10868,11 @@ body {
 }
 
 
-.main-nav > #mobileToolsBtn:hover {
-  background: var(--nav-pill-hover) !important;
-  color: var(--nav-fg) !important;
+@media (hover: hover) {
+  .main-nav > #mobileToolsBtn:hover {
+    background: var(--nav-pill-hover) !important;
+    color: var(--nav-fg) !important;
+  }
 }
 
 /* ── 玻璃面板：模糊 + 饱和度放大 + 提亮 + 镜面高光 + 分层投影 ── */
@@ -10932,21 +11046,25 @@ body {
               border-color 0.18s ease, background-color 0.18s ease;
 }
 
-.course-item:hover,
-.chapter-item:hover,
-.card-cell:hover,
-.exam-draft-card:hover,
-.training-card:hover,
-.training-history-row:hover,
-.bank-editor-result:hover,
-.analysis-grid div:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--lift-shadow);
-}
+/* 触屏上点过的卡片会一直「浮着」—— 上浮 2px 和抬升投影都收不回来。
+   同样只让真有指针的设备生效。 */
+@media (hover: hover) {
+  .course-item:hover,
+  .chapter-item:hover,
+  .card-cell:hover,
+  .exam-draft-card:hover,
+  .training-card:hover,
+  .training-history-row:hover,
+  .bank-editor-result:hover,
+  .analysis-grid div:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--lift-shadow);
+  }
 
-/* 「当前题」自带一圈实色环，hover 时不能把它弄丢 */
-.card-cell.current:hover {
-  box-shadow: 0 0 0 1px var(--card-ring), var(--lift-shadow);
+  /* 「当前题」自带一圈实色环，hover 时不能把它弄丢 */
+  .card-cell.current:hover {
+    box-shadow: 0 0 0 1px var(--card-ring), var(--lift-shadow);
+  }
 }
 
 /* 用户开了「减少动效」：只留投影，不做位移 */
@@ -11499,9 +11617,11 @@ body {
   font-size: 12px !important;
 }
 
-.main-nav .account-box .account-menu .theme-switch button:hover {
-  color: var(--text) !important;
-  background: var(--surface-4) !important;
+@media (hover: hover) {
+  .main-nav .account-box .account-menu .theme-switch button:hover {
+    color: var(--text) !important;
+    background: var(--surface-4) !important;
+  }
 }
 
 .main-nav .account-box .account-menu .theme-switch button.active {
@@ -12185,7 +12305,9 @@ body.img-viewer-open { overflow: hidden; }
   font-weight: 650;
 }
 
-.img-viewer-bar button:hover { background: var(--surface-4); }
+@media (hover: hover) {
+  .img-viewer-bar button:hover { background: var(--surface-4); }
+}
 
 .img-viewer-bar #ivClose {
   background: var(--primary);
@@ -12229,8 +12351,10 @@ body.img-viewer-open { overflow: hidden; }
   color: var(--text);
 }
 
-[data-theme="ink"] .img-viewer-bar button:hover {
-  background: var(--ink-l1);
+@media (hover: hover) {
+  [data-theme="ink"] .img-viewer-bar button:hover {
+    background: var(--ink-l1);
+  }
 }
 
 [data-theme="ink"] .img-viewer-bar #ivClose {
@@ -12588,10 +12712,12 @@ body.img-viewer-open { overflow: hidden; }
   line-height: 1;
 }
 
-.tag-chip-del:hover {
-  color: var(--danger);
-  border-color: var(--danger-200);
-  background: var(--danger-50);
+@media (hover: hover) {
+  .tag-chip-del:hover {
+    color: var(--danger);
+    border-color: var(--danger-200);
+    background: var(--danger-50);
+  }
 }
 
 [data-theme="ink"] .tag-add-row input {

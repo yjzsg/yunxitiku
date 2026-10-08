@@ -792,9 +792,18 @@ function examChaptersFromIds(ids) {
    案例真题那 8 道每题 20 分的题，交卷显示「0/0 分」。 */
 function getQuestionScore(q) {
   if (state.exam?.scoreMap?.[q.id] != null) return Number(state.exam.scoreMap[q.id]);
-  const bankScore = Number(q?.score);
-  if (Number.isFinite(bankScore) && bankScore > 0) return bankScore;
+  // 判据是「字段有没有值」，不是「值 > 0」——
+  // 题库里真的有 31 道 iscore='0.0' 的题（其中 18 道单选）。
+  // 按 > 0 判断会把这 31 道当成「题库没给分值」，套上兜底的 1 分。
+  const raw = q?.score;
+  if (raw != null && String(raw).trim() !== '') {
+    const bankScore = Number(raw);
+    if (Number.isFinite(bankScore)) return bankScore;
+  }
   if (isSubjective(q)) return 0;
+  // 问答/案例（3、4）题库里大多是 20 分一道的大题。
+  // iscore 缺失时给 0（等于不计入总分），比给 1 分合理得多。
+  if ([3, 4].includes(Number(q.subjectType))) return 0;
   if (Number(q.subjectType) === 1) return 2;
   if (Number(q.subjectType) === 6) return 1.5;
   return 1;
