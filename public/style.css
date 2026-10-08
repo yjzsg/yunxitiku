@@ -11746,16 +11746,23 @@ body {
   .main-nav > .nav-course-title {
     display: block !important;
     position: relative !important;
-    flex: 1 1 auto !important;
+    /* 这里原来是 `flex: 1 1 auto` —— 按钮被拉到整行宽（实测 638px），
+       而它又是 background: transparent + border-radius: 0，看着就是一行纯文字。
+       于是按下/聚焦时，button:focus-visible 那条 2px 焦点环被画成
+       一个又长又方的框，和「按钮」实际的样子完全对不上（用户报的就是这个）。
+       改成按内容宽度 + margin-right: auto：按钮盒子贴着文字，
+       焦点环自然跟着文字走；下拉箭头（::after 定位 right:4px）也正好落在文字后面。 */
+    flex: 0 0 auto !important;
     min-width: 0 !important;
     max-width: none !important;
-    margin: 0 10px 0 0 !important;
+    margin: 0 auto 0 0 !important;
     /* 复位全局 `button`（它现在是 <button>）：min-height: var(--control-h) 会让它
-       比顶栏还高，底色/边框/圆角也要清掉，只留文字。 */
+       比顶栏还高，底色/边框也要清掉，只留文字。
+       圆角保留 —— 焦点环要跟着它走。 */
     min-height: 0 !important;
     height: auto !important;
     border: 0 !important;
-    border-radius: 0 !important;
+    border-radius: var(--radius-sm) !important;
     background: transparent !important;
     box-shadow: none !important;
     /* 上下 padding 撑到 36px 触控高度；右侧给箭头留位 */
@@ -12805,6 +12812,22 @@ body.img-viewer-open { overflow: hidden; }
   color: var(--on-accent);
   font-size: 14px;
   font-weight: 700;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   答题卡「收起/展开」按钮：任何宽度下都不许文字溢出
+   ──────────────────────────────────────────────────────────────────────────
+   用户报「手机窄窗口下展开答题卡后，收起答题卡按钮文字超出了」。
+   我在 300→1390px 扫了一遍（展开态 + 收起态）都没复现 —— 按钮 242px、
+   文字 55px，余量很大。所以这里加的是**兜底**：
+   即使某些设备字体更宽 / 有缩放，也只会省略号收尾，不会顶出按钮外。
+   ══════════════════════════════════════════════════════════════════════════ */
+.answer-card-collapse-btn {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  flex-shrink: 0;
 }
 
 [data-theme="ink"] .submit-result {
