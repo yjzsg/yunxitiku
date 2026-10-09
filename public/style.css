@@ -607,9 +607,11 @@ body.is-admin .admin-only {
   padding: 6px 12px;
 }
 
-.account-box button:hover {
-  background: rgba(0, 0, 0, 0.3);
-  color: var(--on-accent);
+@media (hover: hover) {
+  .account-box button:hover {
+    background: rgba(0, 0, 0, 0.3);
+    color: var(--on-accent);
+  }
 }
 
 .toolbar,
@@ -1430,10 +1432,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   box-shadow: none;
 }
 
-.tag-presets button:hover {
-  border-color: var(--primary-200);
-  background: var(--primary-50);
-  color: var(--primary-ink);
+@media (hover: hover) {
+  .tag-presets button:hover {
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+    color: var(--primary-ink);
+  }
 }
 
 .tag-editor input,
@@ -2126,9 +2130,11 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.analysis-grid div:hover {
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .analysis-grid div:hover {
+    box-shadow: var(--shadow-sm);
+    transform: translateY(-1px);
+  }
 }
 
 .analysis-grid b {
@@ -2415,10 +2421,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
-.training-card:hover {
-  transform: translateY(-1px);
-  border-color: var(--primary-200);
-  box-shadow: var(--shadow-sm);
+@media (hover: hover) {
+  .training-card:hover {
+    transform: translateY(-1px);
+    border-color: var(--primary-200);
+    box-shadow: var(--shadow-sm);
+  }
 }
 
 .training-card span {
@@ -2502,10 +2510,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.training-history-row:hover {
-  transform: translateY(-1px);
-  border-color: var(--primary-200);
-  box-shadow: var(--shadow-xs);
+@media (hover: hover) {
+  .training-history-row:hover {
+    transform: translateY(-1px);
+    border-color: var(--primary-200);
+    box-shadow: var(--shadow-xs);
+  }
 }
 
 .training-history-row.active {
@@ -3089,10 +3099,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
 }
 
-.bank-editor-result:hover {
-  border-color: rgba(var(--primary-rgb), .35);
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .bank-editor-result:hover {
+    border-color: rgba(var(--primary-rgb), .35);
+    box-shadow: var(--shadow-sm);
+    transform: translateY(-1px);
+  }
 }
 
 .bank-editor-result.active {
@@ -3185,8 +3197,10 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   font-size: 18px;
 }
 
-.admin-table tbody tr:hover td {
-  background: var(--card-soft);
+@media (hover: hover) {
+  .admin-table tbody tr:hover td {
+    background: var(--card-soft);
+  }
 }
 
 .admin-table tbody tr:last-child td {
@@ -3222,10 +3236,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-.admin-user-card:hover {
-  border-color: var(--primary-200);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .admin-user-card:hover {
+    border-color: var(--primary-200);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-1px);
+  }
 }
 
 .admin-user-card.is-disabled {
@@ -3422,10 +3438,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   background: var(--danger-50);
 }
 
-.admin-actions .danger:hover {
-  color: var(--danger-800);
-  border-color: var(--danger-300);
-  background: var(--danger-100);
+@media (hover: hover) {
+  .admin-actions .danger:hover {
+    color: var(--danger-800);
+    border-color: var(--danger-300);
+    background: var(--danger-100);
+  }
 }
 
 .modal-backdrop {
@@ -3548,10 +3566,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   box-shadow: none;
 }
 
-.print-choice-grid button:hover {
-  border-color: var(--primary-200);
-  background: var(--primary-50);
-  box-shadow: var(--shadow-xs);
+@media (hover: hover) {
+  .print-choice-grid button:hover {
+    border-color: var(--primary-200);
+    background: var(--primary-50);
+    box-shadow: var(--shadow-xs);
+  }
 }
 
 .print-choice-grid b {
@@ -4833,9 +4853,15 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   }
 
+}
+
+@media screen and (hover: hover) {
   .option:hover {
     transform: translateY(-1px);
   }
+}
+
+@media screen {
 
   .option b,
   .option span {
@@ -4939,9 +4965,15 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     background: var(--bg);
   }
 
+}
+
+@media screen and (hover: hover) {
   .admin-table tbody tr:hover td {
     background: var(--bg);
   }
+}
+
+@media screen {
 
   .admin-actions button:disabled,
   .admin-bank-table button:disabled {
@@ -4989,10 +5021,16 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
       border-color: var(--primary);
     }
 
+  }
+
+  @media (min-width: 761px) and (hover: hover) {
     #submitBtn:hover {
       background: var(--primary-600);
       color: var(--on-accent);
     }
+  }
+
+  @media (min-width: 761px) {
   }
 
   @media (max-width: 760px) {
@@ -6787,11 +6825,17 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     box-shadow: none;
   }
 
+}
+
+@media screen and (min-width: 761px) and (hover: hover) {
   body.answer-card-collapsed .answer-card-collapse-btn:hover {
     background: var(--primary-100);
     border-color: var(--primary);
     color: var(--primary-ink);
   }
+}
+
+@media screen and (min-width: 761px) {
 
   body.answer-card-collapsed .answer-card-collapse-btn::before {
     content: "\25A4";
@@ -9012,10 +9056,12 @@ body.answer-card-collapsed .answer-card-collapse-btn::before {
   margin-right: 7px;
 }
 
-body.answer-card-collapsed .answer-card-collapse-btn:hover {
-  background: var(--primary-600) !important;
-  border-color: var(--primary-ink) !important;
-  box-shadow: 0 3px 12px rgba(var(--primary-600-rgb), 0.45) !important;
+@media (hover: hover) {
+  body.answer-card-collapsed .answer-card-collapse-btn:hover {
+    background: var(--primary-600) !important;
+    border-color: var(--primary-ink) !important;
+    box-shadow: 0 3px 12px rgba(var(--primary-600-rgb), 0.45) !important;
+  }
 }
 
 @media screen and (max-width: 760px) {
@@ -9546,9 +9592,13 @@ body.answer-card-collapsed .answer-card-collapse-btn:hover {
   padding: 9px 12px;
   border-top: 1px solid rgba(var(--slate-rgb), 0.35);
 }
-.admin-bank-table .bank-group-row:hover td {
-  background: var(--surface-4);
+
+@media (hover: hover) {
+  .admin-bank-table .bank-group-row:hover td {
+    background: var(--surface-4);
+  }
 }
+
 .admin-bank-table .bank-group-row .bank-group-toggle {
   display: inline-block;
   margin: 0 6px 0 0;
@@ -10840,9 +10890,11 @@ body {
   color: var(--nav-fg);
 }
 
-.main-nav .account-box button:hover {
-  background: var(--nav-pill-hover);
-  color: var(--nav-fg);
+@media (hover: hover) {
+  .main-nav .account-box button:hover {
+    background: var(--nav-pill-hover);
+    color: var(--nav-fg);
+  }
 }
 
 /* 顶栏里的主题切换：原来是写死的白/黑半透明，改成 nav 令牌 */
@@ -11032,16 +11084,18 @@ body {
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
 
-.exam-history-card:hover,
-.trend-panel:hover,
-.study-card:hover,
-.plan-today-card:hover,
-.admin-data-card:hover,
-.admin-user-card:hover,
-.bank-report:hover,
-.plan-day:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--glass-highlight), var(--glass-shade), var(--lift-shadow);
+@media (hover: hover) {
+  .exam-history-card:hover,
+  .trend-panel:hover,
+  .study-card:hover,
+  .plan-today-card:hover,
+  .admin-data-card:hover,
+  .admin-user-card:hover,
+  .bank-report:hover,
+  .plan-day:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--glass-highlight), var(--glass-shade), var(--lift-shadow);
+  }
 }
 
 /* 列表行 / 题号格 / 训练卡：本来没有玻璃三件套，直接换投影 */
@@ -11492,8 +11546,10 @@ body {
   transition: background-color 0.16s ease, border-color 0.16s ease;
 }
 
-.main-nav .account-box .account-btn:hover {
-  background: var(--nav-pill-hover);
+@media (hover: hover) {
+  .main-nav .account-box .account-btn:hover {
+    background: var(--nav-pill-hover);
+  }
 }
 
 .main-nav .account-box .account-btn[aria-expanded="true"] {
@@ -11657,8 +11713,10 @@ body {
   box-shadow: none !important;
 }
 
-.main-nav .account-box .account-menu #logoutBtn:hover {
-  background: var(--surface-4) !important;
+@media (hover: hover) {
+  .main-nav .account-box .account-menu #logoutBtn:hover {
+    background: var(--surface-4) !important;
+  }
 }
 
 /* ── 手机端：顶栏只留「工具 + 账号」两个图标 ─────────────────────────── */
@@ -12450,8 +12508,10 @@ body.img-viewer-open { overflow: hidden; }
   background: var(--bg);
 }
 
-.admin-table tbody tr:hover td:last-child {
-  background: var(--card-soft);
+@media (hover: hover) {
+  .admin-table tbody tr:hover td:last-child {
+    background: var(--card-soft);
+  }
 }
 
 [data-theme="ink"] .admin-table th:last-child,
@@ -12464,8 +12524,10 @@ body.img-viewer-open { overflow: hidden; }
   background: var(--ink-l1);
 }
 
-[data-theme="ink"] .admin-table tbody tr:hover td:last-child {
-  background: var(--ink-l1);
+@media (hover: hover) {
+  [data-theme="ink"] .admin-table tbody tr:hover td:last-child {
+    background: var(--ink-l1);
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -12517,9 +12579,15 @@ body.img-viewer-open { overflow: hidden; }
     margin-bottom: 0;
   }
 
+}
+
+@media screen and (max-width: 1279px) and (hover: hover) {
   .admin-correction-table tbody tr:hover td {
     background: transparent;    /* hover 整行变色在卡片模式下会很花 */
   }
+}
+
+@media screen and (max-width: 1279px) {
 
   .admin-correction-table td {
     display: grid;
