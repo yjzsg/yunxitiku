@@ -55,6 +55,14 @@ builder.Services.Configure<FormOptions>(options =>
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Limits.MaxRequestBodySize = 2L * 1024 * 1024 * 1024;
+    /* 请求行（METHOD + URI + 版本）上限，Kestrel 默认只有 8192 字节，超了直接 HTTP 414。
+       错题本会把全部错题 id 拼进查询串（/api/questions?...&ids=a,b,c,...），实测 800 条约
+       8188 字节还过得去，850 条 8738 字节就已经 414 —— 阈值正好卡在默认值上。
+       这是**纵深防御**，不能替代前端分批：前端已改为分批请求，这里放宽只是让「一批稍大一点」
+       不至于被 Kestrel 在到达路由前就掐掉。ids 再翻几倍，32KB 同样会被顶穿，所以两边都得有。
+       另外：若部署在 Nginx/Apache/IIS/Cloudflare 之后，那些组件的请求行（URL）上限通常比这里
+       更小，会在到达 Kestrel 之前就返回 414 —— 只改这里挡不住，反代侧也得同步放宽。 */
+    options.Limits.MaxRequestLineSize = 32 * 1024;
 });
 builder.Services.AddSingleton<AppPaths>();
 builder.Services.AddSingleton<AuthStore>();
@@ -3190,8 +3198,13 @@ sealed class QuestionBank
 
     public IEnumerable<object> GetChapters(int courseId)
     {
+        /* 这里**故意不选** ch.icount：它是死列（脏数据），与实算普遍对不上——
+           课程 20 的 213 个章节里 104 个不一致（sum(icount)=23252 vs sum(实算)=9155，
+           例：章节 570671 的 icount=15 而实算 21）；全库 773 个章节里 279 个不一致
+           （sum(icount)=75551 vs sum(实算)=29738）。
+           questionCount 一律用下面的 subject_count 子查询实算；别再「顺手」把 icount 加回来。 */
         var rows = Query(@"
-            select ch.ichapterid, ch.cchaptername, ch.cchaptercode, ch.igrade, ch.itype, ch.icount,
+            select ch.ichapterid, ch.cchaptername, ch.cchaptercode, ch.igrade, ch.itype,
                    (select count(*) from coursesubject s where s.ichapterid=ch.ichapterid and coalesce(s.bstopflag, 0)=0) as subject_count
             from coursechapter ch
             where ch.icourseid=@courseId and coalesce(ch.bstopflag, 0)=0
@@ -4141,10 +4154,16 @@ sealed class ChapterMapStore
         var byId = new Dictionary<int, ChapterNode>(nodes.Count);
         foreach (var node in nodes) byId[node.Id] = node;
 
-        // 父节点判定必须和前端 buildChapterTree 逐字一致：
+        // 父节点判定与前端 buildChapterTree 的**意图**一致：
         // 同课程 + 同 itype + grade 差 1 + 父 code 是子 code 的前缀且更短，
         // 并在多个候选里取 **code 最长**的那个（前端是 .sort(b.code.length - a.code.length)[0]）。
         // 取第一个匹配是不对的：题库里同一层级可能有两个前缀都成立，选错就会挂到别的章下。
+        //
+        // 但两边**并非逐字一致**：前端 app.js 是 node.code.startsWith(item.code)（大小写敏感），
+        // 这里（以及 GetChapterSubtree 里那处）用的是 StartsWith(..., OrdinalIgnoreCase)（不敏感）。
+        // 当前题库 773/773 条 cchaptercode 全是纯数字，两种语义逐行算父节点差异 0 行，因此实际等价。
+        // 若将来出现含字母的 code，前后端行为就会分叉：例如 "0139A02".startsWith("0139a") 前端为
+        // false、后端为 true。届时再统一语义，而不是现在改比较逻辑——改了没收益，还可能引入回归。
         foreach (var node in nodes)
         {
             if (node.Code.Length == 0) continue;

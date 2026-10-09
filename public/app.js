@@ -42,7 +42,11 @@ const state = {
   answerCardUserTouched: false,
   mobileTagsOpen: false,
   tagPanelQuestionId: 0,
-  wrongFilters: { status: "active", minCount: "1", period: "all" },
+  /* 错题本筛选。`review` 默认 "all"：错题本的第一诉求是「我错过的题在哪」，
+     默认串「只看到期」会把刚答错的题全滤掉（stage 0 的到期日是答错**次日**，
+     今天答错的今天永远不到期）→ 列表空、请求都不发，用户说「错题看不了」。
+     「到期」作为可选筛选保留在下拉里。 */
+  wrongFilters: { review: "all", status: "active", minCount: "1", period: "all" },
   tagFilter: "",
   answerCardPage: 0,
   answerCardPageSize: 50,
@@ -85,6 +89,11 @@ const state = {
   expandedChapters: new Set(),
   examExpandedChapters: new Set(),
   examSelectedChapters: null,
+  /* 组卷章节里被**显式取消**的子树（含该节点自身）。
+     「父章勾选 = 整棵子树入卷」是既有语义，要保留；但用户手动取消的子章必须能从
+     展开结果里减掉 —— 否则 normalizeExamChapterIds 会把「祖先已选中」的子项剔除，
+     父 id 仍然进卷，被取消章的题又会回到卷子里。 */
+  examExcludedChapters: new Set(),
   analysisExpandedChapters: new Set(),
   chapterAutoExpanded: false,
   smartPracticeFreshStart: false,
@@ -506,7 +515,9 @@ function ensureWrongReviewFields(record = {}, q = null) {
   record.wrongAt ||= record.at || now;
   record.lastReviewAt ||= record.at || record.wrongAt;
   record.stage = reviewStage(record);
-  record.count = Number(record.count || 1);
+  /* 不预置 1：markResult 的「答错」分支要做 count+1，预置 1 会让第一次答错就变成 2
+     （「错误次数 ≥2」筛选因此把只错一次的题也算成反复错）。缺省值读的时候按 1 处理。 */
+  record.count = Number(record.count || 0);
   record.resolved = !!record.resolved;
   return record;
 }
@@ -589,10 +600,17 @@ function allocateExamCounts(part, chapters) {
 
 function selectedChapterIds(chapter = state.currentChapter) {
   if (!chapter) return [];
+  const excluded = state.examExcludedChapters;
   const ids = new Set([Number(chapter.id)]);
   const visit = (node) => {
     (node.children || []).forEach((child) => {
-      ids.add(Number(child.id));
+      const childId = Number(child.id);
+      /* 被显式取消的子章：连它自己的子树一起从展开结果里减掉。
+         「父选中 = 整棵子树入卷」的语义保留，但用户取消过的那一支不再入卷 ——
+         否则 normalizeExamChapterIds 把「祖先已选中」的子项一剔除，父 id 照样进卷，
+         被取消章的题又会被抽回来。 */
+      if (excluded && excluded.size && excluded.has(childId)) return;
+      ids.add(childId);
       visit(child);
     });
   };
@@ -777,8 +795,22 @@ function examChaptersFromIds(ids) {
     .filter(Boolean)
     .map((chapter) => ({
       ...chapter,
-      questionCount: chapterQuestionCount(chapter),
+      questionCount: examEffectiveQuestionCount(chapter),
     }));
+}
+
+/* 组卷用的题量：与 selectedChapterIds 同一口径 —— 被显式取消的子树不算进来，
+   否则父章会按「含被取消子章」的题量多分到题，再靠兜底填充去别处凑。 */
+function examEffectiveQuestionCount(chapter) {
+  const excluded = state.examExcludedChapters;
+  const node = state.chapterTreeIndex?.get(Number(chapter.id)) || chapter;
+  let total = Number(node.questionCount || 0);
+  for (const child of node.children || []) {
+    const childId = Number(child.id);
+    if (excluded && excluded.size && excluded.has(childId)) continue;
+    total += examEffectiveQuestionCount(child);
+  }
+  return total;
 }
 
 /* 每题分值。优先级：
@@ -870,7 +902,9 @@ function renderExamChapterTree() {
 
 function renderExamChapterNode(chapter, level) {
   const total = chapterTotalCount(chapter);
-  if (total <= 0 || level > 2) return "";
+  /* 不再按层级截断：旧实现 level>2 直接返回空串，三级及更深的章在组卷界面上
+     **根本渲染不出来**，用户没法单独排除它们（只能连整棵子树一起取消）。 */
+  if (total <= 0) return "";
   const hasChildren = (chapter.children || []).some((child) => chapterTotalCount(child) > 0);
   const expanded = state.examExpandedChapters.has(Number(chapter.id));
   return `
@@ -905,13 +939,21 @@ function bindExamChapterTree() {
       const id = Number(input.value || 0);
       const node = state.chapterTreeIndex?.get(id);
       state.examSelectedChapters ||= new Set();
-      if (input.checked) state.examSelectedChapters.add(id);
-      else state.examSelectedChapters.delete(id);
-      if (!node) return;
-      childChapterIds(node).forEach((childId) => {
-        if (input.checked) state.examSelectedChapters.add(childId);
-        else state.examSelectedChapters.delete(childId);
-        const child = document.querySelector(`[data-exam-chapter][value="${childId}"]`);
+      state.examExcludedChapters ||= new Set();
+      /* 勾选/取消都向整棵子树传播，并且**同时**维护 excluded：
+         取消 = 显式排除（要从父章展开里减掉），勾选 = 撤销排除。
+         只维护 selected 的话，「父勾、子取消」丢不掉这条信息：
+         normalizeExamChapterIds 会把「祖先已选中」的子项剔掉，父 id 仍然入卷。 */
+      const touched = [id].concat(node ? childChapterIds(node) : []);
+      touched.forEach((chapterId) => {
+        if (input.checked) {
+          state.examSelectedChapters.add(chapterId);
+          state.examExcludedChapters.delete(chapterId);
+        } else {
+          state.examSelectedChapters.delete(chapterId);
+          state.examExcludedChapters.add(chapterId);
+        }
+        const child = document.querySelector(`[data-exam-chapter][value="${chapterId}"]`);
         if (child) child.checked = input.checked;
       });
     };
@@ -938,8 +980,13 @@ function wrongRecordMatchesFilter(id, item, courseStore) {
 
 function getWrongRecordsForCurrentCourse(courseStore = userCourseStore()) {
   const records = new Map();
+  /* 顶层错题记录的 courseId 允许缺失：老数据（以及早期版本写下的记录）没有这个字段，
+     用严格相等过滤会把它们全部丢掉，再从 courseStore.wrong 合成一条
+     {at:"",wrongAt:"",lastReviewAt:"",stage:0,count:1} 的 stub ——
+     真实的 stage / count / lastReviewAt 全部归零，SRS 永远算不到期。 */
+  const currentCourseId = Number(state.currentCourse?.id || 0);
   Object.entries(state.storage.wrong || {})
-    .filter(([, item]) => Number(item?.courseId || 0) === Number(state.currentCourse?.id || 0))
+    .filter(([, item]) => !item?.courseId || Number(item.courseId) === currentCourseId)
     .forEach(([id, item]) => records.set(String(id), item || {}));
   Object.keys(courseStore.wrong || {}).forEach((id) => {
     if (!records.has(String(id))) {
@@ -1733,6 +1780,7 @@ async function selectCourse(course, options = {}) {
     state.analysisCourseId = 0;
     state.examExpandedChapters = new Set();
     state.examSelectedChapters = null;
+    state.examExcludedChapters = new Set();
     state.analysisExpandedChapters = new Set();
   }
   const restoreChapterId = options.restoreChapter ? Number(state.storage.profile.lastChapterId || 0) : 0;
@@ -1761,7 +1809,10 @@ async function selectCourse(course, options = {}) {
   const courseLabel = [course.category, course.subcategory].filter(Boolean).join(" ");
   setText("courseMeta", `${courseLabel ? `${courseLabel} · ` : ""}${course.questionCount}题 · 更新 ${formatRelativeTime(course.changedAt)}`);
   renderCourses();
-  await loadChapters();
+  /* 章节读取失败**不再**中断整条流程（旧实现会静默卡在「正在读取章节...」）：
+     面板已由 loadChapters 渲染成错误态 + 重试入口，这里补一条 toast 并把后面的
+     题型/题单继续做完 —— 章节挂了也还能做题。 */
+  await loadChapters().catch((err) => toast("章节读取失败：" + err.message));
   if (transitionId !== state.modeTransitionId) return;
   if (restoreChapterId) {
     const chapter = state.chapters.find((item) => item.id === restoreChapterId);
@@ -1770,26 +1821,121 @@ async function selectCourse(course, options = {}) {
   }
   if (!await loadTypes()) return;
   if (transitionId !== state.modeTransitionId) return;
-  await loadQuestions();
+  await loadQuestions().catch((err) => toast(err.message));
   if (transitionId !== state.modeTransitionId) return;
   if (!isAdmin() && options.closePicker) setCoursePicker(false);
   updatePickerHint();
   scheduleSave();
 }
 
+/* 最近一次**成功**读到章节的科目 id。切科目失败时用它判断
+   「当前章节是不是别的科目的」，别把上一个科目的 chapter 留在界面上。 */
+let chaptersCourseId = 0;
+/* 非空 = 章节读取失败，面板要显示错误态 + 重试入口。
+   用标志位而不是「只在 catch 里画一次」：失败后别的流程还会调 renderChapters()
+   （例如 backfillQuestionChapters 的回调），空树会被画成「全部章节 (0/0)」，
+   错误态和重试按钮就被冲掉了。 */
+let chaptersLoadError = "";
+
 async function loadChapters() {
   const courseId = state.currentCourse?.id;
   if (courseId == null) return;
+  const previousCourseId = chaptersCourseId;
   $("chapterList").innerHTML = `<div class="muted">正在读取章节...</div>`;
-  const chapters = await api(`/api/chapters?courseId=${courseId}`);
+  let chapters;
+  try {
+    chapters = await api(`/api/chapters?courseId=${courseId}`);
+  } catch (err) {
+    /* 旧实现没有 try/catch：失败时 selectCourse 的后半段（题型/题单/提示）全部不执行，
+       面板永久停在「正在读取章节...」，同时 state.chapters / chapterTreeRoots /
+       chapterTreeIndex / chapterDoneIndex 还是**上一个科目的**数据 ——
+       界面既没有错误提示也没有重试入口，只能刷新页面。 */
+    if (Number(state.currentCourse?.id) !== Number(courseId)) return;
+    state.chapters = [];
+    state.chapterTreeRoots = [];
+    state.chapterTreeIndex = new Map();
+    state.chapterDoneIndex = new Map();
+    state.expandedChapters = new Set();
+    state.chapterAutoExpanded = false;
+    chapterPathCache = new Map();
+    chapterPathCacheRoots = null;
+    if (Number(previousCourseId) !== Number(courseId)) {
+      state.currentChapter = null;
+      state.storage.profile.lastChapterId = 0;
+    }
+    chaptersCourseId = 0;
+    chaptersLoadError = err?.message || "未知错误";
+    renderChapterLoadError(chaptersLoadError);
+    throw err;
+  }
   if (Number(state.currentCourse?.id) !== Number(courseId)) return;
+  chaptersCourseId = Number(courseId);
+  chaptersLoadError = "";
   state.chapters = chapters;
   state.expandedChapters = new Set();
   state.chapterAutoExpanded = false;
   renderChapters();
 }
 
+/* 章节读取失败时的面板：一句人话 + 重试入口（复用 .chapter-item 的列表样式）。 */
+function renderChapterLoadError(message) {
+  const box = $("chapterList");
+  if (!box) return;
+  box.innerHTML = "";
+  const hint = document.createElement("div");
+  hint.className = "muted";
+  hint.textContent = `章节读取失败：${message}`;
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "chapter-item";
+  retry.innerHTML = `<span>重新读取章节</span><small>(点这里重试)</small>`;
+  retry.onclick = () => loadChapters().catch((err) => toast("章节读取失败：" + err.message));
+  box.appendChild(hint);
+  box.appendChild(retry);
+  updatePickerHint();
+}
+
+/* 题库被整体替换（上传 / 拉取更新）后，章节相关状态必须一起清干净。
+   旧实现只清 chapters/types/questions，chapterTreeRoots / chapterTreeIndex /
+   chapterDoneIndex / currentChapter / profile.lastChapterId 和章节面板 DOM 全部残留：
+   树是旧库、当前章节指向旧 id、题单清 0 之后点「下一题」零请求，界面等于死掉。 */
+function resetChapterState(options = {}) {
+  state.chapters = [];
+  state.chapterTreeRoots = [];
+  state.chapterTreeIndex = new Map();
+  state.chapterDoneIndex = new Map();
+  state.expandedChapters = new Set();
+  state.chapterAutoExpanded = false;
+  state.currentChapter = null;
+  state.currentIndex = -1;
+  state.storage.profile.lastChapterId = 0;
+  chaptersCourseId = 0;
+  chaptersLoadError = "";
+  chapterPathCache = new Map();
+  chapterPathCacheRoots = null;
+  if (options.placeholder !== false) {
+    const box = $("chapterList");
+    if (box) box.innerHTML = `<div class="muted">正在读取章节...</div>`;
+  }
+}
+
+/* 整体替换题库后刷新章节树：当前科目还在的话重新读一次（树/统计/面板 DOM 全部重建）。 */
+async function reloadChaptersAfterBankChange() {
+  if (!state.currentCourse) {
+    const box = $("chapterList");
+    if (box) box.innerHTML = `<div class="muted">请选择科目</div>`;
+    return;
+  }
+  await loadChapters().catch((err) => toast("章节读取失败：" + err.message));
+}
+
 function renderChapters() {
+  /* 上次读取失败、而且树是空的 → 保持错误态，别画成「全部章节 (0/0)」。
+     （失败后 backfillQuestionChapters 等流程还会回调 renderChapters） */
+  if (chaptersLoadError && !state.chapters.length) {
+    renderChapterLoadError(chaptersLoadError);
+    return;
+  }
   $("chapterList").innerHTML = "";
   const courseStore = userCourseStore();
 
@@ -1803,7 +1949,11 @@ function renderChapters() {
   const all = document.createElement("button");
   all.className = "chapter-item" + (!state.currentChapter ? " active" : "");
   const allTotal = roots.reduce((sum, chapter) => sum + chapterTotalCount(chapter), 0);
-  const allDone = Object.keys(courseStore.done || {}).length;
+  /* 分子和分母必须同口径：分母是「章节树上归集的题量」，分子就只能数
+     **能映射到树上的**已做题（buildChapterDoneIndex 的结果）。
+     旧实现用 Object.keys(done).length（所有已做题），映射不到的题只进「全部章节」的分子，
+     于是「全部章节」和各子章节的合计对不上（长期表现为问题 4）。 */
+  const allDone = roots.reduce((sum, chapter) => sum + (state.chapterDoneIndex.get(Number(chapter.id)) || 0), 0);
   all.innerHTML = `<span>全部章节</span><small>(${allDone}/${allTotal})</small>`;
   all.onclick = () => selectChapter(null);
   $("chapterList").appendChild(all);
@@ -1817,6 +1967,21 @@ function renderChapters() {
   ensureChapterExpansion(roots);
   renderChapterNodes(roots, $("chapterList"));
   updatePickerHint();
+}
+
+/* 答完题后刷新章节树的「已做/总数」。
+   旧实现完全靠 /api/question-chapters 的异步响应**顺带**触发一次 renderChapters，
+   而那个回填每门课只跑一次：之后答题再也不会重渲染，面板永远停在旧数字
+   （实测同一秒内 done=6，界面还写「全部章节(0/9155)」）。
+   节流是为了别每选一个选项就重建整棵树的 DOM。 */
+let chapterRefreshTimer = null;
+function scheduleChapterRefresh(delay = 400) {
+  if (chapterRefreshTimer) return;
+  chapterRefreshTimer = setTimeout(() => {
+    chapterRefreshTimer = null;
+    if (!state.chapters.length || !$("chapterList")) return;
+    renderChapters();
+  }, delay);
 }
 
 function buildChapterTree(chapters) {
@@ -1846,6 +2011,19 @@ function buildChapterTree(chapters) {
 }
 
 function ensureChapterExpansion(roots) {
+  /* 恢复上次章节时，把它所在的**整条祖先链**展开。
+     旧实现只自动展开 roots[0]：切回上次的三级章（属于第 2 个根）时，
+     那一行根本没进 DOM（不是滚出视口），而 pickerHint 还写着「已选：第一节 概述」——
+     用户看到的是「说选了却一行都不高亮」。 */
+  const currentId = Number(state.currentChapter?.id || 0);
+  if (currentId) {
+    const path = findChapterPath(roots, currentId);
+    if (path.length > 1) {
+      path.slice(0, -1).forEach((node) => state.expandedChapters.add(Number(node.id)));
+      state.chapterAutoExpanded = true;
+      return;
+    }
+  }
   if (!state.chapterAutoExpanded && !state.expandedChapters.size && roots[0]) {
     state.expandedChapters.add(roots[0].id);
     state.chapterAutoExpanded = true;
@@ -2003,7 +2181,7 @@ async function loadTypes(options = {}) {
   state.typeRequestId = requestId;
   const courseId = Number(state.currentCourse.id);
   const params = new URLSearchParams({ courseId });
-  if (!options.ignoreChapter) applyChapterParams(params);
+  if (!options.ignoreChapter && !isIdListMode()) applyChapterParams(params);
   const types = await api(`/api/types?${params}`);
   if (requestId !== state.typeRequestId || Number(state.currentCourse?.id || 0) !== courseId) return false;
   state.types = types;
@@ -2065,7 +2243,11 @@ async function loadQuestions() {
     courseId: state.currentCourse.id,
     limit: String(effectiveLimit),
   });
-  applyChapterParams(params);
+  /* 错题本 / 收藏夹模式下**不叠加章节筛选**：这两个模式的题目集由 ids 决定，
+     而残留的 state.currentChapter（练习停在别的章节）会以 AND 的形式带上 chapterId，
+     后端 chapterId 与 ids 是 AND 关系 → 错题不在那个章节就返回空数组，
+     界面显示「当前无待复习错题」，而角标还写着「到期待复习(N)」。 */
+  if (!isIdListMode()) applyChapterParams(params);
   if ($("typeSelect").value) params.set("typeId", $("typeSelect").value);
   if (orderValue && orderValue !== "random") params.set("order", orderValue);
   const q = $("questionSearch").value.trim();
@@ -2082,12 +2264,15 @@ async function loadQuestions() {
       renderAll();
       return;
     }
-    params.set("ids", mergedIds.join(","));
     params.set("limit", String(Math.max(mergedIds.length, effectiveLimit)));
   }
 
   const requestedCourseId = Number(state.currentCourse?.id);
-  let items = await api(`/api/questions?${params}`);
+  /* ids 走查询串，必须分批：URL 一过 Kestrel 的请求行上限（默认 8192 字节，
+     约 850 个 8 位 id）服务端直接回 414、响应体为空，而 state.questions 会保留上一次
+     的题单、DOM 残留上一页，且没有任何提示。导出路径一直是按 100/批的，这里漏了。 */
+  let items = await fetchQuestionsByIds(params, mergedIds, () =>
+    requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId);
   if (requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId) return;
   // 记下 qid → chapterId，章节树的「已做/总数」靠它
   rememberQuestionChapters(items, courseStore);
@@ -2173,10 +2358,46 @@ function ensureAnalysisQuestionsInBackground() {
     });
 }
 
+/* 错题本 / 收藏夹：题目集由 id 列表决定，章节/标签这类「范围筛选」不参与。
+   叠上去只会把结果算成空集（chapterId 与 ids 在后端是 AND）。 */
+function isIdListMode() {
+  return state.mode === "wrong" || state.mode === "favorite";
+}
+
 function getTagFilterIds() {
+  if (isIdListMode()) return null;
   const label = state.tagFilter || $("tagSelect")?.value || "";
   if (!label) return null;
   return (state.storage.tags?.[label] || []).map(Number).filter(Boolean);
+}
+
+/* 按 ids 拉题。id 超过一批时**分批**请求再合并（沿用导出路径的 100/批）：
+   ids 全拼进查询串会顶穿服务端的请求行上限（Kestrel 默认 8192 字节）→ HTTP 414。
+   合并时按批次顺序拼接并按 id 去重，保持原来「一批返回什么顺序就是什么顺序」的语义。 */
+const QUESTION_IDS_BATCH_SIZE = 100;
+async function fetchQuestionsByIds(params, mergedIds, isStale = null) {
+  if (!mergedIds || mergedIds.length <= QUESTION_IDS_BATCH_SIZE) {
+    if (mergedIds) params.set("ids", mergedIds.join(","));
+    const items = await api(`/api/questions?${params}`);
+    return items || [];
+  }
+  const items = [];
+  const seen = new Set();
+  for (let i = 0; i < mergedIds.length; i += QUESTION_IDS_BATCH_SIZE) {
+    if (isStale && isStale()) return items;
+    const batch = mergedIds.slice(i, i + QUESTION_IDS_BATCH_SIZE);
+    const batchParams = new URLSearchParams(params);
+    batchParams.set("ids", batch.join(","));
+    batchParams.set("limit", String(batch.length));
+    const part = await api(`/api/questions?${batchParams}`);
+    for (const item of part || []) {
+      const id = Number(item?.id || 0);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      items.push(item);
+    }
+  }
+  return items;
 }
 
 function intersectIdFilters(a, b) {
@@ -2931,21 +3152,79 @@ function renderAll() {
   }
 }
 
-/* 空状态文案。错题本默认「待复习」只显示**已到期**的错题（SRS 第 0 阶段到期日是答错次日），
-   所以刚考完的错题在这里看不到 —— 旧文案只说「无待复习错题」，用户会以为错题没记上。 */
+/* 空状态文案。错题本里「列表是空的」有四种完全不同的原因，说错一种用户就会以为
+   错题没记上：
+     ① 一道错题都没有；
+     ② 有错题，但「复习/状态/错误次数」筛选把它们的挡光了（旧文案一律说
+        「当前无待复习错题」，于是出现「面板写着到期待复习(1)，列表说没有」的自相矛盾）；
+     ③ 当前复习任务（trainingSession.ids）里已经没有未做的题；
+     ④ 就是没题。
+   这里把 ①②③ 分开讲清楚。 */
+function daysUntilDate(date) {
+  /* 按「日历天」算，并减掉今天**已经过去**的时间：
+     旧实现用 startOfToday() 做基准再 ceil，明天下午到期的题会被说成「2 天后」。 */
+  const day = new Date(date.getTime());
+  day.setHours(0, 0, 0, 0);
+  return Math.max(1, Math.round((day.getTime() - startOfToday().getTime()) / 86400000));
+}
+
+function daysUntilReview(record) {
+  return daysUntilDate(reviewDueDate(record));
+}
+
 function buildEmptyMessage() {
-  if (state.mode !== "wrong" || (state.wrongFilters.review || "due") !== "due") {
+  if (state.mode !== "wrong") {
     return ["当前范围没有题目", "可以换章节、题型或清空搜索条件。"];
   }
-  const pending = getWrongRecordsForCurrentCourse(userCourseStore())
-    .filter(([, item]) => !item.resolved && !isReviewDue(item));
-  if (!pending.length) return ["当前无待复习错题", "可以切换为全部错题，或稍后按复习计划回来。"];
-  const soonest = Math.min(...pending.map(([, item]) => reviewDueDate(item).getTime()));
-  const days = Math.max(1, Math.ceil((soonest - startOfToday().getTime()) / 86400000));
-  return [
-    `有 ${pending.length} 道错题还没到复习时间`,
-    `最近一批将在 ${days} 天后进入复习；现在想看，把上方「复习」筛选切到「全部」。`,
-  ];
+  const filters = state.wrongFilters || {};
+  const review = filters.review || "all";
+  const courseStore = userCourseStore();
+  const all = getWrongRecordsForCurrentCourse(courseStore);
+  if (!all.length) {
+    return ["错题本里还没有错题", "答错的题会自动收进这里；也可以在题目上手动加入错题。"];
+  }
+  const pending = all.filter(([, item]) => !item.resolved && !isReviewDue(item));
+  if (review === "due" && pending.length) {
+    const soonest = Math.min(...pending.map(([, item]) => reviewDueDate(item).getTime()));
+    const days = daysUntilDate(new Date(soonest));
+    return [
+      `当前无「到期」待复习错题，但有 ${all.length} 道错题`,
+      `其中 ${pending.length} 道还没到复习时间，最近一批 ${days} 天后到期；把上方「复习」切到「全部」现在就能看。`,
+    ];
+  }
+  if (review === "future" && all.every(([, item]) => isReviewDue(item))) {
+    return [
+      `${all.length} 道错题已经到期，被「复习 = 未到期」挡住了`,
+      "把上方「复习」切到「全部」或「到期」即可看到。",
+    ];
+  }
+  if ((filters.status || "active") === "active" && !all.some(([id]) => !!courseStore.wrong?.[id])) {
+    return [
+      `${all.length} 道错题都已标记为「已解决」`,
+      "把上方「状态」切到「已解决」或「全部」即可看到。",
+    ];
+  }
+  if ((filters.status || "active") === "resolved" && all.some(([id]) => !!courseStore.wrong?.[id])) {
+    return [
+      "错题都还没解决，被「状态 = 已解决」挡住了",
+      "把上方「状态」切回「未解决」或「全部」。",
+    ];
+  }
+  const minCount = Number(filters.minCount || 1);
+  if (minCount > 1 && !all.some(([, item]) => Number(item.count || 1) >= minCount)) {
+    return [
+      `没有错够 ${minCount} 次的题`,
+      `当前 ${all.length} 道错题都只错了一次；把「错误次数」切回「全部次数」即可看到。`,
+    ];
+  }
+  const session = activeTrainingSession();
+  if (session?.mode === "wrong") {
+    return [
+      "本次复习任务的题都已经做完了",
+      "可以回「训练」开始一轮新的复习，或把上方筛选放宽。",
+    ];
+  }
+  return ["当前范围没有题目", "可以换题型或清空搜索条件。"];
 }
 
 function setPanelPage(active) {
@@ -3721,6 +4000,7 @@ function saveSubjectiveAnswer(q, answer) {
     state.answerVisible = true;
   }
   scheduleSave();
+  scheduleChapterRefresh();
   renderVerifyModeControls();
   renderAnswerCardPage({ updateNav: false });
   updateStats();
@@ -3756,6 +4036,7 @@ function chooseOption(q, label) {
     state.answerVisible = true;
   }
   scheduleSave();
+  scheduleChapterRefresh();
   renderQuestion();
 }
 
@@ -3775,6 +4056,7 @@ function markResult(q) {
     delete courseStore.wrong[q.id];
     if (state.mode === "wrong") {
       const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
+      record.courseId ||= state.currentCourse?.id;
       record.lastReviewAt = nowText();
       record.stage = Math.min(REVIEW_INTERVAL_DAYS.length - 1, reviewStage(record) + 1);
       record.resolved = record.stage >= REVIEW_INTERVAL_DAYS.length - 1;
@@ -3799,6 +4081,9 @@ function markResult(q) {
     delete courseStore.correct[q.id];
     courseStore.wrong[q.id] = true;
     const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
+    /* 落盘前补上 courseId：缺了它，下一次读错题本时这条记录会被旧版的严格相等过滤丢掉，
+       只能从 courseStore.wrong 合成 stub，stage/count/lastReviewAt 全丢 → 永远不到期。 */
+    record.courseId ||= state.currentCourse?.id;
     const wasResolved = !!record.resolved;
     record.at = nowText();
     record.wrongAt = nowText();
@@ -7371,15 +7656,15 @@ async function uploadAdminData(type, btn) {
       state.adminDataStatus = null;
       state.adminCourses = [];
       state.courses = [];
-      state.chapters = [];
       state.types = [];
       state.questions = [];
       state.currentCourse = null;
-      state.currentChapter = null;
+      resetChapterState();
       state.currentIndex = -1;
       await loadCourses();
       await loadAdminCourses().catch(() => {});
       state.adminView = "banks";
+      await reloadChaptersAfterBankChange();
     } else {
       await loadUsers();
     }
@@ -8096,15 +8381,32 @@ function renderExamHistoryDetails(item) {
 }
 
 /* 把当前组卷章节勾选写进 settings.examChapters（按科目 id 归档）。 */
+/* 把当前组卷章节勾选写进 settings.examChapters（按科目 id 归档）。
+   存 { ids, excluded }：只存 ids 的话，「父勾、子取消」的信息在重新进入考场时就丢了，
+   父章重新展开会把被取消的子章又算回卷子里。老格式（纯数组）继续可读。 */
 function persistExamChapters() {
   if (!state.currentCourse || isAdmin()) return;
   state.storage.settings ||= {};
   const map = state.storage.settings.examChapters && typeof state.storage.settings.examChapters === "object"
     ? state.storage.settings.examChapters
     : {};
-  map[String(state.currentCourse.id)] = Array.from(state.examSelectedChapters || []).map(Number).filter(Boolean);
+  map[String(state.currentCourse.id)] = {
+    ids: Array.from(state.examSelectedChapters || []).map(Number).filter(Boolean),
+    excluded: Array.from(state.examExcludedChapters || []).map(Number).filter(Boolean),
+  };
   state.storage.settings.examChapters = map;
   scheduleSave();
+}
+
+/* 读回组卷章节勾选，兼容旧格式（纯数组 = 没有排除信息）。 */
+function restoreExamChapters(courseId) {
+  const saved = state.storage.settings?.examChapters?.[String(courseId || 0)];
+  const ids = Array.isArray(saved) ? saved : Array.isArray(saved?.ids) ? saved.ids : null;
+  const excluded = Array.isArray(saved?.excluded) ? saved.excluded : [];
+  state.examExcludedChapters = new Set(excluded.map(Number).filter(Boolean));
+  state.examSelectedChapters = Array.isArray(ids) && ids.length
+    ? new Set(ids.map(Number).filter(Boolean))
+    : null;
 }
 
 function renderExamHome() {
@@ -8117,10 +8419,7 @@ function renderExamHome() {
   const parts = normalizeExamParts(rule);
   /* 组卷章节选择按科目记忆：换科目时重置（章节 id 不通用），回同一科目恢复上次勾选。
      存的是空数组（用户清空过但没组卷）时按「默认全选」处理。 */
-  const savedExamChapters = state.storage.settings?.examChapters?.[String(state.currentCourse?.id || 0)];
-  state.examSelectedChapters = Array.isArray(savedExamChapters) && savedExamChapters.length
-    ? new Set(savedExamChapters.map(Number).filter(Boolean))
-    : null;
+  restoreExamChapters(state.currentCourse?.id);
   $("questionBody").classList.add("hidden");
   $("emptyState").classList.remove("hidden");
   $("emptyState").innerHTML = `
@@ -8192,6 +8491,7 @@ function renderExamHome() {
   };
   $("examSelectAllChapters").onclick = () => {
     state.examSelectedChapters ||= new Set();
+    state.examExcludedChapters = new Set();
     document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
       input.checked = true;
       state.examSelectedChapters.add(Number(input.value || 0));
@@ -8200,6 +8500,7 @@ function renderExamHome() {
   };
   $("examSelectNoChapters").onclick = () => {
     state.examSelectedChapters.clear();
+    state.examExcludedChapters = new Set();
     document.querySelectorAll("[data-exam-chapter]").forEach((input) => input.checked = false);
     syncStartExamBtn(true);
   };
@@ -8700,12 +9001,15 @@ async function handleQuestionBankUpdateResult(result) {
     state.adminCourses = [];
     state.adminDataStatus = null;
     state.courses = [];
-    state.chapters = [];
     state.types = [];
     state.questions = [];
+    /* 章节相关的状态与面板 DOM 也得清 —— 树是旧库的话，「当前章节」会指向旧 id、
+       章节面板还显示旧库的章节，题单清 0 后点「下一题」零请求，界面等于死掉。 */
+    resetChapterState();
     await loadCourses();
     if (isAdmin()) await loadAdminCourses().catch(() => {});
     if (isAdmin() && state.adminView === "banks") renderAdminRows(state.adminRows, state.adminFailedCount);
+    await reloadChaptersAfterBankChange();
     return;
   }
   if (result.ok) {
@@ -9072,7 +9376,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       await loadTypes();
       if (transitionId !== state.modeTransitionId) return;
     }
-    await loadQuestions();
+    await loadQuestions().catch((err) => toast(err.message));
     if (transitionId !== state.modeTransitionId) return;
   };
 });
@@ -9206,7 +9510,14 @@ document.addEventListener("visibilitychange", () => {
     if (!state.submitted) saveExamDraft();
   }
 });
-document.querySelector('[data-action="refresh"]').onclick = () => loadCourses().then(() => toast("已重新读取本地题库"));
+/* 「刷新列表」：旧实现只 loadCourses()，章节树和章节面板一个字都不动
+   （实测点完 /api/chapters 请求 0 个）。章节是随题库一起变的，这里一并重读。 */
+document.querySelector('[data-action="refresh"]').onclick = () => {
+  loadCourses()
+    .then(() => reloadChaptersAfterBankChange())
+    .then(() => toast("已重新读取本地题库"))
+    .catch((err) => toast(err.message));
+};
 
 $("courseSearch").addEventListener("input", debounce(loadCourses));
 $("questionSearch").addEventListener("input", debounce(loadQuestions));
