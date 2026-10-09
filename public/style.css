@@ -13158,3 +13158,140 @@ textarea,
     transform: scale(0.98);
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机端答题卡：按钮回落 + 题号格放大（2026-10-09）
+   ──────────────────────────────────────────────────────────────────────────
+   上一轮为了「触控目标 ≥44px」把两个按钮从 26px 提到 44px，并为了抵消多出来的
+   36px 把 `.answer-card-wrap` 的上限补成 `min(214px, 36dvh)`（都在文件末尾）。
+   390×844 实测的后果：展开态三段 chrome（收起按钮 52 + 统计 23 + 翻页行 53）
+   + 内边距 22 = 150px，被 214px 的上限一掐，题号格只剩 96px = 2 行整 + 1 行切一半
+   （`childrenClipped: true`，卡片内容比卡片盒子还高 30px）。
+   用户反馈的正是这个：按钮太高、题号格太小。
+
+   这一节把空间从按钮挪给题号格：按钮 44 → 34px，题号格 96 → 129 / 172px，
+   卡片上限同时换成「自然高度 + 余量」，让题号格不再被 overflow:hidden 裁。
+   全部写在文件末尾，靠「同特异性 + 写在后面」覆盖，不改上面任何已有声明。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (max-width: 760px) {
+
+  /* ── ① 翻页按钮（上一页 / 下一页）：44 → 34px ──────────────────────────
+     被覆盖的是上一轮追加的裸 `.card-page-btn { min-height: 44px }`
+     （文件末尾 `@media (max-width: 760px)`，特异性同为 (0,1,0)）。
+     只动 min-height：宽度（实测 47px）、字号（11px）、padding 都不变，
+     文字不截断。34px 是「点击够用 / 不占地方」的折中，不回退到原来的 26px。 */
+  .card-page-btn {
+    min-height: 34px;
+  }
+
+  /* ── ② 「收起答题卡」：44 → 34px（**只改展开态**）──────────────────────
+     要压的是上一轮的
+       `body.answer-card-collapsed .answer-card-wrap .answer-card-collapse-btn`
+       两件套（特异性 (0,3,1) + !important）。
+     这里也写成 (0,3,1) + !important，靠顺序取胜；同时加 `:not(.answer-card-collapsed)`
+     把收起态排除在外 —— 收起态整条卡片就是 44px 高
+     （`body:not(.admin-view).answer-card-collapsed .answer-card-wrap` 的
+     min/max-height: 44px !important），按钮必须撑满它，压到 34px 反而空出 10px。
+     展开态的 padding 实测就是 0，所以不需要动 padding-block。 */
+  body:not(.answer-card-collapsed) .answer-card-wrap .answer-card-collapse-btn {
+    min-height: 34px !important;
+  }
+
+  /* ── ③ 题号格：96px（2 行）→ 172px（4 行）─────────────────────────────
+     格子实测 36×36、行距 43px（36 + gap 7），盒内还要扣掉 2px 上 / 5px 下内边距，
+     所以「N 行完整可见」= max-height ≥ 43N - 7 + 7：
+         3 行 → 129px      4 行 → 172px
+     取「整行数」而不是 140 / 160 这类近似值，是为了**不出现半行**：
+     129 时第 4 行的顶边落在盒子外，172 时第 5 行同理，都不会被切掉一半。
+     （改前 96px：第 3 行只露 8px，就是用户看到的「切了一半」。）
+     被覆盖的是 L8734 `.answer-card-wrap .card-page-content { max-height: 96px !important }`。 */
+  .answer-card-wrap .card-page-content {
+    max-height: 172px !important;
+  }
+
+  /* ── ④ 卡片总高上限：上一轮的 `min(214px, 36dvh)` 换掉 ────────────────
+     按钮各让出 10px 后，展开态 chrome = 内边距 22 + 收起按钮 (34+8) + 统计 (17+6)
+     + 翻页行 (36+7) = 130px，于是卡片自然高度：
+         4 行 → 130 + 172 = 302px
+         3 行 → 130 + 129 = 259px
+     上限给 310px：比 302 多 8px 余量，避免 1px 的取整误差就把第 4 行切掉。
+     max-height 只是上限，用不满的余量不占位置（不会把卡片撑高）。
+     `47dvh` 是矮屏护栏：640 上 = 300.8（仍 ≥ 259，3 行不裁），551 以下才可能裁。
+     ⚠️ 与上一轮那条的差别不只是数值：214px 是「靠压低卡片去补按钮」，
+     310px 是「按 chrome + 题号格的自然高度给足」，所以卡片是变高的 ——
+     这是用户「题号格再多几行」的直接代价，读题区由 `--answer-card-h` 预留同步让位。 */
+  body:not(.admin-view) .answer-card-wrap {
+    max-height: min(310px, 47dvh) !important;
+  }
+}
+
+/* ── ⑤ 矮屏（高度 ≤699px）退回 3 行 ────────────────────────────────────────
+   360×640 是最矮的常见机型：4 行要 302px 的卡片，读题区只剩约 124px，贴着
+   「≥120px」的下限；退回 3 行后卡片 259px，读题区约 167px。
+   按**视口高度**而不是宽度分流：同一台手机横竖屏、不同机型之间，变化的都是高度。
+   分界线 699：4 行分支在 700px 高时 47dvh = 329 > 302，永远留有余量。 */
+@media screen and (max-width: 760px) and (max-height: 699px) {
+  .answer-card-wrap .card-page-content {
+    max-height: 129px !important;
+  }
+}
+
+/* ── ⑥ 极矮屏（高度 ≤599px）再退一步：2 整行 ──────────────────────────────
+   展开态固定 chrome 是 130px，题号格每行 43px，读题区（`questionView`）实测
+   = 视口高 − 214 − 卡片高。要在 3 行下保住「读题区 ≥120px」：
+       130 + 129 + 120 = 379 ≤ 视口高 − 214  →  视口高 ≥ 593
+   所以 320×568 这类屏上「3 行 + 读题区 120px」**算术上做不到**，只能二选一。
+   按「读题区不低于 120px」的底线让步：这里退回 2 整行（86px = 43×2 − 7 + 7）。
+   ⚠️ 这不是回到改前的样子：改前 320×568 的上限 min(214px,30dvh)=204.5px 把
+   卡片内容裁到只剩 1 行 + 半行（实测 `childrenClipped: true`）；现在是 2 整行、
+   不裁、读题区实测 139px。 */
+@media screen and (max-width: 760px) and (max-height: 599px) {
+  .answer-card-wrap .card-page-content {
+    max-height: 86px !important;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机端答题卡：预留量里白扔的 71px 还给读题区（2026-10-09 第二轮）
+   ──────────────────────────────────────────────────────────────────────────
+   上一轮把卡片上限从 214px 放到「自然高度 + 余量」（310px），题号格 4 行不裁了，
+   代价是读题区从 416px 掉到 329px —— 390×844 上第 4 个选项 D 的底边（410）
+   落在读题区可视底边（394）之下，被拦腰截断。
+
+   实测（390×844，答题卡展开）：
+       卡片高 301 = --answer-card-h
+       .question-pane padding-bottom = 317 = calc(301 + 16)   ← L11173 的公式
+       .question-pane 底 765 ／ 卡片顶 535 ／ 卡片底 836
+       .question-actions 底 448 = 765 − 317
+       → 「按钮行底」到「卡片顶」的空白 = 535 − 448 = 87px
+
+   87px 的来源：L11173 的 `card-h + 16` 假设 **pane 底边 ≈ 卡片底边**。
+   >760px 确实如此（没有底部标签栏，两者都贴视口底边，+16 就是卡片
+   `bottom: 8px` 的偏移 + 8px 间隙）。但 ≤760px 上：
+      · .question-pane 底 = 视口底 − 79px（.app-shell 的 padding-bottom 给底部标签栏留位）
+      · 卡片是 `position: fixed; bottom: 8px`，比 pane 底边还低 71px
+   → 16px 的余量实际变成 87px 的白扔空间。
+
+   ⚠️ 修法不是把卡片抬上去：那也能让公式成立，但卡片要上移 71px，
+   390×844 读题区反而只剩 383px。这里只改**预留量**，卡片位置一律不动。
+
+   blank = paddingBottom − 230，要让 blank = 8px（与 >760px 观感一致），
+   即 paddingBottom = card-h + 16 − 79。
+   79 的实测构成（从 .question-view 往上走）：
+       MAIN.workspace   padding-bottom  7px
+       DIV#appShell     padding-bottom 72px = --tabbar-h 54 + 18
+   → 写进公式就是 `- var(--tabbar-h) - 25px - env(safe-area-inset-bottom)`，
+   比写死 79 多一点：带 Home 指示条的真机上 safe-area 会让 79 变大，
+   公式跟着变大才不会把按钮行压到卡片下面。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (max-width: 760px) {
+  body:not(.answer-card-collapsed) .question-pane:has(> .answer-card-wrap) {
+    padding-bottom: max(
+      0px,
+      calc(
+        var(--answer-card-h, 44px) + 16px - var(--tabbar-h, 54px) - 25px
+          - env(safe-area-inset-bottom, 0px)
+      )
+    );
+  }
+}
