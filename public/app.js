@@ -749,6 +749,39 @@ function effectiveQuestionLimit() {
   return Math.max(selected, chapterQuestionCount(state.currentChapter));
 }
 
+/* 题量 / 题序是「题单窗口」的一部分，必须跟存档一起持久化。
+   不持久化时，刷新后 limit 回落成 DOM 默认的 80：上次停在「400 题」窗口里第 151 题的人，
+   新题单里根本没有那道题（findStartIndex 找不到 → 只能回第 1 题）。
+   老存档没有这两个字段 → 回落到与 index.html 默认值一致的行为（80 / 章节顺序）。 */
+const QUESTION_LIMIT_OPTIONS = ["80", "160", "400", "1000"];
+const QUESTION_ORDER_OPTIONS = ["", "random"];
+
+function savedQuestionWindow() {
+  const settings = state.storage?.settings || {};
+  const limit = String(settings.questionLimit ?? "");
+  const order = String(settings.questionOrder ?? "");
+  return {
+    limit: QUESTION_LIMIT_OPTIONS.includes(limit) ? limit : "80",
+    order: QUESTION_ORDER_OPTIONS.includes(order) ? order : "",
+  };
+}
+
+/* 在 restoreLastCourse 之前把上次的题量/题序放回选择器：
+   loadQuestions 的题单窗口直接读这两个控件的值。 */
+function applyQuestionWindow() {
+  const { limit, order } = savedQuestionWindow();
+  if ($("limitSelect")) $("limitSelect").value = limit;
+  if ($("orderSelect")) $("orderSelect").value = order;
+}
+
+function persistQuestionWindow() {
+  if (!state.user) return;
+  state.storage.settings ||= {};
+  state.storage.settings.questionLimit = $("limitSelect") ? $("limitSelect").value : "80";
+  state.storage.settings.questionOrder = $("orderSelect") ? $("orderSelect").value : "";
+  scheduleSave();
+}
+
 function chapterDepth(chapter) {
   const path = state.chapterTreeRoots ? findChapterPath(state.chapterTreeRoots, chapter.id) : [];
   return path.length || Number(chapter.grade || 1);
@@ -1358,6 +1391,8 @@ async function changePassword() {
 async function enterApp(user, options = {}) {
   if (options.rememberSession !== false) localStorage.setItem(SESSION_USER_KEY, user);
   await loadUserData(user);
+  // 题量/题序是题单窗口的一部分，要在 restoreLastCourse → loadQuestions 之前落位
+  applyQuestionWindow();
   $("loginView").classList.add("hidden");
   $("appShell").classList.remove("hidden");
   document.body.classList.remove("admin-view");
@@ -1816,7 +1851,14 @@ async function selectCourse(course, options = {}) {
   if (transitionId !== state.modeTransitionId) return;
   if (restoreChapterId) {
     const chapter = state.chapters.find((item) => item.id === restoreChapterId);
-    if (chapter) state.currentChapter = chapter;
+    if (chapter) {
+      state.currentChapter = chapter;
+      /* 恢复成功后必须把章节**写回存档**：上面为了「换科目不继承上一科目的章节」
+         刚把 lastChapterId 清成 0，这里不写回的话，本次 boot 结尾的 scheduleSave
+         会把 0 同步到服务器 —— 表现就是「刷一次还有章节，再刷一次只剩全部章节」，
+         上次停的那道题也不在新题单里（findStartIndex 找不到 → 回第 1 题）。 */
+      state.storage.profile.lastChapterId = chapter.id;
+    }
     renderChapters();
   }
   if (!await loadTypes()) return;
@@ -9522,8 +9564,8 @@ document.querySelector('[data-action="refresh"]').onclick = () => {
 $("courseSearch").addEventListener("input", debounce(loadCourses));
 $("questionSearch").addEventListener("input", debounce(loadQuestions));
 $("typeSelect").addEventListener("change", loadQuestions);
-$("orderSelect").addEventListener("change", loadQuestions);
-$("limitSelect").addEventListener("change", loadQuestions);
+$("orderSelect").addEventListener("change", () => { persistQuestionWindow(); loadQuestions(); });
+$("limitSelect").addEventListener("change", () => { persistQuestionWindow(); loadQuestions(); });
 
 window.addEventListener("beforeunload", () => {
   syncCurrentTrainingSession();
