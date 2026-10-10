@@ -13404,3 +13404,84 @@ textarea,
     }
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机端「收起态」答题卡：抽屉的 8px 偏移漏进了相对定位，「展开答题卡」被按钮行压住一截
+   ──────────────────────────────────────────────────────────────────────────
+   现象（390×844、默认主题 light、答题卡**收起**）：
+     · `展开答题卡` 矩形 `259.1~381 × 714.5~758.5`（121.9 × 44）
+     · `.question-actions` 矩形 `8~382 × 669~722`
+     → 竖向重叠 **7.5px**，`document.elementFromPoint(320, 716.5)`（按钮上沿 +2）
+       返回 `div.question-actions`。按钮行是 z-index 95 的磨砂面板、压在卡片 90 之上，
+       于是按钮顶上那一条被糊成按钮行的底色 —— 用户说的「被遮挡了部分」。
+     · 卡片还被右移 8px：`16~390`，而 `.question-view` / 按钮行都是 `8~382`。
+       右边缘顶到视口边（390），超出 `.question-pane` 的裁剪框（右内边 383）7px，
+       被 `overflow: hidden` 切掉 —— 卡片的右上 / 右下圆角因此是方的。
+
+   根因（**不是** d22549a 那条的同一分支）：
+   `.question-pane > .answer-card-wrap`（L8973-8979，在 `@media (max-width:1440px)` 里）
+   给卡片的是抽屉定位 `position: fixed; right: 8px; bottom: 8px; left: 8px`。
+   而 ≤760px 收起态下 L6991 `body.answer-card-collapsed .answer-card-wrap`
+   （(0,2,1) > L8973 的 (0,2,0)）只把 `position` 改成了 `relative`，
+   `top/right/bottom/left` 那三个 8px 原样留着 —— 对相对定位的元素它们不是定位，
+   而是**位移**：
+     · `bottom: 8px` → 上移 8px（`getComputedStyle` 里表现成 `top: -8px`）
+     · `left: 8px` 赢过同样非 auto 的 `right: 8px` → 右移 8px
+   上移的 8px 正好钻进 `.question-actions`；右移的 8px 把卡片顶出 pane 的裁剪框。
+
+   ⚠️ 与 d22549a 的关系：那条修的是**展开态**（卡片确实是 `fixed`，被
+   `backdrop-filter` 挪走了 79px 的包含块），只在默认主题出问题，所以能用
+   `html:not([data-theme="ink"])` 把墨水屏绕开。
+   这条是**收起态**：卡片是相对定位、跟着文档流走，跟包含块无关，
+   实测 light / ink / dark / eye 四个主题的卡片矩形**完全一样**（都是 `16,714,758`）
+   —— 也就是说墨水屏主题有同样的 8px 重叠（d22549a 的「已知边界」里记的就是它）。
+   所以这条**不能**套 `html:not([data-theme="ink"])`：绕开等于把 ink 的同一个 bug 留着。
+
+   修法：收起态把这四个偏移清掉，让卡片回到它的**流内位置** —— 按钮行正下方、
+   左右与 `.question-view` / 按钮行对齐。相对定位的偏移不参与布局，
+   所以清掉只改绘制位置：卡片高度、`--answer-card-h` 预留量、层级、app.js 都不用动。
+   ⚠️ 不要改用「加大预留量 / 把卡片整体抬高」来绕：那是改布局，
+   会同时动到展开态和读题区（d22549a 已经踩过一次）。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (max-width: 760px) {
+  body.answer-card-collapsed .question-pane > .answer-card-wrap {
+    top: auto;
+    right: auto;
+    bottom: auto;
+    left: auto;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   收起态的「展开答题卡」按钮：44 → 34px
+   ──────────────────────────────────────────────────────────────────────────
+   实测（390×844、收起态）同一屏上各控件的**高度 / 字号**：
+       展开答题卡          121.9 × 44   min-height 44   padding 5px 14px   font 13px
+       上一题 / 下一题     115.3 × 36   min-height 36   padding 0 4px      font 12px
+       操作(移动)          105.3 × 36   min-height 36   padding 0 4px      font 12px
+       标签栏项                 58 × 42                  padding 2px 0 3px  font 11px
+       卡片翻页按钮(展开)     47 × 34   min-height 34   padding 2px 6px    font 11px
+       **同一个按钮·展开态** 332 × 34   min-height 34   padding 0 13px     font 11px
+   → 它不是「全宽造成的视觉重量」（收起态是收缩到 121.9px 的胶囊），
+     而是实打实比同类高：比卡片自己的翻页按钮高 10px（+29%）、比它下面的按钮行高 8px
+     （+22%），并且**和它自己的展开态差 10px**。字号 13px 也是这一片里最大的。
+
+   44 来自 76e2849 那轮「触控目标 ≥44px」的兜底（L13191）。0768131 那轮把**展开态**
+   降到 34px 时，注释里写的理由是「收起态整条卡片就是 44px 高，按钮必须撑满它，
+   压到 34px 反而空出 10px」—— 这个理由不成立：卡片高度由
+   `body:not(.admin-view).answer-card-collapsed .answer-card-wrap` 的
+   `min/max-height: 44px !important`（L9068）决定，跟按钮多高无关；按钮又是
+   `top: 50% + translateY(-50%)` 的绝对定位，34px 就是居中 34px，不会「空出 10px」。
+   反过来，44px 的按钮塞进 41px 的内框（卡片 44 − 上边框 2 − 下边框 1）里，
+   被 `overflow: hidden` 上下各削 1.5px —— 顶部两个圆角其实是平的（截图可见）。
+
+   所以这里采用 0768131 已经定下的 34px，和「同一个按钮的展开态」以及
+   「卡片内的翻页按钮」对齐。**只改高度**：字号 / padding / 颜色 / 圆角都不动
+   —— 收起态那个主色胶囊是 L9039 那轮刻意做的强调样式，且它是收起态唯一的入口。
+   ⚠️ 要压过 L13191 的 (0,3,1) + !important，这里必须同特异性 + !important 且写在最后。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (max-width: 760px) {
+  body.answer-card-collapsed .answer-card-wrap .answer-card-collapse-btn {
+    min-height: 34px !important;
+  }
+}
