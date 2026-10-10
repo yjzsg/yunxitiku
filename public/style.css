@@ -13485,3 +13485,64 @@ textarea,
     min-height: 34px !important;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   手机端收起态答题卡：底部 2px 被 .question-pane 裁掉（下边框看不见、下圆角是平的）
+   ──────────────────────────────────────────────────────────────────────────
+   现象（390×844 与 360×640，收起态，light 与 ink 完全一样）：
+       .answer-card-wrap  矩形 `8 ~ 382 × 722 ~ 766`（374 × **44px**）
+       .question-pane     矩形 `7 ~ 383 × 62 ~ 765` → **padding box 底边 = 764**
+       溢出 `766 − 764 = 2px`，被 `.question-pane { overflow: hidden }`（L1047）
+       切在 padding box 上 → 卡片最后 2px（1px 的 `border-bottom` + 16px 圆角的下半弧）
+       整片不绘制。像素实采（light / 卡片中线 x=195）：
+         y=758~763 = rgb(238,242,255)  ← 卡片 `--primary-50` 底色，最下面一行就是 763
+         y=764     = rgb(253,254,254)  ← 已经不是卡片了（pane 的底色/边框）
+       ink 主题同理：y=763 = rgb(242,242,242)（卡片底），y=764 = rgb(0,0,0)（pane 的边框）。
+
+   2px 的来源**不是**小数取整，是两条规则硬碰（都在 commit 275c46a 里，相隔几百行）：
+     · L8696 / L8075 `… .answer-card-collapsed .question-pane { grid-template-rows:
+       auto auto minmax(0, 1fr) auto 42px }` → 第 5 行轨道高 **42px**
+     · L9068 `… .answer-card-collapsed .answer-card-wrap { min-height/max-height:
+       44px !important }` → 卡片 border-box **44px**
+   卡片是 `align-items: stretch` 的网格项，轨道 42 但 `min-height: 44px` 赢：
+   卡片顶边贴轨道顶边（722），底边 = 722 + 44 = **766**，比轨道底（764）低 2px。
+   `getComputedStyle(pane).gridTemplateRows` 实测 = `1px 0px 605px 53px 42px`，
+   与 pane 的 clientHeight 701 **完全相等**（1 + 0 + 605 + 53 + 42 = 701，
+   `padding-bottom: 0`、`row-gap: normal`）—— 网格里**一点余量都没有**，
+   所以多出来的 2px 只能从卡片自己身上出。
+
+   五行 = 五个子元素（`.question-view` 等自带 `grid-row`）：
+     行1 `.course-head`         ≤760px 是空壳（L12016 padding 0 + min-height 0、标题隐藏），只剩 1px 的 border-bottom → **1px**
+     行2 `#examStatus`          `display: none` → **0px**
+     行3 `#questionView`        `grid-row: 3`（L1137），`minmax(0, 1fr)` = **605px**（读题区）
+     行4 `.question-actions`    `grid-row: 4`（L1494）→ **53px**
+     行5 `.answer-card-wrap`    `grid-row: 5`（L1545）→ 轨道 **42px**，卡片 **44px** ← 冲突在此
+
+   修法：让收起态整条的高度等于它自己在网格里的轨道 —— **44px → 42px**。
+   卡片里的东西全在流外：`::before` 摘要行（L7004，absolute + top:50% + translateY(-50%)）
+   和 `#answerCardCollapseBtn`（L7016，同样 absolute 居中，L13485 定 34px）。
+   内框 = 42 − 2（上边框）− 1（下边框）= 39px ≥ 按钮 34px，上下各余 2.5px，不碰边框。
+   `--answer-card-h` 会跟着变成 42px，但收起态 ≤760px 没有任何规则消费它
+   （L11227 / L13356 都带 `:not(.answer-card-collapsed)`），所以没有连带影响。
+
+   ⚠️ 为什么不是「第 5 行 42 → 44px」：轨道和 = pane 内容高（零余量），多出来的 2px
+      只能从 `minmax(0, 1fr)` 的读题区里扣（390×844 会从 605 → 603）——与
+      「读题区高度不变」的约束冲突。
+   ⚠️ 为什么不是「给 `.question-pane` 加 `padding-bottom: 2px`」：同上，还是扣读题区 2px。
+   ⚠️ 为什么不是「卡片 `margin-top: -2px`，让 44px 的盒子塞进 42px 的轨道」：
+      卡片上移 2px 后它的 `border-top: 2px solid var(--primary)` 会钻进
+      `.question-actions`（z-index 95 > 卡片 90），那条蓝色顶边直接消失。
+   ⚠️ 代价：整条卡片是收起态唯一的点击目标，从 44px 变 42px（比 44px 触控线少 2px）。
+      这是「2px 触控」与「2px 读题区」之间的取舍：读题区是正文，卡片只是跳题导航
+      （app.js L1196 的口径也是如此）。按钮本身仍是 34px（L13485 那轮定的）。
+
+   ⚠️ 只改 ≤760px 收起态：`min/max-height` 这两条本来就在 `@media (max-width: 760px)` 里，
+      展开态、>760px、以及 L13400（展开态位置）和 L13447（4 个偏移清零）都不碰。
+   ⚠️ 要压过 L9068，必须同特异性 (0,3,1) + `!important` 且写在后面。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (max-width: 760px) {
+  body:not(.admin-view).answer-card-collapsed .answer-card-wrap {
+    min-height: 42px !important; /* = L8696 第 5 行轨道的 42px */
+    max-height: 42px !important;
+  }
+}
