@@ -1718,6 +1718,23 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   font-weight: 600;
 }
 
+/* 错题本的主动作：「开始训练（N 道·含未到期）」。
+   题池 = 当前筛选结果，**未到期的也练** —— stage 0 的到期日是答错次日，
+   只出到期题的话今天刚错的题今天一道都练不了。
+   皮肤沿用 .primary-action（主按钮观感 + 禁用态一起来），这里只补面板内的布局。
+   ≤760px 时整行放在 4 个下拉之上，见文件后面「错题本筛选面板：4 个下拉改 2×2」。 */
+.wrong-filter-panel .wrong-start-btn {
+  flex: 0 0 auto;
+  padding: 9px 18px;
+  font-weight: 750;
+}
+
+/* 「导出全部错题」降为次级动作，不再和主动作抢注意力
+   （观感来自 .primary-action.secondary.compact，这里只兜住面板内的间距）。 */
+.wrong-filter-panel .wrong-export-btn {
+  padding: 7px 12px;
+}
+
 .exam-home,
 .analysis-panel {
   width: min(850px, 100%);
@@ -12272,6 +12289,14 @@ summary:focus-visible,
   .wrong-filter-panel .wrong-export-btn {
     grid-column: 1 / -1 !important;
     padding: 7px 12px !important;
+  }
+
+  /* 主动作整行排在 4 个下拉之上（DOM 里就是第一个子元素），拇指最先够到。
+     44px 是触摸目标的最小高度。 */
+  .wrong-filter-panel .wrong-start-btn {
+    grid-column: 1 / -1 !important;
+    min-height: 44px !important;
+    font-size: 15px !important;
   }
 }
 

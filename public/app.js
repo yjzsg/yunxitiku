@@ -125,12 +125,19 @@ const SPRINT_QUOTA = { wrong: 25, weak: 35 };
 /* 弱项类题的轮换冷却：N 天内出现过的降到候选队尾（不是硬排除，
    池子不够时仍然会被用上，不会出现「凑不满」）。 */
 const TRAINING_COOLDOWN_DAYS = 3;
-/* 相似错题重练：种子数 / 每个种子补几道 / 判定为「同类」所需的最少关键词命中数。
+/* 同类题型练习（原名「相似错题重练」，名不副实）：种子数 / 每个种子补几道 /
+   判定为「同类」所需的最少关键词命中数。
+   实测 56 道里有 48 道不是错题 —— 它是「以错题为样本扩展同类题」，不是错题重做。
+   名字和文案已经改成说实话的版本，行为一行没动（这个功能本身是有用的）。
    阈值 2 是权衡：设 1 等于没判（「万元」「2018」这种高频词命中就收），
    设 3 以上在短题干上会一个都匹配不到。 */
 const SIMILAR_SEED_COUNT = 12;
 const SIMILAR_PER_SEED = 6;
 const SIMILAR_MIN_KEYWORD_HITS = 2;
+/* 错题本「开始训练」的单轮题量上限（见 startWrongBookPractice）。
+   与「今日错题复习」不同：这里**不看记忆周期**，到期与否都进池 ——
+   stage 0 的到期日是答错次日，只出到期题的话今天刚错的题今天一道都练不了。 */
+const WRONG_BOOK_PRACTICE_SIZE = 20;
 const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "待复盘"];
 const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
 const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
@@ -505,7 +512,7 @@ function ensureWrongReviewFields(record = {}, q = null) {
   const now = nowText();
   if (q) {
     record.courseId = q.courseId;
-    /* chapterId 必须存下来：相似错题重练要靠它判「同章节」。
+    /* chapterId 必须存下来：同类题型练习（原「相似错题重练」）要靠它判「同章节」。
        以前只存了 chapterName，导致 chapterId 比较恒为 false，同章节判定全靠字符串相等。 */
     record.chapterId = Number(q.chapterId || 0);
     record.chapterName = q.chapterName;
@@ -993,9 +1000,9 @@ function bindExamChapterTree() {
   });
 }
 
-function wrongRecordMatchesFilter(id, item, courseStore) {
+function wrongRecordMatchesFilter(id, item, courseStore, filtersOverride = null) {
   ensureWrongReviewFields(item);
-  const filters = state.wrongFilters || {};
+  const filters = filtersOverride || state.wrongFilters || {};
   const active = !!courseStore.wrong?.[id];
   const status = filters.status || "active";
   if ((filters.review || "due") === "due" && !isReviewDue(item)) return false;
@@ -2648,7 +2655,7 @@ function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
 
   const records = getWrongRecordsForCurrentCourse(courseStore);
   const cmpStale = staleRank(seen);
-  const counts = { due: 0, repeated: 0, weak: 0, fresh: 0 };
+  const counts = { due: 0, repeated: 0, weak: 0, fresh: 0, neverDone: 0 };
 
   /* ① 到期复习：到期日升序（最该复习的先来），同一天到期的按「最久没出现」轮换。 */
   const dueList = records
@@ -2705,7 +2712,18 @@ function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
     );
   }
 
-  return { ids: ids.slice(0, SMART_PRACTICE_SIZE), counts };
+  const planIds = ids.slice(0, SMART_PRACTICE_SIZE);
+  counts.neverDone = countNeverDone(planIds, courseStore);
+  return { ids: planIds, counts };
+}
+
+/* 「新题」的真实口径 = 累计从没答过（done / wrong 里都没有）。
+   为什么不能用段④的 fresh 当新题数：段①到期、段②反复错都一定是做过的题，
+   但段③「薄弱章节」是从「没做对」的题里取的，里面大量是从没答过的 ——
+   实测同一轮 60 题里 54 题从没答过，卡片却写「新题42」，用户会低估新题量。
+   段④的 fresh 保留原义（只数保底那一段），另给一个 neverDone 专供卡片文案。 */
+function countNeverDone(ids, courseStore) {
+  return (ids || []).filter((id) => !courseStore.done?.[id] && !courseStore.wrong?.[id]).length;
 }
 
 function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
@@ -2992,6 +3010,25 @@ function clearActiveTrainingSession() {
   scheduleSave();
 }
 
+/* 切页时结束当前训练会话，但**先**把「做到第几题」落盘：
+   session.currentIndex / lastSubjectId 只在退出与卸载时同步，
+   直接 clear 的话，「退出再进」会回到第 1 题（进度看着像丢了）。
+   另外中途去别的页（练习 / 收藏）会刷新 courseStore.lastSubjectId，
+   不先同步就会拿别的页面的题号去找起始位置，找不到就退回第 1 题。 */
+function leaveActiveTrainingSession() {
+  syncCurrentTrainingSession();
+  clearActiveTrainingSession();
+}
+
+/* 点「错题本」时的页面筛选复位：错题本的第一诉求是「我错过的题在哪」，
+   带着上一次的「复习 = 到期」进来会把今天刚错的题全滤掉 ——
+   用户点「错题本」，看不到自己刚做错的题。
+   只复位「复习」：它最容易被会话污染（且后果最严重）；
+   「状态 / 错误次数 / 记忆周期」是用户在错题本里主动选的，保留。 */
+function resetWrongBookPageFilter() {
+  state.wrongFilters = { ...(state.wrongFilters || {}), review: "all" };
+}
+
 function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {}) {
   const cleanIds = normalizeSessionIds(ids);
   const session = upsertTrainingSession({
@@ -3190,8 +3227,17 @@ function renderAll() {
     $("questionBody").classList.add("hidden");
     $("emptyState").classList.remove("hidden");
     const message = buildEmptyMessage();
-    $("emptyState").innerHTML = `<strong>${message[0]}</strong><span>${message[1]}</span>`;
+    $("emptyState").innerHTML = `<strong>${message[0]}</strong><span>${message[1]}</span>${message[2] || ""}`;
+    bindEmptyStateActions();
   }
+}
+
+/* 空态里也可能有操作按钮（比如错题本「一道都没到期」时的「立即训练全部 N 道」）。
+   innerHTML 每渲染一次都会重建按钮，所以每次都要重新绑。 */
+function bindEmptyStateActions() {
+  const btn = $("emptyWrongStartBtn");
+  if (!btn) return;
+  btn.onclick = () => startWrongBookPractice({ ignoreReview: true }).catch((err) => toast(err.message));
 }
 
 /* 空状态文案。错题本里「列表是空的」有四种完全不同的原因，说错一种用户就会以为
@@ -3229,9 +3275,18 @@ function buildEmptyMessage() {
   if (review === "due" && pending.length) {
     const soonest = Math.min(...pending.map(([, item]) => reviewDueDate(item).getTime()));
     const days = daysUntilDate(new Date(soonest));
+    /* 这是最伤人的一格：错题本里明明有题，却一道都点不开（旧文案只说「切到全部」
+       就完了，等于让用户自己绕）。复习周期本来就是建议，直接给一个入口：
+       忽略「复习」这一项，按其余筛选组一轮训练 —— 未到期的也练。 */
+    const pool = all.filter(([id, item]) =>
+      wrongRecordMatchesFilter(id, item, courseStore, { ...filters, review: "all" }));
     return [
       `当前无「到期」待复习错题，但有 ${all.length} 道错题`,
-      `其中 ${pending.length} 道还没到复习时间，最近一批 ${days} 天后到期；把上方「复习」切到「全部」现在就能看。`,
+      `其中 ${pending.length} 道都还没到复习时间，最近一批 ${days} 天后到期。`
+        + (pool.length ? `复习周期只是建议，现在就能练这 ${pool.length} 道（含未到期）。` : "把上方「复习」切到「全部」现在就能看。"),
+      pool.length
+        ? `<button type="button" id="emptyWrongStartBtn" class="primary-action">立即训练全部 ${pool.length} 道</button>`
+        : "",
     ];
   }
   if (review === "future" && all.every(([, item]) => isReviewDue(item))) {
@@ -3644,7 +3699,18 @@ function renderWrongFilters() {
   const activeCount = allRecords.filter(([id]) => !!courseStore.wrong?.[id]).length;
   const resolvedCount = allRecords.length - activeCount;
   const dueCount = allRecords.filter(([, item]) => isReviewDue(item) && !item.resolved).length;
+  /* 当前筛选结果 = 「开始训练」的题池，与错题本列表同一套口径（wrongRecordMatchesFilter），
+     所以按钮上的数就是列表里的数。**包含未到期的** —— 这是这个入口存在的意义
+     （stage 0 的到期日是答错次日，只出到期题的话今天刚错的题今天练不了）。 */
+  const pool = allRecords.filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore));
+  const poolNotDue = pool.filter(([, item]) => !isReviewDue(item)).length;
+  const startLabel = `开始训练（${pool.length} 道${poolNotDue ? "·含未到期" : ""}）`;
   panel.innerHTML = `
+    <button type="button" id="wrongStartBtn" class="wrong-start-btn primary-action"
+            ${pool.length ? "" : "disabled aria-disabled=\"true\""}
+            title="${pool.length
+              ? `用当前筛选出的 ${pool.length} 道错题开一轮训练（${poolNotDue ? `含 ${poolNotDue} 道还没到复习周期的，` : ""}单选/判断题点了选项立即出对错）`
+              : "当前筛选没有错题，换个筛选条件再试"}">${escapeHtml(startLabel)}</button>
     <label>
       <span>复习</span>
       <select id="wrongReviewFilter">
@@ -3677,7 +3743,7 @@ function renderWrongFilters() {
         <option value="30" ${filters.period === "30" ? "selected" : ""}>近30天</option>
       </select>
     </label>
-    <button type="button" id="exportWrongBtn" class="wrong-export-btn"
+    <button type="button" id="exportWrongBtn" class="wrong-export-btn primary-action secondary compact"
             title="把全部错题（不受当前筛选限制）导出为可打印页面，可另存为 PDF">导出全部错题</button>
   `;
   const reload = debounce(async () => {
@@ -3693,6 +3759,8 @@ function renderWrongFilters() {
   $("wrongStatusFilter").onchange = reload;
   $("wrongCountFilter").onchange = reload;
   $("wrongPeriodFilter").onchange = reload;
+  const startBtn = $("wrongStartBtn");
+  if (startBtn) startBtn.onclick = () => startWrongBookPractice().catch((err) => toast(err.message));
   const exportBtn = $("exportWrongBtn");
   if (exportBtn) exportBtn.onclick = () => exportAllWrongQuestions().catch((err) => toast(err.message));
 }
@@ -4440,12 +4508,29 @@ function scheduleNavIndicator() {
   scheduleNavIndicator.raf = requestAnimationFrame(updateNavIndicator);
 }
 
+/* 错题本训练（session.type === "wrong"）期间强制「立即反馈」。
+   题池全是**已经做错过的题**，这一轮的目的就是当场把它们做对一遍 ——
+   统一验证下点选项没有任何反馈，等于白练（用户点完不知道对错，也不会重看解析）。
+   边界只看「当前是不是那条错题训练会话」，不改「今日错题复习」等其它 wrong 会话的行为。
+   ⚠️ 只影响运行时 state.verifyMode（由 renderVerifyModeControls 写入），
+   **不写** state.storage.settings.verifyMode —— 那是用户偏好、会同步到服务器，
+   见上面考试那条注释踩过的坑。 */
+function isWrongBookTrainingSession() {
+  if (state.mode !== "wrong") return false;
+  const session = activeTrainingSession();
+  return !!session
+    && session.type === "wrong"
+    && session.mode === "wrong"
+    && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0);
+}
+
 function currentVerifyMode() {
   /* 考试期间一律按「交卷后统一验证」处理 —— 由**模式**决定，而不是去改用户的偏好。
      旧实现在 startExamPaper 里把 settings.verifyMode 改成 "paper" 并 scheduleSave()，
      但全文件没有任何地方恢复 → 用户考一次试后，之后**所有练习**被永久改成「统一验证」，
      而且已经同步到服务器（换设备也是错的）。见 docs/VERSIONS.md。 */
   if (state.mode === "exam") return "paper";
+  if (isWrongBookTrainingSession()) return "instant";
   const stored = state.storage.settings?.verifyMode;
   if (stored === "single") return "instant";
   return ["paper", "instant", "review"].includes(stored) ? stored : "paper";
@@ -4476,7 +4561,9 @@ function renderVerifyModeControls() {
   };
   const modeBtn = $("verifyModeBtn");
   if (modeBtn) {
-    modeBtn.classList.toggle("hidden", isExam || isAdmin());
+    /* 错题训练期间验证方式是强制的：按钮藏起来（留着能点但点了没效果，比藏起来更糟）。 */
+    const forced = isWrongBookTrainingSession();
+    modeBtn.classList.toggle("hidden", isExam || isAdmin() || forced);
     modeBtn.classList.toggle("active", state.verifyMode !== "paper");
     modeBtn.textContent = modeLabels[state.verifyMode] || modeLabels.paper;
     modeBtn.setAttribute("aria-pressed", String(state.verifyMode !== "paper"));
@@ -4665,6 +4752,11 @@ function renderTraining() {
   const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
   const similarPreview = previewPracticePlan("similar", courseStore, previewContext);
   const sprintPreview = previewPracticePlan("sprint", courseStore, previewContext);
+  /* 「今日错题复习」卡的可读原因：0 道可复习时不再只是一个死按钮 + 点了才弹的 toast，
+     而是把原因直接写在卡上（和「今日计划」按钮的置灰风格保持一致）。 */
+  const duePreview = dueLeft
+    ? (dueLeft === dueTotal ? `${dueLeft} 道到期` : `${dueLeft} 道可复习 · 共 ${dueTotal} 道到期`)
+    : (dueTotal ? `今天到期的 ${dueTotal} 道都练完了` : "今天没有到期错题");
   const activeSmartSession = findActiveTrainingSessionByType("smart", state.currentCourse?.id, { onlyToday: true });
   const hasReviewPlan = !!activeReviewPlan().examDate;
   const planOverview = hasReviewPlan
@@ -4715,10 +4807,19 @@ function renderTraining() {
         <div><b>${Math.max(0, items.length - stats.done)}</b><span>未做题</span></div>
       </div>
       <div class="training-card-grid">
-        ${renderTrainingCard("smart", "今日强化", "错题、薄弱章节和未做题自动混合，保证每天有一批没做过的新题。", smartPreview, "开始训练")}
-        ${renderTrainingCard("due", "今日错题复习", "按记忆周期推送今天该复习的错题，避免错题堆积。", dueLeft === dueTotal ? `${dueLeft} 道到期` : `${dueLeft} 道可复习 · 共 ${dueTotal} 道到期`, "开始复习")}
-        ${renderTrainingCard("similar", "相似错题重练", "围绕反复错的章节、题型和关键词抽同类题。", similarPreview, "开始重练")}
-        ${renderTrainingCard("sprint", "考前冲刺", "近 7 天错题、反复错、薄弱章节、未做题组合。", sprintPreview, "开始冲刺")}
+        ${renderTrainingCard("smart", "今日强化", "错题、薄弱章节和未做题自动混合；「新题」= 累计从没答过的题（可能同时算在薄弱章节里）。", smartPreview, "开始训练")}
+        ${renderTrainingCard("due", "今日错题复习", "按记忆周期推送今天该复习的错题，避免错题堆积。", duePreview, "开始复习", {
+          disabled: dueLeft === 0,
+          reason: duePreview,
+        })}
+        ${renderTrainingCard("similar", "同类题型练习", "以你错得最多的题为样本，扩展同章节、同题型的题（大多不是错题），用来把题型练熟。", similarPreview, "开始练习", {
+          disabled: previewCounts.similar === 0,
+          reason: "当前科目暂无可扩展的同类题",
+        })}
+        ${renderTrainingCard("sprint", "考前冲刺", "近 7 天错题、反复错、薄弱章节、未做题组合。", sprintPreview, "开始冲刺", {
+          disabled: previewCounts.sprint === 0,
+          reason: "当前科目暂无可冲刺的题",
+        })}
       </div>
       <div class="training-tools">
         <button type="button" id="trainingContinueSmartBtn" ${canContinueSmart ? "" : "disabled"}>继续上次：${canContinueSmart ? escapeHtml(smart.sourceTitle || "智能训练") : "暂无题单"}</button>
@@ -4731,7 +4832,15 @@ function renderTraining() {
   bindTrainingActions();
 }
 
-function renderTrainingCard(type, title, desc, meta, action) {
+/* 训练卡。`options.disabled` 用于「这个入口现在没有内容可发」的情况：
+   只弹 toast 的话按钮看着还是可点的，和同页「今日计划」的置灰风格也不一致。
+   「今日强化」永远有内容（新题保底 SMART_PRACTICE_FLOOR_NEW = 24 道），所以不传 disabled ——
+   唯一的例外是题库本身为空（连分析数据都没加载出来），那种情况下计划为 0 道，
+   但这里仍然不禁用，因为禁用会把「先点一下、数据加载完再生成」的正常路径也堵掉。
+   原因文案写在 strong（meta）里，title 兜底给鼠标用户 / 读屏。 */
+function renderTrainingCard(type, title, desc, meta, action, options = {}) {
+  const disabled = !!options.disabled;
+  const reason = options.reason || meta || "";
   return `
     <section class="training-card">
       <div>
@@ -4739,7 +4848,9 @@ function renderTrainingCard(type, title, desc, meta, action) {
         <p>${escapeHtml(desc)}</p>
       </div>
       <strong>${escapeHtml(meta || "自动生成")}</strong>
-      <button type="button" data-training-action="${type}">${escapeHtml(action)}</button>
+      <button type="button" data-training-action="${type}"${disabled
+        ? ` disabled aria-disabled="true" title="${escapeHtml(reason)}"`
+        : ""}>${escapeHtml(action)}</button>
     </section>
   `;
 }
@@ -4753,17 +4864,23 @@ function previewPracticePlan(type, courseStore, context = {}) {
      构成也一并显示：这样「今天有多少新题」在点进去之前就是可见的。 */
   const count = Number(context.counts?.[type] || 0);
   const mix = context.mix?.[type] || null;
+  /* 「新题」统一用 neverDone（累计从没答过的题数）。旧文案用的是 mix.fresh，
+     那是「未做题保底」那一段的装填数量：段③薄弱章节里的大量新题没被算进去，
+     实测同一轮 60 题里 58 题从没答过，卡片却写「新题46」。
+     前两段（复习 / 弱项）是分段的题量，与「新题」不是一个维度（会互相重叠），
+     所以「新题」前面加「其中」，表明它是整张卷子的属性，不是第四段。 */
+  const realNew = Number(mix?.neverDone ?? mix?.fresh ?? 0);
   if (type === "smart") {
     if (!count) return "自动生成 · 错题优先";
     return mix
-      ? `${count} 题 · 复习${mix.due} 弱项${mix.repeated + mix.weak} 新题${mix.fresh}`
+      ? `${count} 题 · 复习${mix.due} 弱项${mix.repeated + mix.weak} · 其中新题${realNew}`
       : `${count} 题 · 错题优先`;
   }
   if (type === "similar") return count ? `${count} 题 · 同章同型` : "自动生成 · 同章同型";
   if (type === "sprint") {
     if (!count) return "自动生成 · 冲刺组合";
     return mix
-      ? `${count} 题 · 错题${mix.wrong} 弱项${mix.weak} 新题${mix.fresh}`
+      ? `${count} 题 · 错题${mix.wrong} 弱项${mix.weak} · 其中新题${realNew}`
       : `${count} 题 · 冲刺组合`;
   }
   return "";
@@ -4780,12 +4897,13 @@ function bindTrainingActions() {
     await loadQuestions();
   };
   $("trainingWrongBtn").onclick = async () => {
-    clearActiveTrainingSession();
+    leaveActiveTrainingSession();
+    resetWrongBookPageFilter();
     state.mode = "wrong";
     await loadQuestions();
   };
   $("trainingPracticeBtn").onclick = async () => {
-    clearActiveTrainingSession();
+    leaveActiveTrainingSession();
     state.mode = "practice";
     await loadQuestions();
   };
@@ -4933,7 +5051,10 @@ async function continueTrainingSession(sessionId) {
   resetGeneratedPracticeFilters();
   if (session.mode === "wrong") {
     state.mode = "wrong";
-    state.wrongFilters = { ...(state.wrongFilters || {}), review: session.type === "due" ? "due" : "all", status: "active" };
+    /* 同 startDueWrongReview：不把会话的题源口径写进「页面筛选」。
+       due 会话的题池靠 session.ids 冻结，页面筛选强写 due 会留在错题本上，
+       让用户回到错题本时看不到今天刚错的题。 */
+    state.wrongFilters = { ...(state.wrongFilters || {}), status: "active" };
     setCoursePicker(false);
     await loadQuestions();
     toast(`已继续${session.sourceTitle || "错题复习"}`);
@@ -5254,6 +5375,120 @@ async function continueSmartPractice() {
   toast("已继续上次智能练习");
 }
 
+/* ── 错题本「开始训练」 ────────────────────────────────────────────────
+   为什么需要它：错题本原来只有「导出全部错题」一个按钮，唯一的纯错题训练入口是
+   训练页的「今日错题复习」，而它只出**到期**的题 —— stage 0 的到期日是答错次日
+   （REVIEW_INTERVAL_DAYS[0] = 1），所以今天刚错的题今天一道都练不了。
+   这里按「当前筛选结果」组一轮训练，未到期的也进池。 */
+
+function wrongBookSessionId(courseId = state.currentCourse?.id) {
+  /* 稳定 id。进错题本会 clearActiveTrainingSession()，如果用 trainingSessionId()
+     的时间戳+随机串，退出再进就是全新的一轮、进度看着丢了。
+     稳定 id 让同一科目同一天的错题训练始终是同一条记录 → 再点「开始训练」走的是
+     continueTrainingSession（题单不缩水、跳到上次那一题）。 */
+  return `wrong-${Number(courseId || 0)}-${todayKey()}`;
+}
+
+/* 题池 = 当前筛选结果（复用 wrongRecordMatchesFilter，与错题本列表同一套口径）。
+   ignoreReview = true 时忽略「复习」这一项：空态里「立即训练全部 N 道」要在
+   「一道都没到期」时也能开练 —— 这正是那个入口要救的场景。 */
+function buildWrongBookPracticeIds(courseStore = userCourseStore(), options = {}) {
+  const filters = options.ignoreReview
+    ? { ...(state.wrongFilters || {}), review: "all" }
+    : (state.wrongFilters || {});
+  const records = getWrongRecordsForCurrentCourse(courseStore)
+    .filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore, filters));
+  const recordById = new Map(records.map(([id, item]) => [Number(id), item]));
+  /* 排序：到期优先 → 错得多的优先 → 先到期的优先 → 同章节不相邻。
+     同章节去相邻**只在「到期 / 未到期」两组内部**做：整体打散会把未到期的题插到
+     到期题中间，「到期优先」这个主键就名存实亡了（实测到期题被插到第 1/3/5 位）。 */
+  const ordered = records
+    .map(([id]) => Number(id))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const ia = recordById.get(a) || {};
+      const ib = recordById.get(b) || {};
+      const da = isReviewDue(ia) ? 0 : 1;
+      const db = isReviewDue(ib) ? 0 : 1;
+      if (da !== db) return da - db;
+      const ca = Number(ia.count || 0);
+      const cb = Number(ib.count || 0);
+      if (ca !== cb) return cb - ca;
+      const ta = reviewDueDate(ia).getTime();
+      const tb = reviewDueDate(ib).getTime();
+      if (ta !== tb) return ta - tb;
+      return a - b;
+    });
+  const isDueId = (id) => isReviewDue(recordById.get(id) || {});
+  return [
+    ...spreadByChapter(ordered.filter(isDueId), recordById),
+    ...spreadByChapter(ordered.filter((id) => !isDueId(id)), recordById),
+  ];
+}
+
+/* 同章节不相邻：贪心重排，稳定 —— 只在「非这么排就相邻」时才打乱相对顺序。
+   只剩同章节的尾巴时认了（不可能无解）。 */
+function spreadByChapter(ids, recordById) {
+  const keyOf = (id) => {
+    const item = recordById.get(Number(id)) || {};
+    return Number(item.chapterId || 0) || String(item.chapterName || "");
+  };
+  const rest = ids.slice();
+  const out = [];
+  let lastKey = null;
+  while (rest.length) {
+    let pick = rest.findIndex((id) => keyOf(id) !== lastKey);
+    if (pick < 0) pick = 0;
+    const [id] = rest.splice(pick, 1);
+    lastKey = keyOf(id);
+    out.push(id);
+  }
+  return out;
+}
+
+async function startWrongBookPractice(options = {}) {
+  if (!state.currentCourse) return;
+  /* 空态里的「立即训练全部 N 道」= 忽略「复习」这一项开练。页面筛选也必须一起回到
+     「全部」：只把题池放宽而列表仍被「到期」滤着的话，题确实发下去了，界面还是空的
+     （列表 = 错题 ∩ session.ids，而筛选后一道都不剩）—— 文案承诺了多少道就该看到多少道。 */
+  if (options.ignoreReview) {
+    state.wrongFilters = { ...(state.wrongFilters || {}), review: "all" };
+  }
+  const sessionId = wrongBookSessionId();
+  /* 同一天同一科目的错题训练只有一条记录：上一次没做完就接着做（题单是启动时冻结的
+     快照，不会因为「刚答对的题变成已复习」而在中途缩水）。做完了才重新冻结一批。 */
+  if (!options.restart) {
+    const existing = (state.storage.trainingSessions || []).find((item) => item.id === sessionId);
+    if (existing && !["completed", "expired"].includes(existing.status)) {
+      await continueTrainingSession(sessionId);
+      return;
+    }
+  }
+  const ids = buildWrongBookPracticeIds(userCourseStore(), { ignoreReview: !!options.ignoreReview })
+    .slice(0, WRONG_BOOK_PRACTICE_SIZE);
+  if (!ids.length) {
+    toast(options.ignoreReview ? "错题本里还没有错题" : "当前筛选没有错题，换个筛选条件试试");
+    return;
+  }
+  resetGeneratedPracticeFilters();
+  upsertTrainingSession({
+    id: sessionId,
+    type: "wrong",
+    mode: "wrong",
+    sourceTitle: "错题本训练",
+    courseId: state.currentCourse.id,
+    courseName: state.currentCourse.name || "",
+    ids,
+    currentIndex: 0,
+    lastSubjectId: 0,
+    status: "active",
+  });
+  state.mode = "wrong";
+  setCoursePicker(false);
+  await loadQuestions();
+  toast(`已开始错题训练（${ids.length} 道）`);
+}
+
 async function startDueWrongReview() {
   if (!state.currentCourse) return;
   const servedToday = todayServedIds();
@@ -5281,7 +5516,15 @@ async function startDueWrongReview() {
     ids: fresh,
   });
   state.mode = "wrong";
-  state.wrongFilters = { ...(state.wrongFilters || {}), review: "due", status: "active" };
+  /* 这里**不写** state.wrongFilters.review = "due"。
+     旧实现写了，于是「点过今日错题复习 → 切错题本」时错题本的「复习」筛选被留在
+     「到期」，今天刚错的题（stage 0 的到期日是次日）在错题本里全都不见 ——
+     用户点「错题本」却看不到自己刚做错的题。
+     而且这一写本来就是多余的：本次复习的题池由上面的 session.ids 冻结，
+     getModeQuestionIds 的 wrong 分支已经做了「错题 ∩ session.ids」。
+     只保留 status="active"：会话进行中列表按「未解决」看更稳（用户之前若把状态
+     切到「已解决」，due 会话的 ids ∩ 已解决 = 空集，会看到一面空列表）。 */
+  state.wrongFilters = { ...(state.wrongFilters || {}), status: "active" };
   setCoursePicker(false);
   await loadQuestions();
   toast(fresh.length < dueIds.length
@@ -5294,15 +5537,15 @@ async function startSimilarWrongPractice() {
   if (!state.analysisQuestions.length) await loadAnalysisQuestions();
   const ids = buildSimilarWrongIds(userCourseStore());
   if (!ids.length) {
-    toast("暂无可重练的相似错题");
+    toast("暂无可扩展的同类题");
     return;
   }
   resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids.slice(0, 80), "相似错题重练", { type: "similar" });
+  saveSmartPracticeSession(ids.slice(0, 80), "同类题型练习", { type: "similar" });
   state.mode = "smart";
   setCoursePicker(false);
   await loadQuestions();
-  toast("已生成相似错题重练");
+  toast("已生成同类题型练习");
 }
 
 function buildSimilarWrongIds(courseStore = userCourseStore()) {
@@ -5445,7 +5688,7 @@ function buildSprintPracticePlan(courseStore = userCourseStore(), options = {}) 
     return added;
   };
 
-  const counts = { wrong: 0, weak: 0, fresh: 0 };
+  const counts = { wrong: 0, weak: 0, fresh: 0, neverDone: 0 };
 
   /* ① 近 7 天错题 / 反复错。「近 7 天」必须真有时间戳：旧实现的 `!at || ...`
      让没有时间戳的老错题永远算作「近 7 天错题」，冲刺题单里塞满陈年错题。 */
@@ -5490,7 +5733,9 @@ function buildSprintPracticePlan(courseStore = userCourseStore(), options = {}) 
     counts.wrong += take(orderCandidates(wrongList, seen), SPRINT_PRACTICE_SIZE - ids.length);
   }
 
-  return { ids: ids.slice(0, SPRINT_PRACTICE_SIZE), counts };
+  const planIds = ids.slice(0, SPRINT_PRACTICE_SIZE);
+  counts.neverDone = countNeverDone(planIds, courseStore);
+  return { ids: planIds, counts };
 }
 
 function buildSprintPracticeIds(courseStore = userCourseStore()) {
@@ -9383,7 +9628,9 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
     }
     if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
     if (state.mode === "exam" && nextMode !== "exam") stopExamTimer();
-    if (["practice", "wrong", "favorite"].includes(nextMode)) clearActiveTrainingSession();
+    if (["practice", "wrong", "favorite"].includes(nextMode)) leaveActiveTrainingSession();
+    /* 进错题本一律按「全部」看：见 resetWrongBookPageFilter */
+    if (nextMode === "wrong") resetWrongBookPageFilter();
     state.mode = nextMode;
     if (state.mode === "practice") setCoursePicker(true);
     else setCoursePicker(false);
