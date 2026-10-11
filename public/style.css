@@ -815,6 +815,16 @@ body.admin-view .workspace {
   width: 100%;
   min-height: 52px;
   display: grid;
+  /* ⚠ 必须显式声明 stretch。全局 `button`（L192）带 `justify-content: center`，
+     `.course-item` 自己**没写**这一条，于是它漏了进来 —— 本元素是 grid，
+     这里对齐的是**轨道**：只有一条隐式轨道，`auto` 轨道被「内容对齐 = center」
+     压成 max-content（≈327px，由最长那行 `.course-item small` 决定），
+     剩下的空白平均分到两侧 → 科目名看着像居中小标题，而不是列表项。
+     实测（light，面板展开）：390 宽左缩进 5.7px、1440 宽 22.7px、
+     760 宽（面板整宽）**190.7px**，和同一栏里左对齐的「章节」行明显不一致。
+     `stretch` 是 grid 该属性的默认值（`normal`），把轨道撑满内容盒即回到左对齐。
+     注意 `justify-items: start` 管的是轨道内条目，管不到轨道本身，不能替代这条。 */
+  justify-content: stretch;
   justify-items: start;
   align-content: center;
   gap: 4px;

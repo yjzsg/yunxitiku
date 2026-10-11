@@ -134,10 +134,11 @@ const TRAINING_COOLDOWN_DAYS = 3;
 const SIMILAR_SEED_COUNT = 12;
 const SIMILAR_PER_SEED = 6;
 const SIMILAR_MIN_KEYWORD_HITS = 2;
-/* 错题本「开始训练」的单轮题量上限（见 startWrongBookPractice）。
+/* 错题本「开始训练」的单轮题量 = **当前筛选结果的全部**（见 startWrongBookPractice）。
+   这里曾经有个 20 道的上限常量（WRONG_BOOK_PRACTICE_SIZE），已经去掉：
+   按钮上写了几道，这一轮就该练几道 —— 筛出 32 道只发 20 道，等于按钮上的数在说谎。
    与「今日错题复习」不同：这里**不看记忆周期**，到期与否都进池 ——
    stage 0 的到期日是答错次日，只出到期题的话今天刚错的题今天一道都练不了。 */
-const WRONG_BOOK_PRACTICE_SIZE = 20;
 const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "待复盘"];
 const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
 const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
@@ -3312,8 +3313,12 @@ function buildEmptyMessage() {
     /* 这是最伤人的一格：错题本里明明有题，却一道都点不开（旧文案只说「切到全部」
        就完了，等于让用户自己绕）。复习周期本来就是建议，直接给一个入口：
        忽略「复习」这一项，按其余筛选组一轮训练 —— 未到期的也练。 */
-    const pool = all.filter(([id, item]) =>
-      wrongRecordMatchesFilter(id, item, courseStore, { ...filters, review: "all" }));
+    const pool = all
+      .filter(([id, item]) =>
+        wrongRecordMatchesFilter(id, item, courseStore, { ...filters, review: "all" }))
+      /* 与 buildWrongBookPracticeIds 同口径：只认数字 id。
+         这里的 N 就是点下去实际会发的题数（题量不截断，全部发）。 */
+      .filter(([id]) => Number(id));
     return [
       `当前无「到期」待复习错题，但有 ${all.length} 道错题`,
       `其中 ${pending.length} 道都还没到复习时间，最近一批 ${days} 天后到期。`
@@ -3735,15 +3740,20 @@ function renderWrongFilters() {
   const dueCount = allRecords.filter(([, item]) => isReviewDue(item) && !item.resolved).length;
   /* 当前筛选结果 = 「开始训练」的题池，与错题本列表同一套口径（wrongRecordMatchesFilter），
      所以按钮上的数就是列表里的数。**包含未到期的** —— 这是这个入口存在的意义
-     （stage 0 的到期日是答错次日，只出到期题的话今天刚错的题今天练不了）。 */
-  const pool = allRecords.filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore));
+     （stage 0 的到期日是答错次日，只出到期题的话今天刚错的题今天练不了）。
+     题量**不截断**：筛选结果多少道就练多少道（旧的 20 道上限已去掉，
+     见 startWrongBookPractice）。`Number(id)` 这一层要和 buildWrongBookPracticeIds /
+     getModeQuestionIds 保持一致 —— 它们只认数字 id，否则按钮算 32 道、实际只发 31 道。 */
+  const pool = allRecords
+    .filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore))
+    .filter(([id]) => Number(id));
   const poolNotDue = pool.filter(([, item]) => !isReviewDue(item)).length;
   const startLabel = `开始训练（${pool.length} 道${poolNotDue ? "·含未到期" : ""}）`;
   panel.innerHTML = `
     <button type="button" id="wrongStartBtn" class="wrong-start-btn primary-action"
             ${pool.length ? "" : "disabled aria-disabled=\"true\""}
             title="${pool.length
-              ? `用当前筛选出的 ${pool.length} 道错题开一轮训练（${poolNotDue ? `含 ${poolNotDue} 道还没到复习周期的，` : ""}单选/判断题点了选项立即出对错）`
+              ? `把当前筛选出的 ${pool.length} 道错题全部练一遍（${poolNotDue ? `含 ${poolNotDue} 道还没到复习周期的，` : ""}单选/判断题点了选项立即出对错）`
               : "当前筛选没有错题，换个筛选条件再试"}">${escapeHtml(startLabel)}</button>
     <label>
       <span>复习</span>
@@ -4198,6 +4208,10 @@ function markResult(q) {
     };
   }
   if (isRight) {
+    /* 这道题在答对**之前**是否属于本课程的错题本 —— 下面 `delete courseStore.wrong[q.id]`
+       之后就看不出来了。非错题训练模式靠它判断「要不要给这道题做 SRS 推进」：
+       不在错题本里的题（新题顺手做对）绝不能被写进错题本。 */
+    const wasWrongTracked = !!courseStore.wrong?.[q.id];
     courseStore.correct[q.id] = true;
     delete courseStore.wrong[q.id];
     if (state.mode === "wrong") {
@@ -4213,15 +4227,30 @@ function markResult(q) {
       state.storage.wrong[q.id] = record;
       if (record.resolved) delete courseStore.wrong[q.id];
       else courseStore.wrong[q.id] = true;
+    } else if (wasWrongTracked || state.storage.wrong[q.id]) {
+      /* 练习 / 智能训练 / 考场答对**错题本里的题**：与错题训练走同一套 SRS 推进
+         （stage+1、练满 5 档才 resolved、count 递减、lastReviewAt 刷新）。
+         旧实现这条分支是无条件 `resolved = true` 直接毕业，而且 stage 完全不动 ——
+         用户只是想在练习里做一道题、顺手做对了，这道题就从错题本里消失、
+         [1,2,4,7,15,30] 整条复习曲线被跳掉，看起来像「错题被吃掉了」。
+         唯一的例外是**已经毕业**的记录：它不因为一次答对又倒回「未解决」重进错题本。
+         必须留这个例外 —— 旧数据里大量存在 resolved=true 但 stage<5 的记录
+         （正是旧版这条分支写出来的：毕业时不动 stage），直接套 SRS 会把它们全部打回错题本。 */
+      const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
+      record.courseId ||= state.currentCourse?.id;
+      const alreadyResolved = !!record.resolved;
+      record.lastReviewAt = nowText();
+      record.stage = Math.min(REVIEW_INTERVAL_DAYS.length - 1, reviewStage(record) + 1);
+      record.resolved = alreadyResolved || record.stage >= REVIEW_INTERVAL_DAYS.length - 1;
+      record.resolvedAt = record.resolved ? (record.resolvedAt || nowText()) : "";
+      /* 同错题训练：答对一次减一次「错了几次」。 */
+      record.count = record.resolved ? 1 : Math.max(1, Number(record.count || 1) - 1);
+      state.storage.wrong[q.id] = record;
+      if (record.resolved) delete courseStore.wrong[q.id];
+      else courseStore.wrong[q.id] = true;
     } else {
+      /* 从来没错过的题：答对只是「答对」，不产生错题记录。 */
       delete courseStore.wrong[q.id];
-      const record = state.storage.wrong[q.id];
-      if (record) {
-        record.resolved = true;
-        record.resolvedAt = nowText();
-        record.lastReviewAt = nowText();
-        record.count = 1;
-      }
     }
   } else {
     delete courseStore.correct[q.id];
@@ -4403,6 +4432,12 @@ function renderAnswerCardPage(options = {}) {
   const endIndex = Math.min(state.questions.length, startIndex + pageSize);
   const matched = new Set(getSearchMatchIndexes());
   const courseStore = userCourseStore();
+  /* 错题训练进行中（会话作用域，见 activeWrongPracticeSession）：答题卡按**本轮**的
+     作答与判定染色。判据必须是本轮的 answers / results —— 「这题在错题本里」不等于
+     「本轮答错了」，按后者染会让整张卡一进训练就全红，用户以为全做错了。
+     翻看错题本（mode === "wrong" 但没有训练会话）/ 普通练习 / 智能训练 / 考场维持原样：
+     那些场景「这题是错题 / 之前做错过」本身就是要表达的信息。 */
+  const wrongSession = activeWrongPracticeSession();
   for (let index = startIndex; index < endIndex; index++) {
     const item = state.questions[index];
     const btn = document.createElement("button");
@@ -4421,18 +4456,31 @@ function renderAnswerCardPage(options = {}) {
        用户报的「已做的题在答题卡上全是未做」就是这个原因。
 
        只有「交卷了但这题没作答」才单独标 `todo`（沿用 .card-cell 默认中性外观），
-       扫漏题时能和「做错」区分开 —— 以前两者都是红色，根本分不出来。 */
-    const wrongRecord = state.storage.wrong?.[item.id];
-    const recordedRight = !!courseStore.correct?.[item.id] || !!wrongRecord?.resolved;
-    const recordedWrong = !!courseStore.wrong?.[item.id] || (!!wrongRecord && !wrongRecord.resolved);
+       扫漏题时能和「做错」区分开 —— 以前两者都是红色，根本分不出来。
 
-    if (state.submitted && !hasAnswer(item.id)) {
+       ⚠️ 错题训练进行中（wrongSession，见上面 renderAnswerCardPage 里的说明）例外：
+       此时「在错题本里」对本轮毫无信息量 —— 整份题单都是错题，按它染就是全红。
+       这一轮改看**本轮**的结果：本轮答对=绿、本轮答错=红、本轮没答=中性（未做）。 */
+    const wrongRecord = state.storage.wrong?.[item.id];
+    const roundResult = wrongSession?.results?.[item.id];
+    const roundAnswered = !!normalizeAnswer(wrongSession?.answers?.[item.id]);
+    /* 会话 results 里既有对象 {answer, correct, at}，也可能有迁移期留下的布尔值
+       （口径与 syncTrainingSessionStats 一致，别只认一种）。 */
+    const recordedRight = wrongSession
+      ? (roundResult === true || roundResult?.correct === true)
+      : (!!courseStore.correct?.[item.id] || !!wrongRecord?.resolved);
+    const recordedWrong = wrongSession
+      ? (roundResult === false || roundResult?.correct === false)
+      : (!!courseStore.wrong?.[item.id] || (!!wrongRecord && !wrongRecord.resolved));
+    const answered = wrongSession ? roundAnswered : hasAnswer(item.id);
+
+    if (state.submitted && !answered) {
       btn.classList.add("todo");
     } else if (recordedRight) {
       btn.classList.add("correct");
     } else if (recordedWrong) {
       btn.classList.add("wrong");
-    } else if (hasAnswer(item.id)) {
+    } else if (answered) {
       /* 已作答、但还没判定（练习模式统一验证、或模拟考场）——
          用中性的「已做」，既不泄露对错，也和其他页同状态的题保持一致。
 
@@ -5505,8 +5553,9 @@ async function startWrongBookPractice(options = {}) {
       return;
     }
   }
-  const ids = buildWrongBookPracticeIds(userCourseStore(), { ignoreReview: !!options.ignoreReview })
-    .slice(0, WRONG_BOOK_PRACTICE_SIZE);
+  /* 题池 = 当前筛选结果的**全部**，不截断（旧实现的 .slice(0, 20) 已去掉）。
+     按钮上的 N 就是这里的 ids.length：筛出 8 道就练 8 道，筛出 200 道就练 200 道。 */
+  const ids = buildWrongBookPracticeIds(userCourseStore(), { ignoreReview: !!options.ignoreReview });
   if (!ids.length) {
     toast(options.ignoreReview ? "错题本里还没有错题" : "当前筛选没有错题，换个筛选条件试试");
     return;
