@@ -2752,7 +2752,14 @@ function activeTrainingSession() {
 }
 
 function isBatchScopedTrainingSession(session) {
-  return !!session && session.mode === "smart" && Number(session.answerScopeVersion || 0) >= 1;
+  if (!session) return false;
+  /* 错题训练（session.mode === "wrong"，见 startWrongBookPractice / startDueWrongReview）
+     也是「批量训练单」，同样要自带作答作用域：题池里全是用户**之前答过并答错**的题，
+     courseStore.answers / verified 里躺着上一次的作答 —— 拿它们当本轮的作答，
+     用户还没答就被判分、答案直接被标出来（见 activeWrongPracticeSession）。
+     不计 answerScopeVersion：这个字段是给老 smart 会话做迁移用的，错题会话没有历史包袱。 */
+  if (session.mode === "wrong") return true;
+  return session.mode === "smart" && Number(session.answerScopeVersion || 0) >= 1;
 }
 
 function ensureSmartTrainingSessionState(session, reset = false) {
@@ -2810,8 +2817,35 @@ function activeSmartTrainingSession() {
   return ensured;
 }
 
+/* 错题训练会话（「开始训练」/「今日错题复习」）：本轮作答与判定结果都记在**会话自己**身上。
+   为什么必须这么做：错题的定义就是「用户之前答过并答错了」，
+   所以 courseStore.answers[qid] / courseStore.verified[qid] 里躺着上一次的作答与判定
+   —— 直接拿它们渲染，进训练的第一眼就是「上次选的选项被预选中 + 正确答案被标出来 +
+   答案/解析区展开」，用户没答就被判了分。这不是练。
+   作用域划在会话上（和智能训练同一套机制）之后：
+     · 本轮还没答过的题 = 干净的一轮（没有任何提示）
+     · 本轮答过的题 = 显示判定结果（退出再进能续做）
+   注意与 isWrongBookTrainingSession 的分工：那个只管「强制立即反馈」，
+   按上一轮的约定只认 type === "wrong"；这里要覆盖所有 wrong 训练会话（含 type === "due"）。 */
+function activeWrongPracticeSession() {
+  if (state.mode !== "wrong") return null;
+  const session = activeTrainingSession();
+  if (!session
+    || session.mode !== "wrong"
+    || Number(session.courseId || 0) !== Number(state.currentCourse?.id || 0)) return null;
+  session.answers ||= {};
+  session.verifiedAnswers ||= {};
+  session.results ||= {};
+  return session;
+}
+
+/* 当前「本轮作答」属于哪个会话（智能训练 / 错题训练）；没有会话就是科目级的 courseStore。 */
+function activeScopedAnswerSession() {
+  return activeSmartTrainingSession() || activeWrongPracticeSession();
+}
+
 function currentPracticeAnswerStore() {
-  const session = activeSmartTrainingSession();
+  const session = activeScopedAnswerSession();
   if (session) return session.answers;
   const courseStore = userCourseStore();
   courseStore.answers ||= {};
@@ -2819,7 +2853,7 @@ function currentPracticeAnswerStore() {
 }
 
 function currentPracticeVerifiedStore() {
-  const session = activeSmartTrainingSession();
+  const session = activeScopedAnswerSession();
   if (session) return session.verifiedAnswers;
   const courseStore = userCourseStore();
   courseStore.verified ||= {};
@@ -4153,7 +4187,9 @@ function chooseOption(q, label) {
 function markResult(q) {
   const courseStore = userCourseStore();
   const isRight = isAnswerCorrect(q);
-  const session = activeSmartTrainingSession();
+  /* 会话作用域的题单（智能训练 / 错题训练）：对错记进会话自己的 results，
+     否则 syncTrainingSessionStats 从会话里数不到正确率（错题训练会恒显示 0%）。 */
+  const session = activeScopedAnswerSession();
   if (session) {
     session.results[q.id] = {
       answer: currentAnswerSnapshot(q.id),
@@ -4635,7 +4671,7 @@ function markQuestionVerified(q) {
 function resetQuestionVerification(questionId) {
   if (state.mode === "exam" || !questionId) return;
   const courseStore = userCourseStore();
-  const session = activeSmartTrainingSession();
+  const session = activeScopedAnswerSession();
   if (session) {
     delete session.verifiedAnswers[questionId];
     delete session.results[questionId];
@@ -5051,6 +5087,11 @@ async function continueTrainingSession(sessionId) {
   resetGeneratedPracticeFilters();
   if (session.mode === "wrong") {
     state.mode = "wrong";
+    /* 同 startWrongBookPractice：续的一轮从「未交卷」开始，
+       否则练习交卷残留的 state.submitted 会让整份题单的答案在进训练时全部展开。
+       本轮**已经答过**的题靠会话自己的 verifiedAnswers 显示判定结果（见 activeWrongPracticeSession）。 */
+    state.submitted = false;
+    state.answerVisible = false;
     /* 同 startDueWrongReview：不把会话的题源口径写进「页面筛选」。
        due 会话的题池靠 session.ids 冻结，页面筛选强写 due 会留在错题本上，
        让用户回到错题本时看不到今天刚错的题。 */
@@ -5479,11 +5520,23 @@ async function startWrongBookPractice(options = {}) {
     courseId: state.currentCourse.id,
     courseName: state.currentCourse.name || "",
     ids,
+    /* 干净的一轮：本轮作答另起一份（见 activeWrongPracticeSession）。
+       answers 必须显式给空对象 —— upsertTrainingSession 是 { ...old, ...session }，
+       不写的话会继承上一次同 id 会话里已经答过的题。 */
+    answers: {},
+    verifiedAnswers: {},
+    results: {},
     currentIndex: 0,
     lastSubjectId: 0,
     status: "active",
   });
   state.mode = "wrong";
+  /* 练习刚交卷就跑来练错题时 state.submitted 还是 true（它是**练习那一轮**的运行时状态，
+     既不落盘也不按模式复位）—— 带进训练轮的话 shouldRevealCurrentAnswer 对每道题都返回
+     true，等于把答案全摊开。新的训练轮一律从「未交卷」开始，和 saveSmartPracticeSession
+     对新批次做的是同一件事。 */
+  state.submitted = false;
+  state.answerVisible = false;
   setCoursePicker(false);
   await loadQuestions();
   toast(`已开始错题训练（${ids.length} 道）`);
@@ -5514,8 +5567,16 @@ async function startDueWrongReview() {
     courseId: state.currentCourse.id,
     courseName: state.currentCourse.name || "",
     ids: fresh,
+    /* 同「开始训练」：本轮作答另起一份，别把上一次的作答当成本轮的（见 activeWrongPracticeSession） */
+    answers: {},
+    verifiedAnswers: {},
+    results: {},
+    status: "active",
   });
   state.mode = "wrong";
+  /* 同「开始训练」：练习交卷残留的 state.submitted 不能带进这一轮 */
+  state.submitted = false;
+  state.answerVisible = false;
   /* 这里**不写** state.wrongFilters.review = "due"。
      旧实现写了，于是「点过今日错题复习 → 切错题本」时错题本的「复习」筛选被留在
      「到期」，今天刚错的题（stage 0 的到期日是次日）在错题本里全都不见 ——
