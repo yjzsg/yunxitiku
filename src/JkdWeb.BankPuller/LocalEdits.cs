@@ -40,11 +40,31 @@ public sealed record ReapplyOutcome(int Subjects, int Chapters, int Orphans)
 }
 
 /// <summary>
+/// 叠层文件读不了 / 写不了时抛这个 —— **绝不**退化成「没有本地改动」。
+///
+/// 旧实现把任意读取失败当空叠层返回、任意写入失败静默吞掉，于是这条链会丢数据：
+/// 读取临时失败（文件被占用 / 权限 / 半截 JSON）→ 下一次 Remember 加载到空字典 →
+/// 保存时把整份编辑记录覆盖掉，接口仍返回 ok。调用方必须把它当成**明确的部分失败**
+/// 上报（参考网站 /api/user/load 对"读失败不能伪装成没有数据"的处理）。
+/// </summary>
+public sealed class LocalEditsUnavailableException : Exception
+{
+    public LocalEditsUnavailableException(string message, Exception? inner = null) : base(message, inner) { }
+}
+
+/// <summary>
 /// 本地改动叠层：题库编辑器对题干/解析/章节名的修改记在这里（题库目录下的 local-edits.json）。
 ///
 /// 为什么用文件而不是表：主库会被"重新导出题库"整库重建、也会被"整包上传"整体替换，
 /// 写进主库的改动会随库一起丢。这个 JSON 放在题库目录里、不在那两条链路的替换范围内，
-/// 所以拉取 / 重新导出之后调用 <see cref="Reapply"/> 就能把本地改动按题号贴回去（本地优先）。
+/// 所以拉取 / 重新导出 / 导入题库包之后都要调用 <see cref="Reapply"/> 把本地改动按题号
+/// 贴回去（本地优先）—— 只保留这个文件并不意味着改动已经生效。
+///
+/// 耐久性约定（BE-09）：
+///   · <see cref="Load"/> 只在"文件还不存在"时返回空叠层；文件在而读不了 → 抛；
+///   · <see cref="Save"/> 走同目录临时文件 + rename，失败 → 抛（线上文件保持旧的整份）；
+///   · <see cref="Reapply"/> / <see cref="RestoreSubject"/> / Remember* 的失败都**不会**
+///     被吞掉，由调用方决定怎么把"部分失败"报出去。
 /// </summary>
 public static class LocalEdits
 {
@@ -157,6 +177,80 @@ public static class LocalEdits
         }
     }
 
+    /// <summary>
+    /// 叠层文件原文快照（题库编辑器"先记叠层、再写库"用）：写库失败时把它原样写回来。
+    /// 返回 null = 当时还没有叠层文件。读失败抛（与 <see cref="Load"/> 同口径）。
+    /// </summary>
+    public static string? Snapshot(string bankPath)
+    {
+        lock (Gate)
+        {
+            var path = FilePathFor(bankPath);
+            if (!File.Exists(path)) return null;
+            try
+            {
+                return File.ReadAllText(path, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                throw new LocalEditsUnavailableException(
+                    $"本地改动叠层 {Path.GetFileName(path)} 读取失败：{ex.Message}", ex);
+            }
+        }
+    }
+
+    /// <summary>把 <see cref="Snapshot"/> 的原文写回；<paramref name="snapshot"/> 为 null 表示当时没有文件（删掉）。</summary>
+    public static void RestoreSnapshot(string bankPath, string? snapshot)
+    {
+        lock (Gate)
+        {
+            var path = FilePathFor(bankPath);
+            if (snapshot is null)
+            {
+                try
+                {
+                    if (File.Exists(path)) File.Delete(path);
+                }
+                catch (Exception ex)
+                {
+                    throw new LocalEditsUnavailableException(
+                        $"本地改动叠层 {Path.GetFileName(path)} 回滚（删除）失败：{ex.Message}", ex);
+                }
+                return;
+            }
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temp, snapshot, new UTF8Encoding(false));
+                File.Move(temp, path, true);
+            }
+            catch (Exception ex)
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); } catch { /* 同上 */ }
+                throw new LocalEditsUnavailableException(
+                    $"本地改动叠层 {Path.GetFileName(path)} 回滚（写回原文）失败：{ex.Message}", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 有本地改动记录的课程 id（整包导入后逐门重贴用）。
+    /// 读失败抛 —— 拿不到列表就不知道该给哪些课程重贴，绝不能当成"没有本地改动"直接发布。
+    /// </summary>
+    public static List<int> CoursesWithEdits(string bankPath)
+    {
+        lock (Gate)
+        {
+            var ids = new List<int>();
+            foreach (var key in Load(bankPath).Keys)
+            {
+                if (int.TryParse(key, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) && id > 0) ids.Add(id);
+            }
+            ids.Sort();
+            return ids;
+        }
+    }
+
     // ---- 重贴 / 还原 -----------------------------------------------------
 
     /// <summary>
@@ -165,6 +259,10 @@ public static class LocalEdits
     /// 题目在新库里已不存在时保留记录（界面显示为"题目已下线"），不静默丢弃。
     /// 贴回时 <c>ianswercount</c> 跟着本地文本一起重算（口径同保存路径）——
     /// 否则贴回的题干有 4 个选项、计数还停在上游那份的 3，学员端会把第 4 个选项截掉。
+    ///
+    /// 抛 <see cref="LocalEditsUnavailableException"/> 表示叠层读不了 / 写不了：题库内容
+    /// 本身已经贴进去了（库的事务已提交），但"服务端快照"没刷新或记录没落盘 —— 调用方
+    /// 必须把它当成**部分失败**明确报出去，不能当"无本地改动"。
     /// </summary>
     public static ReapplyOutcome Reapply(string bankPath, string targetDb, int courseId)
     {
@@ -275,8 +373,9 @@ public static class LocalEdits
         lock (Gate)
         {
             var all = Load(bankPath);
+            var key = subjectId.ToString(CultureInfo.InvariantCulture);
             if (!all.TryGetValue(CourseKey(courseId), out var course) ||
-                !course.Subjects.TryGetValue(subjectId.ToString(CultureInfo.InvariantCulture), out var edit))
+                !course.Subjects.TryGetValue(key, out var edit))
             {
                 message = "这道题没有本地改动记录";
                 return false;
@@ -294,29 +393,81 @@ public static class LocalEdits
                 DefaultTimeout = 30,
             }.ToString());
             conn.Open();
-            using (var cmd = conn.CreateCommand())
+
+            // 题目不在了就直接返回 false，**一个字节都不动**（叠层、库都不改）
+            using (var probe = conn.CreateCommand())
             {
-                cmd.CommandText = """
-                    update coursesubject
-                       set ctitle=@t, cquestion=@q, canswer=@a, cdescription=@d
-                     where isubjectid=@id
-                    """;
-                cmd.Parameters.AddWithValue("@t", edit.ServerTitle ?? "");
-                cmd.Parameters.AddWithValue("@q", edit.ServerQuestion ?? "");
-                cmd.Parameters.AddWithValue("@a", edit.ServerAnswer ?? "");
-                cmd.Parameters.AddWithValue("@d", edit.ServerDescription ?? "");
-                cmd.Parameters.AddWithValue("@id", subjectId);
-                var rows = cmd.ExecuteNonQuery();
-                if (rows == 0)
+                probe.CommandText = "select 1 from coursesubject where isubjectid=@id";
+                probe.Parameters.AddWithValue("@id", subjectId);
+                if (probe.ExecuteScalar() is null)
                 {
                     message = "题目已不在题库里（可能已被上游下线）";
                     return false;
                 }
             }
-            course.Subjects.Remove(subjectId.ToString(CultureInfo.InvariantCulture));
-            // 这门课没有别的本地改动了就把空壳也去掉，别在文件里留垃圾
-            if (course.Subjects.Count == 0 && course.Chapters.Count == 0) all.Remove(CourseKey(courseId));
-            Save(bankPath, all);
+
+            /* ⚠️ 顺序：**先**把记录从叠层里去掉并落盘，**再**写库。
+               旧实现反过来：库还原完才写叠层，叠层写失败（旧实现还静默吞掉）就留下
+               "库已还原、记录还在"→ 下一次拉取重贴又把本地改动贴回去，还原等于没做。
+               现在写叠层失败就在**动库之前**抛（库还是本地改动、记录还在，状态自洽）；
+               写库失败则把记录放回叠层（尽力而为）再抛，同样是自洽的。 */
+            course.Subjects.Remove(key);
+            var courseEmptied = course.Subjects.Count == 0 && course.Chapters.Count == 0;
+            if (courseEmptied) all.Remove(CourseKey(courseId));
+            try
+            {
+                Save(bankPath, all);
+            }
+            catch
+            {
+                // 恢复内存态，别让调用方拿着"记录已删"的字典继续跑
+                course.Subjects[key] = edit;
+                if (courseEmptied) all[CourseKey(courseId)] = course;
+                throw;
+            }
+
+            try
+            {
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = """
+                        update coursesubject
+                           set ctitle=@t, cquestion=@q, canswer=@a, cdescription=@d
+                         where isubjectid=@id
+                        """;
+                    cmd.Parameters.AddWithValue("@t", edit.ServerTitle ?? "");
+                    cmd.Parameters.AddWithValue("@q", edit.ServerQuestion ?? "");
+                    cmd.Parameters.AddWithValue("@a", edit.ServerAnswer ?? "");
+                    cmd.Parameters.AddWithValue("@d", edit.ServerDescription ?? "");
+                    cmd.Parameters.AddWithValue("@id", subjectId);
+                    var rows = cmd.ExecuteNonQuery();
+                    // 0 行 = 什么都没改却返回成功（旧实现正是这样）；多行说明唯一键不唯一，都当失败
+                    if (rows != 1)
+                    {
+                        throw new InvalidOperationException($"还原没有生效（影响 {rows} 行），请刷新后重试");
+                    }
+                }
+            }
+            catch
+            {
+                try
+                {
+                    if (!all.TryGetValue(CourseKey(courseId), out var again))
+                    {
+                        again = new CourseEdits();
+                        all[CourseKey(courseId)] = again;
+                    }
+                    again.Subjects[key] = edit;
+                    Save(bankPath, all);
+                }
+                catch (Exception restoreEx)
+                {
+                    // 回填失败：记录丢了，但库里还是本地改动（下次重贴不会再贴这道题）——
+                    // 属于"记录丢失"而非"库与记录矛盾"，留日志，原异常照样抛
+                    Console.WriteLine($"[local-edits-restore-rollback-failed] subject={subjectId} {restoreEx.Message}");
+                }
+                throw;
+            }
             message = "已还原为服务端版本";
             return true;
         }
@@ -423,35 +574,63 @@ public static class LocalEdits
         return WebUtility.HtmlDecode(text).Trim();
     }
 
+    /// <summary>
+    /// 读叠层。**只有**"文件还不存在"算空叠层；文件在但读不了 / 不是有效 JSON 一律抛
+    /// <see cref="LocalEditsUnavailableException"/>。
+    /// 读坏了当空叠层 → 下一次保存会把整份编辑记录覆盖掉，这是丢数据的根源，不能这么干。
+    /// </summary>
     private static Dictionary<string, CourseEdits> Load(string bankPath)
     {
+        var path = FilePathFor(bankPath);
+        if (!File.Exists(path)) return new Dictionary<string, CourseEdits>(StringComparer.Ordinal);
+        string json;
         try
         {
-            var path = FilePathFor(bankPath);
-            if (!File.Exists(path)) return new Dictionary<string, CourseEdits>(StringComparer.Ordinal);
-            var json = File.ReadAllText(path, Encoding.UTF8);
-            var data = JsonSerializer.Deserialize<Dictionary<string, CourseEdits>>(json);
-            return data is null ? new Dictionary<string, CourseEdits>(StringComparer.Ordinal) : new(data, StringComparer.Ordinal);
+            json = File.ReadAllText(path, Encoding.UTF8);
         }
-        catch
+        catch (Exception ex)
         {
-            // 读坏了就当没有本地改动，绝不因此阻断拉取
-            return new Dictionary<string, CourseEdits>(StringComparer.Ordinal);
+            throw new LocalEditsUnavailableException(
+                $"本地改动叠层 {Path.GetFileName(path)} 读取失败：{ex.Message}；为避免把已有编辑记录当成空叠层覆盖，本次操作已中止", ex);
         }
+        Dictionary<string, CourseEdits>? data;
+        try
+        {
+            data = JsonSerializer.Deserialize<Dictionary<string, CourseEdits>>(json);
+        }
+        catch (Exception ex)
+        {
+            throw new LocalEditsUnavailableException(
+                $"本地改动叠层 {Path.GetFileName(path)} 不是有效 JSON：{ex.Message}；为避免把已有编辑记录当成空叠层覆盖，本次操作已中止", ex);
+        }
+        if (data is null)
+        {
+            throw new LocalEditsUnavailableException(
+                $"本地改动叠层 {Path.GetFileName(path)} 的内容是 null，不是「课程 → 编辑」对象；本次操作已中止");
+        }
+        return new Dictionary<string, CourseEdits>(data, StringComparer.Ordinal);
     }
 
+    /// <summary>
+    /// 原子写叠层：同目录临时文件 + rename。失败**抛异常**（旧实现静默吞掉，接口照样返回 ok）。
+    /// rename 保证线上文件要么是旧的整份、要么是新的整份，不会半截 —— 所以写失败时
+    /// 之前的编辑记录仍然完好，调用方据此明确报"部分失败"。
+    /// </summary>
     private static void Save(string bankPath, Dictionary<string, CourseEdits> data)
     {
+        var path = FilePathFor(bankPath);
+        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            var path = FilePathFor(bankPath);
-            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
             File.WriteAllText(temp, JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
             File.Move(temp, path, true);
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort：叠层写不进去不影响题库本身
+            try { if (File.Exists(temp)) File.Delete(temp); } catch { /* 临时文件删不掉不影响结论 */ }
+            throw new LocalEditsUnavailableException(
+                $"本地改动叠层 {Path.GetFileName(path)} 写入失败：{ex.Message}；本次改动没有记入叠层（旧文件保持原样）", ex);
         }
     }
 }

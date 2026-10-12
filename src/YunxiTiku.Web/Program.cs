@@ -135,6 +135,9 @@ Directory.CreateDirectory(paths.UserDataRoot);
 Directory.CreateDirectory(paths.DataAssetsRoot);
 Directory.CreateDirectory(Path.GetDirectoryName(paths.SqlitePath) ?? paths.BaseRoot);
 QuestionBank.EnsureDatabase(paths.SqlitePath);
+/* 上次发布（整包上传 / 单课导入）如果死在切换途中，启动时收尾：DB 与 assets 必须
+   回到同一版本（见 BankPublish）。放着不管的话线上可能是"新库 + 半套旧图"。 */
+BankPublish.RecoverPending(paths);
 
 // 章节映射是外挂文件（data/chapter-map.json），不跟着题库走。
 // 首次部署 / 映射文件丢了 / 题库换过，都在后台补一次，不用手动点重建。
@@ -682,7 +685,8 @@ app.MapPost("/api/admin/course-update-check", async (HttpRequest request, Questi
             }
         }
         ids = ids.Distinct().Take(200).ToList();
-        return Results.Json(new { ok = true, results = await CourseUpdateChecker.CheckAsync(bank, ids, configuration) });
+        var checks = await CourseUpdateChecker.CheckAsync(bank, ids, configuration);
+        return Results.Json(new { ok = true, results = CourseUpdateChecker.Describe(ids, checks) });
     }
     catch (Exception ex)
     {
@@ -728,9 +732,10 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
                 error = Puller.PullProgressTracker.Shared.DescribeBusy(courseId.Value),
             }, statusCode: 409);
         }
-        /* 拉取前先问一次上游「有没有更新」：没有就直接跳过，省掉一次几分钟的白拉。
-           检查失败（上游账号没配、网络抖动等）**不阻断拉取** —— 宁可多拉一次，
-           也不能因为检查本身出错就彻底拉不了。要强制拉取可以带 force=true。 */
+        /* 拉取前先问一次上游「有没有更新」：**确定没有**才跳过，省掉一次几分钟的白拉。
+           「拿不到结论」（网络超时 / SOAP 错误 / 上游换了格式）**不阻断拉取** —— 宁可多拉一次，
+           也不能因为检查本身出错就彻底拉不了（这也是 HasUpdateAsync 注释里的原意）。
+           要强制拉取可以带 force=true。 */
         if (force != true)
         {
             try
@@ -741,6 +746,7 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
                     {
                         ok = true,
                         skipped = true,
+                        state = "unchanged",
                         courseId = courseId.Value,
                         message = "该题库已是最新，未执行拉取。",
                     });
@@ -1362,6 +1368,8 @@ internal static string SafeErrorText(Exception ex)
        回显绝对路径等于免费泄露部署目录结构。完整原因已写进上面的日志。 */
     if (ex is AuthStoreUnavailableException) return "账号数据暂时不可用，请联系管理员（服务端日志有详细信息）";
     if (ex is InvalidOperationException || ex is UserDataConflictException) return ex.Message;
+    // 本地改动叠层读/写失败：文案本身就是"该怎么办"，透传（这些接口都是管理员接口）
+    if (ex is Puller.LocalEditsUnavailableException) return ex.Message;
     // 以前这些都被压成"操作失败，请稍后重试"，用户无法自诊断；这里透传（不含机密）
     if (ex is IOException) return "文件读写失败：" + ex.Message;
     if (ex is UnauthorizedAccessException) return "文件权限不足：" + ex.Message;
@@ -1404,11 +1412,11 @@ internal static string CleanUserName(string? value)
 
 internal static string UserDataPath(AppPaths paths, string user) => Path.Combine(paths.UserDataRoot, CleanUserName(user) + ".json");
 internal static string NowText() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-internal static string Timestamp() => DateTime.Now.ToString("yyyyMMdd-HHmmss");
 
 /// <summary>
 /// 备份名用：秒级时间戳 + 短随机后缀。同秒内两次备份不再撞名
-/// （旧实现是纯秒级，zip 走 FileMode.CreateNew 会直接抛，目录则被静默覆盖）。
+/// （旧实现是纯秒级 <c>Timestamp()</c>，zip 走 FileMode.CreateNew 会直接抛，目录则被静默覆盖 ——
+/// 编辑同一道题同一秒连存两次会覆盖同一份快照，所以那个纯秒级的实现已删除）。
 /// </summary>
 internal static string TimestampUnique() => DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6];
 
@@ -1567,7 +1575,8 @@ static class ServerBankPuller
         Directory.CreateDirectory(backupDir);
         if (File.Exists(target))
         {
-            File.Copy(target, Path.Combine(backupDir, Path.GetFileName(target)), true);
+            // 在线备份：直接 File.Copy 活动库会漏掉 WAL 里还没 checkpoint 的已提交事务（BE-08）
+            SqliteSnapshot.Copy(target, Path.Combine(backupDir, Path.GetFileName(target)));
         }
         // Only this course's images are rewritten by a pull, so only those are snapshotted —
         // copying the whole assets tree (every course) would be needlessly expensive.
@@ -1603,7 +1612,20 @@ static class ServerBankPuller
             .GetResult();
 
         // 本地改动（题库编辑器改过的题干/解析/章节名）重贴回去：本地优先
-        var localEdits = Puller.LocalEdits.Reapply(paths.SqlitePath, target, courseId);
+        /* 叠层读不了/写不了时**不能**装作"没有本地改动"（旧实现：读失败返回空叠层、
+           写失败静默吞掉，拉完编辑就悄悄消失）。这里把它作为**部分失败**明确报出去：
+           题库本身是好的（ok 仍为 true），但本地改动没有贴回来，界面要能看到。 */
+        Puller.ReapplyOutcome localEdits;
+        string? localEditsError = null;
+        try
+        {
+            localEdits = Puller.LocalEdits.Reapply(paths.SqlitePath, target, courseId);
+        }
+        catch (Puller.LocalEditsUnavailableException ex)
+        {
+            localEdits = new Puller.ReapplyOutcome(0, 0, 0);
+            localEditsError = SafeErrorText(ex);
+        }
 
         // 拉完再读一次，得出"新增 / 消失"的题号
         var after = ReadCourseIds(target, courseId);
@@ -1638,7 +1660,11 @@ static class ServerBankPuller
             soapCalls = summary.SoapCalls,
             elapsedSeconds = summary.ElapsedSeconds,
             localEditsReapplied = localEdits.Subjects + localEdits.Chapters,
-            message = summary.Describe(),
+            localEditsError = localEditsError,
+            partial = localEditsError is not null,
+            message = localEditsError is null
+                ? summary.Describe()
+                : summary.Describe() + $"；但本地改动**没有**重贴：{localEditsError}",
             backup = backupDir,
             results = new[] { new { courseId, chapters = summary.Chapters, subjects = summary.Subjects } },
             // 对比报告（原"题库管理器"的预检）：新增/消失的题与章节，以及本地改动受影响的情况
@@ -1701,7 +1727,15 @@ static class ServerBankPuller
         return (chapters, subjects);
     }
 
-    /// <summary>这门课在主库里有没有正文（= 导出产物里包含它）。读不出来时按"有"处理，保持原行为。</summary>
+    /// <summary>
+    /// 这门课在主库里有没有正文（= 导出产物里包含它）。读不出来时按"有"处理，保持原行为。
+    ///
+    /// ⚠️ 必须写 <c>main.coursesubject</c>：这个连接是从**连接池**里拿的，池里同一连接串的连接
+    /// 可能已经被 <see cref="OpenBank"/> 用过（那个方法会 ATTACH 拉取库并建同名的 TEMP VIEW 遮蔽表）。
+    /// 不带库名时 `coursesubject` 会命中那个视图（= 主库 ∪ 拉取库），于是"只有拉取库里有的课程"
+    /// 也被判成"主库有正文" —— 拉取会把内容写进主库、编辑的备份也会备份错库（实测：
+    /// pulled 库里的课程被备份成主库，备份里根本没有那道题）。
+    /// </summary>
     internal static bool MainHoldsCourseContent(string mainDbPath, int courseId)
     {
         try
@@ -1714,7 +1748,7 @@ static class ServerBankPuller
             }.ToString());
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "select count(*) from coursesubject where icourseid=@c";
+            cmd.CommandText = "select count(*) from main.coursesubject where icourseid=@c";
             cmd.Parameters.AddWithValue("@c", courseId);
             return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
         }
@@ -1756,6 +1790,547 @@ static class ServerBankPuller
         {
             CopyTree(dir, Path.Combine(target, Path.GetFileName(dir)));
         }
+    }
+}
+
+/// <summary>
+/// SQLite **在线备份**：拿一份一致的库快照，替代 <c>File.Copy(库文件)</c>。
+///
+/// 为什么必须用它：直接复制活动库的字节，(a) 若源库在 WAL 模式下，<c>-wal</c> 里还没
+/// checkpoint 的已提交事务会**漏掉**；(b) 复制期间源库还在被写，拷出来的可能是半截页面。
+/// BackupDatabase 走 SQLite 自己的读语义，源库可以继续被读写。
+///
+/// ⚠️ 它**不是**停写/一致性机制：写操作的互斥仍然由 <see cref="BankWriteGate"/> 负责，
+/// 备份只是"不把库拷坏"。所以别拿 <c>SqliteConnection.ClearAllPools()</c> 当停写手段
+/// （它只是把空闲池连接关掉，正在服务请求的连接不受影响）。
+/// </summary>
+internal static class SqliteSnapshot
+{
+    /// <summary>把 <paramref name="sourcePath"/> 的一致性快照写到 <paramref name="destPath"/>（覆盖已有文件）。</summary>
+    public static void Copy(string sourcePath, string destPath)
+    {
+        var source = Path.GetFullPath(sourcePath);
+        if (!File.Exists(source)) throw new FileNotFoundException("题库数据库不存在", source);
+        var dest = Path.GetFullPath(destPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(dest) ?? ".");
+        if (File.Exists(dest)) File.Delete(dest);
+        using (var from = Open(source, SqliteOpenMode.ReadOnly))
+        using (var to = Open(dest, SqliteOpenMode.ReadWriteCreate))
+        {
+            from.BackupDatabase(to);
+        }
+    }
+
+    /// <summary>
+    /// 备份连接一律不进连接池：池里的空闲连接在 Windows 上仍占着文件句柄，
+    /// 会让随后对备份目录/版本目录的 rename、Delete 失败。
+    /// </summary>
+    private static SqliteConnection Open(string path, SqliteOpenMode mode)
+    {
+        var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = mode,
+            DefaultTimeout = 30,
+            Pooling = false,
+        }.ToString());
+        conn.Open();
+        return conn;
+    }
+}
+
+/// <summary>
+/// 题库发布的「版本目录 + 原子切换」（BE-07）。
+///
+/// 旧实现是"先把上传包里的库覆盖到线上、再删光 live assets 整棵复制"：
+/// 复制中途失败/磁盘满/关机 → 新库配缺图（或旧库配新图）；健康检查失败也只回拷 DB、
+/// 不恢复 assets。单课导入更是把**源包整棵 assets** 盖到线上（连别的课的图一起动），
+/// 任一张图失败也不撤销已经提交的库事务。
+///
+/// 现在：
+///   · DB 与 assets 先在**同一文件系统**的版本目录里准备好、校验通过（线上文件一个字节不动）；
+///   · 切换只用同卷 rename（DB 一个文件、assets 一棵目录），任何一步失败按逆序撤销；
+///   · 切换日志（data/_publish/*.json）留在盘上，进程中途死掉由
+///     <see cref="RecoverPending"/> 在下次启动时收尾 —— 线上要么整套旧的、要么整套新的。
+/// </summary>
+internal static class BankPublish
+{
+    /// <summary>发布用的路径（绝对路径，且都在同卷）。</summary>
+    internal sealed class PublishJournal
+    {
+        public string Kind { get; set; } = "";            // bank | course
+        public string State { get; set; } = "prepared";   // prepared | committed
+        public string Name { get; set; } = "";
+        public string LiveDb { get; set; } = "";
+        public string LiveAssets { get; set; } = "";
+        public string OldDb { get; set; } = "";
+        public string OldAssets { get; set; } = "";
+        public string StagedDb { get; set; } = "";
+        public string StagedAssets { get; set; } = "";
+        public int CourseId { get; set; }
+        public string StampName { get; set; } = "";
+        public int StampChapters { get; set; }
+        public int StampSubjects { get; set; }
+        public string CreatedAt { get; set; } = "";
+    }
+
+    public static string DataRoot(AppPaths paths)
+        => Directory.GetParent(Path.GetFullPath(paths.SqlitePath))?.FullName ?? paths.BaseRoot;
+
+    public static string VersionsRoot(AppPaths paths) => Path.Combine(DataRoot(paths), "_versions");
+
+    public static string JournalsRoot(AppPaths paths) => Path.Combine(DataRoot(paths), "_publish");
+
+    /// <summary>开一个干净的版本目录（与线上同一文件系统，切换才能用 rename）。</summary>
+    public static string NewStagingDir(AppPaths paths, string name)
+    {
+        var dir = Path.Combine(VersionsRoot(paths), name);
+        if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    // ---- 整包发布 ---------------------------------------------------------
+
+    /// <summary>
+    /// 把线上 DB + assets 换成版本目录里的那一套。健康检查不通过 → 整套撤销后抛。
+    /// 调用方保证 <paramref name="stagedDb"/> 已经过校验、且已把本地改动重贴进去。
+    /// </summary>
+    public static void PublishBank(AppPaths paths, string name, string stagedDb, string stagedAssets)
+    {
+        // 版本目录里那份库刚被写过（重贴本地改动），把空闲池连接关掉让 SQLite 自己把 WAL
+        // checkpoint 回主文件 —— 这样只搬 .db 也不会漏掉刚写进去的内容（见 SwapIn 的说明）。
+        SqliteConnection.ClearAllPools();
+        var journal = new PublishJournal
+        {
+            Kind = "bank",
+            Name = name,
+            LiveDb = Path.GetFullPath(paths.SqlitePath),
+            LiveAssets = Path.GetFullPath(paths.DataAssetsRoot),
+            OldDb = Path.GetFullPath(paths.SqlitePath) + ".old-" + name,
+            OldAssets = Path.GetFullPath(paths.DataAssetsRoot).TrimEnd(Path.DirectorySeparatorChar) + ".old-" + name,
+            StagedDb = Path.GetFullPath(stagedDb),
+            StagedAssets = Path.GetFullPath(stagedAssets),
+            CreatedAt = NowText(),
+        };
+        var journalPath = WriteJournal(paths, journal);
+        try
+        {
+            SwapIn(journal, journalPath);
+            if (!QuestionBank.ProbeHealthy(journal.LiveDb))
+            {
+                throw new InvalidOperationException("上传的题库无法正常读取（缺少必要的表/列），已自动回滚到原题库");
+            }
+            journal.State = "committed";
+            WriteJsonAtomic(journalPath, journal);
+            CleanupOld(journal);
+            TryDeleteFile(journalPath);
+        }
+        catch
+        {
+            // 撤销：DB 与 assets 一起回上一版本（旧实现在这条分支上只回拷 DB，图片留在半套上）
+            Undo(journal, journalPath);
+            throw;
+        }
+    }
+
+    // ---- 单课 assets 发布（带日志，与库合并建立关联） ----------------------
+
+    /// <summary>
+    /// 单课导入的 assets 切换：只动 <c>assets/&lt;courseId&gt;</c>，旧的一份先挪到版本目录里，
+    /// 等库那一步确认落库后再删。返回发布对象，调用方在库操作成功后调用 <see cref="CourseAssetPublish.Commit"/>。
+    /// </summary>
+    public static CourseAssetPublish PublishCourseAssets(AppPaths paths, string name, int courseId, string stagedCourseAssets)
+    {
+        var liveAssets = Path.GetFullPath(Path.Combine(paths.DataAssetsRoot, courseId.ToString(CultureInfo.InvariantCulture)));
+        var journal = new PublishJournal
+        {
+            Kind = "course",
+            Name = name,
+            CourseId = courseId,
+            LiveDb = Path.GetFullPath(paths.SqlitePath),
+            LiveAssets = liveAssets,
+            OldAssets = Path.Combine(VersionsRoot(paths), name, "old", courseId.ToString(CultureInfo.InvariantCulture)),
+            StagedAssets = Path.GetFullPath(stagedCourseAssets),
+            CreatedAt = NowText(),
+        };
+        var journalPath = WriteJournal(paths, journal);
+        var publish = new CourseAssetPublish(journal, journalPath);
+        publish.SwapIn();
+        return publish;
+    }
+
+    /// <summary>单课 assets 的一次发布：切换 / 提交 / 撤销。</summary>
+    internal sealed class CourseAssetPublish
+    {
+        private readonly PublishJournal _journal;
+        private readonly string _journalPath;
+
+        internal CourseAssetPublish(PublishJournal journal, string journalPath)
+        {
+            _journal = journal;
+            _journalPath = journalPath;
+        }
+
+        public string JournalPath => _journalPath;
+
+        /// <summary>把这份导入的"课程指纹"写进日志：崩溃后据此判断库那一步到底落库没有。</summary>
+        public void StampCourse(string name, int chapters, int subjects)
+        {
+            _journal.StampName = name;
+            _journal.StampChapters = chapters;
+            _journal.StampSubjects = subjects;
+            WriteJsonAtomic(_journalPath, _journal);
+        }
+
+        internal void SwapIn()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(_journal.OldAssets) ?? ".");
+                if (Directory.Exists(_journal.LiveAssets))
+                {
+                    TryDeleteDirectory(_journal.OldAssets);
+                    Directory.Move(_journal.LiveAssets, _journal.OldAssets);
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(_journal.LiveAssets) ?? ".");
+                Directory.Move(_journal.StagedAssets, _journal.LiveAssets);
+                _journal.State = "assets-published";
+                WriteJsonAtomic(_journalPath, _journal);
+            }
+            catch
+            {
+                // 只撤 assets：库那一步还没做，回到旧目录即可
+                UndoCourseAssets(_journal);
+                throw;
+            }
+        }
+
+        /// <summary>库那一步已经成功 → 删掉旧版本、结束这次发布。</summary>
+        public void Commit()
+        {
+            _journal.State = "committed";
+            try { WriteJsonAtomic(_journalPath, _journal); } catch (Exception ex) { Console.WriteLine($"[publish] 写发布日志失败（不影响本次导入）: {ex.Message}"); }
+            TryDeleteDirectory(_journal.OldAssets);
+            TryDeleteDirectory(_journal.StagedAssets);
+            TryDeleteFile(_journalPath);
+        }
+
+        /// <summary>库那一步失败/回滚 → assets 也回到上一版本。</summary>
+        public void Rollback()
+        {
+            UndoCourseAssets(_journal);
+            TryDeleteFile(_journalPath);
+        }
+    }
+
+    private static void UndoCourseAssets(PublishJournal journal)
+    {
+        try
+        {
+            if (Directory.Exists(journal.OldAssets))
+            {
+                TryDeleteDirectory(journal.LiveAssets);
+                Directory.CreateDirectory(Path.GetDirectoryName(journal.LiveAssets) ?? ".");
+                Directory.Move(journal.OldAssets, journal.LiveAssets);
+            }
+            TryDeleteDirectory(journal.StagedAssets);
+        }
+        catch (Exception ex)
+        {
+            // 撤销本身失败：日志文件**不删**，留给下次启动的 RecoverPending 继续收尾
+            Console.WriteLine($"[publish-rollback-failed] course={journal.CourseId} {ex.Message}");
+            throw new InvalidOperationException($"题库资源回滚失败，请重启服务或从备份 {journal.OldAssets} 恢复：{ex.Message}", ex);
+        }
+    }
+
+    // ---- 崩溃恢复 ---------------------------------------------------------
+
+    /// <summary>
+    /// 启动时收尾上次没做完的发布（data/_publish/*.json）：
+    /// 让线上的 DB 与 assets 回到"同一版本"，绝不留下半套。
+    /// </summary>
+    public static void RecoverPending(AppPaths paths)
+    {
+        var root = JournalsRoot(paths);
+        if (!Directory.Exists(root)) return;
+        foreach (var file in Directory.EnumerateFiles(root, "*.json", SearchOption.TopDirectoryOnly))
+        {
+            PublishJournal? journal;
+            try
+            {
+                journal = JsonSerializer.Deserialize<PublishJournal>(File.ReadAllText(file, Encoding.UTF8));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[publish-recover] 发布日志 {Path.GetFileName(file)} 读不了（保留，人工处理）: {ex.Message}");
+                continue;
+            }
+            if (journal is null || journal.Kind is not ("bank" or "course"))
+            {
+                Console.WriteLine($"[publish-recover] 发布日志 {Path.GetFileName(file)} 无法识别（保留，人工处理）");
+                continue;
+            }
+            try
+            {
+                if (journal.Kind == "bank") RecoverBank(journal, file);
+                else RecoverCourse(paths, journal, file);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[publish-recover] {Path.GetFileName(file)} 收尾失败（保留，人工处理）: {ex.Message}");
+            }
+        }
+        PruneLeftovers(paths);
+    }
+
+    /// <summary>
+    /// 清理陈旧的版本目录与 `.old-*` 残留（一天前的）。只删没人引用的：
+    /// 正在用的版本在发布结束时就删了，这里兜的是"删除失败/进程被杀"留下的垃圾。
+    /// </summary>
+    private static void PruneLeftovers(AppPaths paths)
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-1);
+            var versions = VersionsRoot(paths);
+            if (Directory.Exists(versions))
+            {
+                foreach (var dir in Directory.EnumerateDirectories(versions))
+                {
+                    if (Directory.GetLastWriteTimeUtc(dir) < cutoff) TryDeleteDirectory(dir);
+                }
+            }
+            var dataRoot = DataRoot(paths);
+            foreach (var entry in Directory.EnumerateFileSystemEntries(dataRoot, "*.old-*", SearchOption.TopDirectoryOnly))
+            {
+                var updated = File.GetLastWriteTimeUtc(entry);
+                if (updated < cutoff)
+                {
+                    if (Directory.Exists(entry)) TryDeleteDirectory(entry);
+                    else TryDeleteFile(entry);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[publish-prune] 清理旧版本失败（忽略）: {ex.Message}");
+        }
+    }
+
+    private static void RecoverBank(PublishJournal journal, string journalPath)
+    {
+        var dbSwapped = !File.Exists(journal.StagedDb) && File.Exists(journal.LiveDb);
+        var assetsSwapped = !Directory.Exists(journal.StagedAssets) && Directory.Exists(journal.LiveAssets);
+        if (assetsSwapped)
+        {
+            Console.WriteLine($"[publish-recover] 整包发布已完成，清理旧版本");
+            CleanupOld(journal);
+            TryDeleteFile(journalPath);
+            return;
+        }
+        if (dbSwapped)
+        {
+            // 只换了一半（DB 新、assets 旧）→ 把 assets 也换过去；不健康就整个退回去
+            Console.WriteLine($"[publish-recover] 上次整包发布中断在 assets 切换之前，继续切换");
+            try
+            {
+                if (Directory.Exists(journal.LiveAssets))
+                {
+                    TryDeleteDirectory(journal.OldAssets);
+                    Directory.Move(journal.LiveAssets, journal.OldAssets);
+                }
+                Directory.Move(journal.StagedAssets, journal.LiveAssets);
+                if (!QuestionBank.ProbeHealthy(journal.LiveDb))
+                {
+                    throw new InvalidOperationException("回收后的题库读不通");
+                }
+                CleanupOld(journal);
+                TryDeleteFile(journalPath);
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[publish-recover] 继续切换失败，改回滚到上一版本: {ex.Message}");
+                Undo(journal, journalPath);
+                return;
+            }
+        }
+        Console.WriteLine($"[publish-recover] 上次整包发布还没开始切换，清理版本目录");
+        CleanupStaged(journal);
+        TryDeleteFile(journalPath);
+    }
+
+    private static void RecoverCourse(AppPaths paths, PublishJournal journal, string journalPath)
+    {
+        var landed = CourseMatchesStamp(journal);
+        if (journal.State == "committed" || landed)
+        {
+            Console.WriteLine($"[publish-recover] 课程 {journal.CourseId} 的导入已落库，补做/清理 assets 切换");
+            if (!Directory.Exists(journal.LiveAssets) && Directory.Exists(journal.StagedAssets))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(journal.LiveAssets) ?? ".");
+                Directory.Move(journal.StagedAssets, journal.LiveAssets);
+            }
+            TryDeleteDirectory(journal.OldAssets);
+            TryDeleteDirectory(journal.StagedAssets);
+            TryDeleteFile(journalPath);
+            return;
+        }
+        Console.WriteLine($"[publish-recover] 课程 {journal.CourseId} 的导入没有落库，把 assets 退回上一版本");
+        if (Directory.Exists(journal.OldAssets))
+        {
+            TryDeleteDirectory(journal.LiveAssets);
+            Directory.CreateDirectory(Path.GetDirectoryName(journal.LiveAssets) ?? ".");
+            Directory.Move(journal.OldAssets, journal.LiveAssets);
+        }
+        TryDeleteDirectory(journal.StagedAssets);
+        TryDeleteFile(journalPath);
+    }
+
+    /// <summary>库里的这门课是不是就是这份包（导入已落库）：按课程名 + 章节/题目数比对。</summary>
+    private static bool CourseMatchesStamp(PublishJournal journal)
+    {
+        if (!File.Exists(journal.LiveDb) || journal.StampName.Length == 0) return false;
+        try
+        {
+            var info = AdminDataTransfer.ReadCourseImportInfo(journal.LiveDb, journal.CourseId);
+            return info.Name == journal.StampName
+                   && info.Chapters == journal.StampChapters
+                   && info.Subjects == journal.StampSubjects;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // ---- 内部 -------------------------------------------------------------
+
+    private static void SwapIn(PublishJournal journal, string journalPath)
+    {
+        /* ⚠️ SQLite 的 -wal / -shm 必须跟着库文件一起换，否则新库旁边留着一份**旧库的 WAL**：
+           下一次打开会把旧 WAL 里的页重放到新库上（或在最坏情况下报 malformed）。
+           顺序：先把旧库的 sidecar 挪开（挪不动就中止 —— 说明还有活动连接占着，此时一个字节都还没动），
+           再换库文件，最后把版本目录里那份库自己的 sidecar 一起搬过来。
+           调用方已经 ClearAllPools 过一次（空闲池连接关闭时 SQLite 会把 WAL checkpoint 掉），
+           所以这几步通常都是空操作。 */
+        var movedSidecars = 0;
+        foreach (var suffix in SqliteSidecarSuffixes)
+        {
+            var live = journal.LiveDb + suffix;
+            if (!File.Exists(live)) continue;
+            var stash = live + ".old-" + journal.Name;
+            TryDeleteFile(stash);
+            File.Move(live, stash);
+            movedSidecars++;
+        }
+        if (movedSidecars > 0) Console.WriteLine($"[publish] 换库前把 {movedSidecars} 个 SQLite 附属文件（-wal/-shm/-journal）挪到一边");
+
+        // 1) DB：线上 → 旧位置；版本目录 → 线上
+        if (File.Exists(journal.LiveDb))
+        {
+            TryDeleteFile(journal.OldDb);
+            File.Move(journal.LiveDb, journal.OldDb);
+        }
+        File.Move(journal.StagedDb, journal.LiveDb);
+        // 版本目录里那份库可能自己带 sidecar（重贴本地改动是在版本目录里写的，WAL 模式）
+        foreach (var suffix in SqliteSidecarSuffixes)
+        {
+            var staged = journal.StagedDb + suffix;
+            if (!File.Exists(staged)) continue;
+            TryDeleteFile(journal.LiveDb + suffix);
+            File.Move(staged, journal.LiveDb + suffix);
+        }
+        // 旧库的 sidecar 已经在 Undo/CleanupOld 里处理，这里先留档（stash 路径由 live+suffix 推出）
+        // 2) assets 同理（目录 rename）
+        if (!Directory.Exists(journal.StagedAssets)) Directory.CreateDirectory(journal.StagedAssets);
+        if (Directory.Exists(journal.LiveAssets))
+        {
+            TryDeleteDirectory(journal.OldAssets);
+            Directory.Move(journal.LiveAssets, journal.OldAssets);
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(journal.LiveAssets) ?? ".");
+        Directory.Move(journal.StagedAssets, journal.LiveAssets);
+    }
+
+    /// <summary>库文件旁边要一起管理/清理的 SQLite 附属文件。</summary>
+    private static readonly string[] SqliteSidecarSuffixes = { "-wal", "-shm", "-journal" };
+
+    private static void Undo(PublishJournal journal, string journalPath)
+    {
+        // 逆序：assets 先回（只有"旧的一份已经挪走"时才需要回），再回 DB
+        try
+        {
+            if (Directory.Exists(journal.OldAssets))
+            {
+                TryDeleteDirectory(journal.LiveAssets);
+                Directory.CreateDirectory(Path.GetDirectoryName(journal.LiveAssets) ?? ".");
+                Directory.Move(journal.OldAssets, journal.LiveAssets);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[publish-undo-failed] assets 回滚失败: {ex.Message}");
+        }
+        try
+        {
+            if (File.Exists(journal.OldDb))
+            {
+                TryDeleteFile(journal.LiveDb);
+                File.Move(journal.OldDb, journal.LiveDb);
+            }
+            // 旧库的 -wal/-shm：把新库带来的那份删掉，再把旧那份挪回来（顺序不能反）
+            foreach (var suffix in SqliteSidecarSuffixes)
+            {
+                var live = journal.LiveDb + suffix;
+                var stash = live + ".old-" + journal.Name;
+                if (!File.Exists(stash)) continue;
+                TryDeleteFile(live);
+                File.Move(stash, live);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[publish-undo-failed] DB 回滚失败: {ex.Message}");
+        }
+        CleanupStaged(journal);
+        TryDeleteFile(journalPath);
+        SqliteConnection.ClearAllPools();
+    }
+
+    private static void CleanupOld(PublishJournal journal)
+    {
+        TryDeleteFile(journal.OldDb);
+        TryDeleteDirectory(journal.OldAssets);
+        foreach (var suffix in SqliteSidecarSuffixes)
+        {
+            TryDeleteFile(journal.LiveDb + suffix + ".old-" + journal.Name);
+            TryDeleteFile(journal.OldDb + suffix);
+        }
+    }
+
+    private static void CleanupStaged(PublishJournal journal)
+    {
+        TryDeleteFile(journal.StagedDb);
+        TryDeleteDirectory(journal.StagedAssets);
+    }
+
+    private static void WriteJsonAtomic<T>(string path, T value)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+        File.Move(temp, path, true);
+    }
+
+    private static string WriteJournal(AppPaths paths, PublishJournal journal)
+    {
+        var root = JournalsRoot(paths);
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, journal.Kind + "-" + journal.Name + ".json");
+        WriteJsonAtomic(path, journal);
+        return path;
     }
 }
 
@@ -1871,13 +2446,35 @@ static class AdminDataTransfer
     public static string CreateBankZip(AppPaths paths)
     {
         if (!File.Exists(paths.SqlitePath)) throw new InvalidOperationException("当前没有可下载的题库数据库");
+        /* 下载也是一次"读活动题库"：
+           · 必须排进写闸（拉取/导入/清广告正在换库/换图时导出，会拿到半个版本）；
+           · 库的字节必须走 SQLite **在线备份**（直接压 live .db，WAL 里还没 checkpoint 的
+             已提交事务会漏掉，拷到一半被写也会得到坏页）；
+           · assets 与库在同一把闸内导出 = 同一版本。 */
+        using var gate = BankWriteGate.Enter();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-bankzip-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
         var tempZip = Path.Combine(Path.GetTempPath(), $"yunxi-bank-{Guid.NewGuid():N}.zip");
-        using var zip = ZipFile.Open(tempZip, ZipArchiveMode.Create);
-        zip.CreateEntryFromFile(paths.SqlitePath, "question-bank.db", CompressionLevel.Fastest);
-        zip.CreateEntry("assets/");
-        if (Directory.Exists(paths.DataAssetsRoot))
+        try
         {
-            AddDirectoryToZip(zip, paths.DataAssetsRoot, "assets");
+            var snapshotDb = Path.Combine(tempDir, "question-bank.db");
+            SqliteSnapshot.Copy(paths.SqlitePath, snapshotDb);
+            using var zip = ZipFile.Open(tempZip, ZipArchiveMode.Create);
+            zip.CreateEntryFromFile(snapshotDb, "question-bank.db", CompressionLevel.Fastest);
+            zip.CreateEntry("assets/");
+            if (Directory.Exists(paths.DataAssetsRoot))
+            {
+                AddDirectoryToZip(zip, paths.DataAssetsRoot, "assets");
+            }
+        }
+        catch
+        {
+            TryDeleteFile(tempZip);
+            throw;
+        }
+        finally
+        {
+            TryDeleteDirectory(tempDir);
         }
         return tempZip;
     }
@@ -1905,6 +2502,8 @@ static class AdminDataTransfer
         if (ext != ".zip") throw new InvalidOperationException("题库上传仅支持 zip 包，包内需包含 question-bank.db 和 assets 目录");
         using var gate = BankWriteGate.Enter();
         var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-bank-{Guid.NewGuid():N}");
+        var publishName = "bank-" + TimestampUnique();
+        var stage = "";
         try
         {
             Directory.CreateDirectory(tempDir);
@@ -1912,33 +2511,58 @@ static class AdminDataTransfer
             var sourceDb = FindQuestionDb(tempDir) ?? throw new InvalidOperationException("压缩包中没有找到 question-bank.db / .sqlite 题库文件");
             var sourceAssets = FindAssetsDirectory(tempDir, sourceDb) ?? throw new InvalidOperationException("压缩包中没有找到 assets 目录");
 
-            ValidateQuestionDb(sourceDb);
             var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
             Directory.CreateDirectory(dataRoot);
-            var backupDir = Path.Combine(dataRoot, "_backups", "bank-" + TimestampUnique());
+
+            /* ── 阶段 1：在**同卷的版本目录**里准备好整套（DB + assets）并校验 ────────────
+               线上文件在这一阶段一个字节都不动：复制/校验/清点失败的包不会碰到 live 库，
+               更不会出现"新库配旧图"。旧实现是直接覆盖 live DB + 先删光 live assets 再复制，
+               中途失败（磁盘满/IO 错/重启）就留下半套。 */
+            stage = BankPublish.NewStagingDir(paths, publishName);
+            var stagedDb = Path.Combine(stage, "question-bank.db");
+            var stagedAssets = Path.Combine(stage, "assets");
+            File.Copy(sourceDb, stagedDb, true);
+            CopyDirectory(sourceAssets, stagedAssets);
+            ValidateQuestionDb(stagedDb);
+            if (!QuestionBank.ProbeHealthy(stagedDb))
+            {
+                throw new InvalidOperationException("上传的题库无法正常读取（缺少必要的表/列），已放弃本次导入，题库保持原样");
+            }
+
+            /* ── 阶段 2：发布前把本地改动重贴进新库 ─────────────────────────────
+               只保留 local-edits.json 文件**不等于**改动已生效：整包替换会把主库整个换掉，
+               这里对每门有编辑记录的课重贴（并刷新叠层里的"服务端快照"）。
+               叠层读不了/写不了 → 抛 → 整个导入中止，上一版本原样保留（BE-09）。 */
+            var reapplied = 0;
+            foreach (var editedCourse in Puller.LocalEdits.CoursesWithEdits(paths.SqlitePath))
+            {
+                // 这门课新的主库里没有（未购课程在拉取库）→ 不归这条链路管，拉取时再贴
+                if (!ServerBankPuller.MainHoldsCourseContent(stagedDb, editedCourse)) continue;
+                Puller.LocalEdits.Reapply(paths.SqlitePath, stagedDb, editedCourse);
+                reapplied++;
+            }
+
+            // 备份：库走 SQLite 在线备份（一致快照，WAL 里的事务不会漏），assets 照旧整棵留档
+            var backupDir = Path.Combine(dataRoot, "_backups", publishName);
             Directory.CreateDirectory(backupDir);
-            if (File.Exists(paths.SqlitePath)) File.Copy(paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
+            if (File.Exists(paths.SqlitePath)) SqliteSnapshot.Copy(paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"));
             if (Directory.Exists(paths.DataAssetsRoot))
             {
                 CopyDirectory(paths.DataAssetsRoot, Path.Combine(backupDir, "assets"));
             }
             BackupRetention.Prune(Path.Combine(dataRoot, "_backups"));
 
-            File.Copy(sourceDb, paths.SqlitePath, true);
-            ReplaceDirectory(paths.DataAssetsRoot, sourceAssets);
-            // 换入后再验一次：读不通就自动回滚（坏包上传不该把服务打死）
-            if (!QuestionBank.ProbeHealthy(paths.SqlitePath))
-            {
-                var backupDb = Path.Combine(backupDir, "question-bank.db");
-                if (File.Exists(backupDb)) File.Copy(backupDb, paths.SqlitePath, true);
-                throw new InvalidOperationException("上传的题库无法正常读取（缺少必要的表/列），已自动回滚到原题库");
-            }
+            /* ── 阶段 3：原子切换（同卷 rename；失败整套撤销，见 BankPublish.PublishBank） ── */
+            SqliteConnection.ClearAllPools();   // 只是把空闲池连接放下，别让 rename 撞上句柄（不是一致性机制）
+            BankPublish.PublishBank(paths, publishName, stagedDb, stagedAssets);
+
             return new
             {
                 ok = true,
                 type = "bank",
                 message = "题库和图片资源已上传",
                 backup = backupDir,
+                localEditsReapplied = reapplied,
                 // 导入路径也清广告（见 CleanAdsAfterImport 的说明）
                 ads = CleanAdsAfterImport(paths.SqlitePath, 0),
                 status = GetStatus(paths)
@@ -1947,12 +2571,14 @@ static class AdminDataTransfer
         finally
         {
             /* ⚠️ ValidateQuestionDb / TryReadTableCounts 开过的 SqliteConnection 会被**连接池**留着，
-               池里的连接在 Windows 上占着解包目录里那个 question-bank.db 的文件句柄，
+               池里的连接在 Windows 上占着解包目录/版本目录里那个 question-bank.db 的文件句柄，
                于是这里的 Directory.Delete 会抛「being used by another process」——
                上传明明已经成功（题库都换进去了），接口却回 400（实测 HEAD 上必现）。
                删目录前先把池清掉。 */
             SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+            // 版本目录只在"还没切换完"时才有内容；切换成功后里面的东西已经被搬走了
+            if (stage.Length > 0 && Directory.Exists(stage)) TryDeleteDirectory(stage);
         }
     }
 
@@ -1962,6 +2588,7 @@ static class AdminDataTransfer
         if (ext != ".zip") throw new InvalidOperationException("题库更新仅支持 zip 包，包内需包含 question-bank.db 和 assets 目录");
         using var gate = BankWriteGate.Enter();
         var tempDir = Path.Combine(Path.GetTempPath(), $"yunxi-course-bank-{Guid.NewGuid():N}");
+        var publishName = "course-" + courseId + "-" + TimestampUnique();
         try
         {
             Directory.CreateDirectory(tempDir);
@@ -1975,21 +2602,60 @@ static class AdminDataTransfer
 
             var dataRoot = Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot;
             Directory.CreateDirectory(dataRoot);
-            var backupDir = Path.Combine(dataRoot, "_backups", "course-" + courseId + "-" + TimestampUnique());
-            Directory.CreateDirectory(backupDir);
-            if (File.Exists(paths.SqlitePath)) File.Copy(paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
-            if (Directory.Exists(paths.DataAssetsRoot))
+
+            /* ── 阶段 1：只准备**这门课**的 assets（版本目录，同卷） ──────────────
+               源包里 assets 是按课程分目录的（assets/<courseId>/…）。旧实现把整棵 assets
+               盖到线上：别的课的图也会被源包里那份旧图覆盖，任一张图 IO 失败还不撤销已经
+               提交的库事务。这里只 stage 出这门课的那一份。 */
+            string? stagedCourseAssets = null;
+            if (sourceAssets is not null && Directory.Exists(Path.Combine(sourceAssets, courseId.ToString(CultureInfo.InvariantCulture))))
             {
-                CopyDirectory(paths.DataAssetsRoot, Path.Combine(backupDir, "assets"));
+                var stage = BankPublish.NewStagingDir(paths, publishName);
+                stagedCourseAssets = Path.Combine(stage, "assets", courseId.ToString(CultureInfo.InvariantCulture));
+                CopyDirectory(Path.Combine(sourceAssets, courseId.ToString(CultureInfo.InvariantCulture)), stagedCourseAssets);
+            }
+
+            // 备份：被修改的那一份库（这门课写的是主库）+ 这门课现有的图
+            var backupDir = Path.Combine(dataRoot, "_backups", publishName);
+            Directory.CreateDirectory(backupDir);
+            if (File.Exists(paths.SqlitePath)) SqliteSnapshot.Copy(paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"));
+            var liveCourseAssets = Path.Combine(paths.DataAssetsRoot, courseId.ToString(CultureInfo.InvariantCulture));
+            if (Directory.Exists(liveCourseAssets))
+            {
+                CopyDirectory(liveCourseAssets, Path.Combine(backupDir, "assets", courseId.ToString(CultureInfo.InvariantCulture)));
             }
             BackupRetention.Prune(Path.Combine(dataRoot, "_backups"));
 
             QuestionBank.EnsureDatabase(paths.SqlitePath);
-            var result = MergeCourseIntoBank(paths.SqlitePath, sourceDb, courseId);
-            if (sourceAssets is not null)
+            BankPublish.CourseAssetPublish? publish = null;
+            (int Chapters, int Subjects) result = (0, 0);
+            var dbMerged = false;
+            try
             {
-                Directory.CreateDirectory(paths.DataAssetsRoot);
-                CopyDirectory(sourceAssets, paths.DataAssetsRoot);
+                /* ── 阶段 2：assets 先就位（旧的一份挪到版本目录里，可逐字撤回） ─────── */
+                if (stagedCourseAssets is not null)
+                {
+                    publish = BankPublish.PublishCourseAssets(paths, publishName, courseId, stagedCourseAssets);
+                    publish.StampCourse(sourceInfo.Name, sourceInfo.Chapters, sourceInfo.Subjects);
+                }
+
+                /* ── 阶段 3：库合并（单个 SQLite 事务） ─────────────────────────── */
+                result = MergeCourseIntoBank(paths.SqlitePath, sourceDb, courseId);
+                dbMerged = true;
+
+                /* ── 阶段 4：把这门课的本地改动重贴回去（导入也是"换掉正文"，本地优先） ── */
+                Puller.LocalEdits.Reapply(paths.SqlitePath, paths.SqlitePath, courseId);
+
+                publish?.Commit();
+            }
+            catch
+            {
+                /* 库合并**已经提交**之后的任何失败（重贴叠层 / assets 切换）→ 补偿回滚：
+                   用刚做的在线备份把这门课整门贴回旧版本，assets 也退回上一版本。
+                   旧实现这条链路上没有任何回滚：库已经换了，图是半套，界面却报失败。 */
+                if (dbMerged) RollbackCourseImport(paths, backupDir, courseId);
+                publish?.Rollback();
+                throw;
             }
 
             return new
@@ -2013,7 +2679,61 @@ static class AdminDataTransfer
             // 同 ImportBank：连接池占着解包目录里的库文件，先清池再删目录
             SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+            TryDeleteDirectory(Path.Combine(BankPublish.VersionsRoot(paths), publishName));
         }
+    }
+
+    /// <summary>
+    /// 单课导入失败后的补偿回滚：把这门课从导入前的在线备份里整门贴回来。
+    /// 导入前库里没有这门课（新导入的课）→ 直接删掉。
+    /// </summary>
+    private static void RollbackCourseImport(AppPaths paths, string backupDir, int courseId)
+    {
+        var backupDb = Path.Combine(backupDir, "question-bank.db");
+        if (!File.Exists(backupDb))
+        {
+            Console.WriteLine($"[course-import-rollback] 没有可用的备份库（{backupDb}），课程 {courseId} 保持导入后的内容");
+            return;
+        }
+        try
+        {
+            if (CourseExists(backupDb, courseId))
+            {
+                MergeCourseIntoBank(paths.SqlitePath, backupDb, courseId);
+            }
+            else
+            {
+                DeleteCourse(paths.SqlitePath, courseId);
+            }
+            Console.WriteLine($"[course-import-rollback] 课程 {courseId} 已从备份 {backupDir} 回滚到导入前");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"导入失败后自动回滚课程 {courseId} 也失败了（{ex.Message}）；请用备份 {backupDir} 手工恢复", ex);
+        }
+    }
+
+    private static bool CourseExists(string dbPath, int courseId)
+    {
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.GetFullPath(dbPath), Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30,
+        }.ToString());
+        conn.Open();
+        return ExecuteScalar(conn, "select 1 from course where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId }) is not null;
+    }
+
+    /// <summary>删掉一门课（导入前库里本来没有这门课时，回滚就是把它删干净）。</summary>
+    private static void DeleteCourse(string targetDb, int courseId)
+    {
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.GetFullPath(targetDb), DefaultTimeout = 30 }.ToString());
+        conn.Open();
+        using var transaction = conn.BeginTransaction();
+        ExecuteNonQuery(conn, transaction, "delete from coursesubject where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId });
+        ExecuteNonQuery(conn, transaction, "delete from coursechapter where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId });
+        ExecuteNonQuery(conn, transaction, "delete from course where icourseid=@courseId", new Dictionary<string, object?> { ["@courseId"] = courseId });
+        transaction.Commit();
     }
 
     public static object ImportUserData(AppPaths paths, AuthStore auth, UserDataStore userData, string uploadedFile, string originalName)
@@ -2368,7 +3088,8 @@ static class AdminDataTransfer
         }
     }
 
-    private static (string Name, int Chapters, int Subjects) ReadCourseImportInfo(string dbPath, int courseId)
+    /// <summary>课程名 + 章节/题目数（发布日志据此判断"导入到底落库没有"）。</summary>
+    internal static (string Name, int Chapters, int Subjects) ReadCourseImportInfo(string dbPath, int courseId)
     {
         using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly, DefaultTimeout = 30 }.ToString());
         conn.Open();
@@ -2529,13 +3250,6 @@ static class AdminDataTransfer
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             entry.ExtractToFile(target, true);
         }
-    }
-
-    private static void ReplaceDirectory(string target, string source)
-    {
-        if (Directory.Exists(target)) Directory.Delete(target, true);
-        Directory.CreateDirectory(target);
-        CopyDirectory(source, target);
     }
 
     private static void CopyDirectory(string source, string target)
@@ -3311,69 +4025,178 @@ sealed class AuthStore
 }
 
 /// <summary>
+/// 一次更新检查的结论。**三态**，别把 Unknown 混进 Unchanged：
+/// 只有 <see cref="Unchanged"/> 才允许跳过拉取，Unknown 一律照拉。
+/// </summary>
+enum BankUpdateState
+{
+    /// <summary>确定上游有更新（章节或题目任一有增量）。</summary>
+    Updated,
+
+    /// <summary>确定没有更新（两个接口都通、都解析成 0 行）。</summary>
+    Unchanged,
+
+    /// <summary>拿不到结论（网络超时 / SOAP 错误 / 返回格式变了）。</summary>
+    Unknown,
+}
+
+/// <summary>单门课的检查结果。</summary>
+readonly record struct BankUpdateCheck(BankUpdateState State, int Chapters, int Subjects, string? Error)
+{
+    /// <summary>守卫用：**只在确定无更新时**才跳过拉取。</summary>
+    public bool IsCertainlyUnchanged => State == BankUpdateState.Unchanged;
+
+    public static BankUpdateCheck Updated(int chapters, int subjects) => new(BankUpdateState.Updated, chapters, subjects, null);
+    public static BankUpdateCheck Unchanged() => new(BankUpdateState.Unchanged, 0, 0, null);
+    public static BankUpdateCheck Unknown(string error) => new(BankUpdateState.Unknown, 0, 0, error);
+}
+
+/// <summary>
 /// 检查课程在上游有没有更新：用"增量水位"接口各探一次章节与题目（1~2 次 SOAP/课）。
 /// 已知盲区：上游章节改名不更新 <c>dchangedate</c>，这类改动探不出来（客户端同样有这个问题）。
+///
+/// ⚠️ 两个接口的**载荷格式不一样**，各用各的解析器（这与 PullEngine 的读路径保持一致，
+/// 也是这个类原来最大的 bug）：
+///   · LoadNewCourseChapter_HadDistrice        → .NET DataTable XML（<see cref="Puller.JkdParsers.ParseDataTable"/>）
+///   · LoadNewCourseSubjectGroup_HadDistrict   → pipe 文本（<see cref="Puller.JkdParsers.ParsePipeGroups"/>）
+/// 旧实现对题目那份用了 ParseDataTable，解析必然抛 → 被 CountRows 的 catch 吞成 0 行 →
+/// "只有题目更新、章节没变"时报"已是最新"，实际拉取被跳过。
 /// </summary>
 static class CourseUpdateChecker
 {
-    public static async Task<List<object>> CheckAsync(QuestionBank bank, List<int> courseIds, IConfiguration configuration)
+    public static async Task<List<BankUpdateCheck>> CheckAsync(QuestionBank bank, List<int> courseIds, IConfiguration configuration)
     {
-        var results = new List<object>();
+        var results = new List<BankUpdateCheck>();
         if (courseIds.Count == 0) return results;
-        // 账号从配置/环境变量来（不再内置在代码里）
-        var user = Puller.BankCredentials.ResolveUser(configuration["App:BankServiceUser"]);
-        var password = Puller.BankCredentials.ResolvePassword(configuration["App:BankServicePassword"]);
-        Puller.BankCredentials.EnsureConfigured(user, password);
-        using var soap = new Puller.SoapClient(
-            Puller.BankCredentials.ResolveUrl(configuration["App:BankServiceUrl"]), user, password, 30000);
         foreach (var courseId in courseIds)
         {
-            try
-            {
-                var marks = bank.CourseWatermarks(courseId);
-                var chapterSince = string.IsNullOrWhiteSpace(marks.Chapter) ? "1900-01-01 00:00:00.999" : marks.Chapter!;
-                var subjectSince = string.IsNullOrWhiteSpace(marks.Subject) ? "1900-01-01 00:00:00.999" : marks.Subject!;
-                var chapterResp = await soap.InvokeAsync("LoadNewCourseChapter_HadDistrice",
-                    $"<courseId>{courseId}</courseId><courseType>11</courseType><district /><lastUpdateDate>{chapterSince}</lastUpdateDate>");
-                var chapterRows = CountRows(chapterResp.Primary);
-                var subjectResp = await soap.InvokeAsync("LoadNewCourseSubjectGroup_HadDistrict",
-                    $"<courseId>{courseId}</courseId><courseType>1</courseType><district /><lastUpdateDate>{subjectSince}</lastUpdateDate>");
-                var subjectRows = CountRows(subjectResp.Primary);
-                results.Add(new { courseId, hasUpdate = chapterRows > 0 || subjectRows > 0, chapters = chapterRows, subjects = subjectRows });
-            }
-            catch (Exception ex)
-            {
-                results.Add(new { courseId, hasUpdate = false, error = SafeError(ex) });
-            }
+            results.Add(await CheckOneAsync(bank, courseId, configuration));
         }
         return results;
     }
 
     /// <summary>
+    /// 单门课的检查。**任何异常都转成 <see cref="BankUpdateState.Unknown"/>**，
+    /// 绝不转成"没有更新"（旧实现把检查失败封装成 hasUpdate=false，网络抖一下就被判"已是最新"、
+    /// 更新按钮点了等于没点）。
+    /// </summary>
+    public static async Task<BankUpdateCheck> CheckOneAsync(QuestionBank bank, int courseId, IConfiguration configuration)
+    {
+        try
+        {
+            // 账号从配置/环境变量来（不再内置在代码里）
+            var user = Puller.BankCredentials.ResolveUser(configuration["App:BankServiceUser"]);
+            var password = Puller.BankCredentials.ResolvePassword(configuration["App:BankServicePassword"]);
+            Puller.BankCredentials.EnsureConfigured(user, password);
+            using var soap = new Puller.SoapClient(
+                Puller.BankCredentials.ResolveUrl(configuration["App:BankServiceUrl"]), user, password, 30000);
+
+            var marks = bank.CourseWatermarks(courseId);
+            var chapterSince = string.IsNullOrWhiteSpace(marks.Chapter) ? "1900-01-01 00:00:00.999" : marks.Chapter!;
+            var subjectSince = string.IsNullOrWhiteSpace(marks.Subject) ? "1900-01-01 00:00:00.999" : marks.Subject!;
+            var chapterResp = await soap.InvokeAsync("LoadNewCourseChapter_HadDistrice",
+                $"<courseId>{courseId}</courseId><courseType>11</courseType><district /><lastUpdateDate>{chapterSince}</lastUpdateDate>");
+            var chapterRows = CountChapterRows(chapterResp.Primary);
+            var subjectResp = await soap.InvokeAsync("LoadNewCourseSubjectGroup_HadDistrict",
+                $"<courseId>{courseId}</courseId><courseType>1</courseType><district /><lastUpdateDate>{subjectSince}</lastUpdateDate>");
+            var subjectRows = CountSubjectRows(subjectResp.Primary);
+            return chapterRows > 0 || subjectRows > 0
+                ? BankUpdateCheck.Updated(chapterRows, subjectRows)
+                : BankUpdateCheck.Unchanged();
+        }
+        catch (Exception ex)
+        {
+            return BankUpdateCheck.Unknown(SafeErrorText(ex));
+        }
+    }
+
+    /// <summary>
     /// 单个题库「有没有更新」。给 update-bank 做拉取前守卫用。
-    /// 拿不到结论时返回 true（保守起见照拉，避免因为检查环节出问题就永远拉不了）。
+    /// **只在确定无更新时返回 false**；拿不到结论（Unknown）返回 true —— 宁可多拉一次，
+    /// 也不能因为检查环节自身出错就永远拉不了（这也是这个方法注释里原本的意图）。
     /// </summary>
     public static async Task<bool> HasUpdateAsync(QuestionBank bank, int courseId, IConfiguration configuration)
     {
-        var results = await CheckAsync(bank, new List<int> { courseId }, configuration);
-        if (results.Count == 0) return true;
-        // CheckAsync 返回的是匿名对象，这里反射取 hasUpdate；取不到就当有更新。
-        var prop = results[0].GetType().GetProperty("hasUpdate");
-        return prop?.GetValue(results[0]) is bool has ? has : true;
+        var check = await CheckOneAsync(bank, courseId, configuration);
+        if (check.State == BankUpdateState.Unknown)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [update-bank] 课程 {courseId} 的更新检查拿不到结论，按「可能有更新」处理，照拉：" +
+                              (check.Error ?? ""));
+        }
+        return !check.IsCertainlyUnchanged;
     }
 
-    /// <summary>"没有更新"时上游不返回 DataTable（载荷为空），这里当成 0 行而不是报错。</summary>
-    private static int CountRows(string? payload)
+    /// <summary>
+    /// 给前端的形状：**保留 hasUpdate**（老前端/老调用方据此决定"要不要拉"，未知时给 true =
+    /// 保守照拉），同时加一个 <c>state</c> 让调用方能区分「确定没更新」与「没结论」。
+    /// </summary>
+    internal static object ToJson(int courseId, BankUpdateCheck check) => check.State switch
+    {
+        BankUpdateState.Updated => (object)new
+        {
+            courseId,
+            state = "updated",
+            hasUpdate = true,
+            chapters = check.Chapters,
+            subjects = check.Subjects,
+        },
+        BankUpdateState.Unchanged => new
+        {
+            courseId,
+            state = "unchanged",
+            hasUpdate = false,
+            chapters = 0,
+            subjects = 0,
+        },
+        _ => new
+        {
+            courseId,
+            state = "unknown",
+            hasUpdate = true,      // 未知 ≠ 无更新
+            unknown = true,
+            chapters = 0,
+            subjects = 0,
+            error = check.Error ?? "",
+        },
+    };
+
+    /// <summary>按请求顺序把检查结果转成响应对象（CheckAsync 的结果与 courseIds 一一对应）。</summary>
+    internal static List<object> Describe(List<int> courseIds, List<BankUpdateCheck> checks)
+    {
+        var results = new List<object>();
+        for (var i = 0; i < courseIds.Count && i < checks.Count; i++)
+        {
+            results.Add(ToJson(courseIds[i], checks[i]));
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// 章节增量：.NET DataTable XML。"没有更新"时上游不返回 DataTable（载荷为空）→ 0 行。
+    /// 载荷非空却解析不了 → **抛**（格式变了，不能当 0 行 = 已是最新）。
+    /// </summary>
+    internal static int CountChapterRows(string? payload)
     {
         if (string.IsNullOrWhiteSpace(payload)) return 0;
-        try
+        return Puller.JkdParsers.ParseDataTable(payload).Count;
+    }
+
+    /// <summary>
+    /// 题目增量：pipe 文本（"start,end,chapterid,type,iindex,score,anscount|..."）。
+    /// 空载荷 / "[]" / "0" / "null" 才是真的 0 行；非空但一组都解析不出来 = 格式变了 → 抛。
+    /// </summary>
+    internal static int CountSubjectRows(string? payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload)) return 0;
+        var trimmed = payload.Trim();
+        if (trimmed is "[]" or "0" or "null") return 0;
+        var groups = Puller.JkdParsers.ParsePipeGroups(trimmed);
+        if (groups.Count == 0)
         {
-            return Puller.JkdParsers.ParseDataTable(payload).Count;
+            throw new InvalidOperationException(
+                "LoadNewCourseSubjectGroup_HadDistrict 的题目增量不是已知的 pipe 格式（一组都解析不出来），无法判断有没有更新");
         }
-        catch
-        {
-            return 0;
-        }
+        return groups.Sum(group => group.Count);
     }
 }
 
@@ -3952,12 +4775,24 @@ sealed class QuestionBank
         var keyword = search.Trim();
         // 本地改动叠层里有记录的题，在列表里标「本地已改」（按课程缓存，避免逐题读文件）
         var editCache = new Dictionary<int, HashSet<int>>();
+        string? localEditsError = null;
         bool HasLocalEdit(int cid, int sid)
         {
             if (cid <= 0) return false;
             if (!editCache.TryGetValue(cid, out var set))
             {
-                set = Puller.LocalEdits.EditedSubjectIds(_paths.SqlitePath, cid);
+                try
+                {
+                    set = Puller.LocalEdits.EditedSubjectIds(_paths.SqlitePath, cid);
+                }
+                catch (Puller.LocalEditsUnavailableException ex)
+                {
+                    /* 叠层读不了：**不能**把"读不到"显示成"没有本地改动"
+                       （否则管理员会以为改动丢了、或对着一份不完整的列表操作）。
+                       列表照常返回，但把错误一并带给界面（localEditsError）。 */
+                    localEditsError ??= SafeErrorText(ex);
+                    set = new HashSet<int>();
+                }
                 editCache[cid] = set;
             }
             return set.Contains(sid);
@@ -4001,7 +4836,7 @@ sealed class QuestionBank
                 || item.chapterName.Contains(keyword, StringComparison.OrdinalIgnoreCase));
         }
         var filtered = rows.Take(take).ToList();
-        return new { ok = true, items = filtered, count = filtered.Count, limit = take };
+        return new { ok = true, items = filtered, count = filtered.Count, limit = take, localEditsError };
     }
 
     public object? GetEditorQuestion(int id)
@@ -4022,6 +4857,8 @@ sealed class QuestionBank
            只对客观题（单选 0 / 多选 1 / 不定项 6）算；判断题的「对/错」和主观题本来就没有选项，
            拿选项规则去套它们只会报假警。 */
         var subjectType = ToInt(r["isubjecttype"]);
+        var localEditError = (string?)null;
+        var localEditMark = DescribeLocalEdit(courseId, id, out localEditError);
         var optionWarnings = subjectType is 0 or 1 or 6
             ? AuditOptions(TextForEdit(r["ctitle"], r["dupdatedate"]),
                            TextForEdit(r["cquestion"], r["dupdatedate"]),
@@ -4049,17 +4886,59 @@ sealed class QuestionBank
             optionWarnings,
             score = ToStr(r["iscore"]),
             updatedAt = ToDateString(r["dupdatedate"]),
-            // 本地改动叠层里有记录 → 界面标「本地已改」并提供一键还原
-            localEdit = Puller.LocalEdits.DescribeSubject(_paths.SqlitePath, courseId, id)
+            // 本地改动叠层里有记录 → 界面标「本地已改」并提供一键还原。
+            // 叠层读不了 → localEdit 为 null 但**带上错误**，不伪装成"没有本地改动"。
+            localEdit = localEditMark,
+            localEditError
         };
+    }
+
+    /// <summary>
+    /// 读"这道题有没有本地改动"。读失败不吞：返回 null 并把错误写进 <paramref name="error"/>，
+    /// 由接口随响应带出去（<see cref="Puller.LocalEdits.DescribeSubject"/> 本身会抛）。
+    /// </summary>
+    private object? DescribeLocalEdit(int courseId, int subjectId, out string? error)
+    {
+        error = null;
+        try
+        {
+            return Puller.LocalEdits.DescribeSubject(_paths.SqlitePath, courseId, subjectId);
+        }
+        catch (Puller.LocalEditsUnavailableException ex)
+        {
+            error = SafeErrorText(ex);
+            return null;
+        }
     }
 
     public object SaveEditorQuestion(Dictionary<string, object?> body, string? editor = null)
     {
+        /* ⚠️ 全链路进写闸（BE-06）：编辑要先读 current / before / 章节路径（好几次 Query），
+           再备份、事务写库，最后另写 JSON 叠层。旧实现没有 Enter，与拉取/整包导入交错时：
+           读到的是旧库、写进的是刚换过的新库（可能改错归属）、写入 0 行也返回 ok、
+           叠层顺序与库相反。SQLite 只串行物理写入，替代不了应用层互斥。
+           锁顺序固定：BankWriteGate → LocalEdits.Gate（后者只在 LocalEdits 内部取，
+           它不会反过来取 BankWriteGate，所以不会死锁）。 */
+        using var gate = BankWriteGate.Enter();
         var id = BodyInt(body, "id");
         if (id <= 0) throw new InvalidOperationException("缺少题目 ID");
-        var current = Query("select isubjectid, icourseid, ichapterid from coursesubject where isubjectid=@id", new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
+        var current = Query("select isubjectid, icourseid, ichapterid, dupdatedate from coursesubject where isubjectid=@id", new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
         if (current is null) throw new InvalidOperationException("题目不存在");
+
+        /* 乐观并发（可选）：客户端带上打开这道题时读到的版本号（GetEditorQuestion 返回的
+           updatedAt），与库里当前值不一致说明别人已经改过 → 拒绝，别把别人的修改盖掉。
+           两位管理员同题保存没有 revision 时，至少闸保证两者串行（后写的整条覆盖前一条，
+           叠层里"服务端快照"仍是最早那份，一键还原不会回到中间态）。 */
+        var revision = GetBodyString(body, "revision");
+        if (revision.Length > 0)
+        {
+            var actualRevision = ToDateString(current["dupdatedate"]);
+            if (!RevisionMatches(revision, actualRevision))
+            {
+                throw new InvalidOperationException(
+                    $"这道题在你打开之后已经被改过（库里当前版本 {actualRevision}，你手里是 {revision}）；请刷新后重新修改，避免覆盖别人的改动");
+            }
+        }
 
         var title = NormalizeEditText(GetBodyString(body, "title"));
         var question = NormalizeEditText(GetBodyString(body, "question"));
@@ -4091,94 +4970,160 @@ sealed class QuestionBank
             new Dictionary<string, object?>())
             .ToDictionary(r => ToInt(r["ichapterid"]), r => ToStr(r["cchaptername"]));
 
+        /* 这道题的内容在主库还是拉取库？本地改动要写回它所在的那一份——遮蔽视图本身不可写。
+           ⚠️ 备份的 owner 与"写库的 owner"必须是**同一份判定**（同一个连接、同一句
+           select count(*) from main.coursesubject）。两条路径分别判定会出现
+           "库写进了拉取库、备份却备份了主库"，那样备份里根本没有这道题的原数据。 */
         SqliteConnection.ClearAllPools();
-        var backupDir = BackupQuestionBank("edit-question-" + id.ToString(CultureInfo.InvariantCulture));
         using var conn = OpenBank(_paths.SqlitePath, _paths.PulledSqlitePath, readOnly: false);
-        // 这道题的内容在主库还是拉取库？本地改动要写回它所在的那一份——遮蔽视图本身不可写。
-        var owner = MainHoldsCourse(conn, ToInt(current["icourseid"])) ? "main" : "pulled";
-        using var tx = conn.BeginTransaction();
+        var owner = MainHoldsCourse(conn, courseId) ? "main" : "pulled";
+        var ownerPath = owner == "main" ? _paths.SqlitePath : _paths.PulledSqlitePath;
+        // 备份**即将被改的那一份**库 + 唯一名字（旧实现永远只备份主库；题在拉取库里时
+        // 备份里根本没有这道题的原数据，返回的 backup 路径不可用于恢复这次操作）
+        var backupDir = BackupQuestionBank("edit-question-" + id.ToString(CultureInfo.InvariantCulture), ownerPath);
+
+        var savedAt = NowText();
+        /* ── 顺序：**先把叠层写好，再写库** ─────────────────────────────────────
+           叠层写不了（权限/磁盘/被占用）→ 在动库之前抛：库保持原样、旧叠层文件完好
+           （Save 走同目录临时文件 + rename），接口明确报错；不会出现旧实现那种
+           "库改了、记录没写上、接口还返回 ok"。
+           写库失败 → 把叠层原文写回快照，状态仍然自洽（库与记录都还是改动前）。 */
+        var layerSnapshot = Puller.LocalEdits.Snapshot(_paths.SqlitePath);
+        var layerTouched = false;
         try
         {
-            foreach (var chapter in BodyChapters(body))
+            // 记进本地改动叠层：拉取/重新导出/导入题库包后按题号贴回（本地优先），界面可一键还原
+            Puller.LocalEdits.RememberSubject(_paths.SqlitePath, courseId, id,
+                new Puller.LocalSubjectEdit
+                {
+                    Title = title,
+                    Question = question,
+                    Answer = answer,
+                    Description = description,
+                    EditedAt = savedAt,
+                    Editor = editor ?? "",
+                },
+                before is null ? null : new Puller.LocalSubjectEdit
+                {
+                    Title = ToStr(before["ctitle"]),
+                    Question = ToStr(before["cquestion"]),
+                    Answer = ToStr(before["canswer"]),
+                    Description = ToStr(before["cdescription"]),
+                });
+            layerTouched = true;
+            foreach (var chapter in chaptersToRename)
             {
-                if (chapter.Id <= 0 || chapter.Name.Length == 0) continue;
-                using var chapterCmd = conn.CreateCommand();
-                chapterCmd.Transaction = tx;
-                chapterCmd.CommandText = $"update {owner}.coursechapter set cchaptername=@name where ichapterid=@id";
-                chapterCmd.Parameters.AddWithValue("@name", chapter.Name);
-                chapterCmd.Parameters.AddWithValue("@id", chapter.Id);
-                chapterCmd.ExecuteNonQuery();
+                Puller.LocalEdits.RememberChapter(_paths.SqlitePath, courseId, chapter.Id, chapter.Name,
+                    chapterNamesBefore.TryGetValue(chapter.Id, out var was) ? was : null, editor);
             }
 
-            using var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = $@"
-                update {owner}.coursesubject
-                set ctitle=@title,
-                    cquestion=@question,
-                    canswer=@answer,
-                    cdescription=@description,
-                    ianswercount=@answerCount,
-                    dupdatedate=@updatedAt
-                where isubjectid=@id";
-            cmd.Parameters.AddWithValue("@title", title);
-            cmd.Parameters.AddWithValue("@question", question);
-            cmd.Parameters.AddWithValue("@answer", answer);
-            cmd.Parameters.AddWithValue("@description", description);
-            cmd.Parameters.AddWithValue("@answerCount", CountOptions(title + "\n" + question));
-            cmd.Parameters.AddWithValue("@updatedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
-            cmd.Parameters.AddWithValue("@id", id);
-            cmd.ExecuteNonQuery();
-            tx.Commit();
+            // 复用上面那个连接与 owner 判定：备份的库 = 这次真正会写的那一份
+            using var tx = conn.BeginTransaction();
+            try
+            {
+                foreach (var chapter in BodyChapters(body))
+                {
+                    if (chapter.Id <= 0 || chapter.Name.Length == 0) continue;
+                    using var chapterCmd = conn.CreateCommand();
+                    chapterCmd.Transaction = tx;
+                    chapterCmd.CommandText = $"update {owner}.coursechapter set cchaptername=@name where ichapterid=@id";
+                    chapterCmd.Parameters.AddWithValue("@name", chapter.Name);
+                    chapterCmd.Parameters.AddWithValue("@id", chapter.Id);
+                    // 0 行 = 章节不在了却什么都没改，别当成成功
+                    if (chapterCmd.ExecuteNonQuery() != 1)
+                    {
+                        throw new InvalidOperationException($"章节 {chapter.Id} 的改名没有生效（章节可能已被删除），请刷新后重试");
+                    }
+                }
+
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = $@"
+                    update {owner}.coursesubject
+                    set ctitle=@title,
+                        cquestion=@question,
+                        canswer=@answer,
+                        cdescription=@description,
+                        ianswercount=@answerCount,
+                        dupdatedate=@updatedAt
+                    where isubjectid=@id";
+                cmd.Parameters.AddWithValue("@title", title);
+                cmd.Parameters.AddWithValue("@question", question);
+                cmd.Parameters.AddWithValue("@answer", answer);
+                cmd.Parameters.AddWithValue("@description", description);
+                cmd.Parameters.AddWithValue("@answerCount", CountOptions(title + "\n" + question));
+                cmd.Parameters.AddWithValue("@updatedAt", savedAt);
+                cmd.Parameters.AddWithValue("@id", id);
+                var rows = cmd.ExecuteNonQuery();
+                // 0 行 = 什么都没改却返回"保存成功"（旧实现正是这样）；!= 1 一律当失败
+                if (rows != 1)
+                {
+                    throw new InvalidOperationException($"题目更新没有生效（影响 {rows} 行），题目可能已被删除，请刷新后重试");
+                }
+                tx.Commit();
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+            }
         }
         catch
         {
-            tx.Rollback();
+            // 库那一步没成 → 叠层退回保存前的原文（库里还是旧内容，记录也不该留下新内容）
+            if (layerTouched)
+            {
+                try
+                {
+                    Puller.LocalEdits.RestoreSnapshot(_paths.SqlitePath, layerSnapshot);
+                }
+                catch (Exception restoreEx)
+                {
+                    Console.WriteLine($"[editor-save-layer-rollback-failed] subject={id} {restoreEx.Message}");
+                }
+            }
             throw;
         }
-        finally
-        {
-            SqliteConnection.ClearAllPools();
-        }
 
-        // 记进本地改动叠层：拉取/重新导出后按题号贴回（本地优先），界面可一键还原
-        Puller.LocalEdits.RememberSubject(_paths.SqlitePath, courseId, id,
-            new Puller.LocalSubjectEdit
-            {
-                Title = title,
-                Question = question,
-                Answer = answer,
-                Description = description,
-                EditedAt = NowText(),
-                Editor = editor ?? "",
-            },
-            before is null ? null : new Puller.LocalSubjectEdit
-            {
-                Title = ToStr(before["ctitle"]),
-                Question = ToStr(before["cquestion"]),
-                Answer = ToStr(before["canswer"]),
-                Description = ToStr(before["cdescription"]),
-            });
-        foreach (var chapter in chaptersToRename)
+        return new
         {
-            Puller.LocalEdits.RememberChapter(_paths.SqlitePath, courseId, chapter.Id, chapter.Name,
-                chapterNamesBefore.TryGetValue(chapter.Id, out var was) ? was : null, editor);
-        }
-
-        return new { ok = true, id, backup = backupDir, savedAt = NowText(), question = GetEditorQuestion(id) };
+            ok = true,
+            id,
+            backup = backupDir,
+            backupOf = Path.GetFileName(ownerPath),
+            savedAt,
+            revision = savedAt,   // 下一次保存时带回来做乐观并发校验
+            question = GetEditorQuestion(id)
+        };
     }
 
     /// <summary>把本地改过的题还原成服务端版本（叠层里记的那一份），并删掉叠层记录。</summary>
     public object RestoreEditorQuestion(int id)
     {
+        // 与保存同一把闸：还原要"读叠层 → 写库 → 重算计数（第二次写库）"，
+        // 与拉取/导入交错会删掉还需要的记录，或让库与叠层的顺序相反（BE-06）
+        using var gate = BankWriteGate.Enter();
         if (id <= 0) throw new InvalidOperationException("缺少题目 ID");
         var row = Query("select isubjectid, icourseid from coursesubject where isubjectid=@id",
             new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
         if (row is null) throw new InvalidOperationException("题目不存在");
         var courseId = ToInt(row["icourseid"]);
-        var target = ServerBankPuller.MainHoldsCourseContent(_paths.SqlitePath, courseId)
-            ? _paths.SqlitePath
-            : _paths.PulledSqlitePath;
+        /* 还原写哪一份库、就备份哪一份（与 <see cref="RestoreSubject"/> 的目标、
+           以及下面重算计数的 owner 用**同一份判定**：同一个连接 + main. 限定）。 */
+        SqliteConnection.ClearAllPools();
+        string owner;
+        using (var conn = OpenBank(_paths.SqlitePath, _paths.PulledSqlitePath, readOnly: false))
+        {
+            owner = MainHoldsCourse(conn, courseId) ? "main" : "pulled";
+        }
+        var target = owner == "main" ? _paths.SqlitePath : _paths.PulledSqlitePath;
+        // 还原会删掉叠层记录（= 丢掉"再改回去"的依据），先备份**实际会被写的那一份**库
+        var backupDir = BackupQuestionBank("restore-question-" + id.ToString(CultureInfo.InvariantCulture), target);
+        // 叠层读/写失败会抛（不再静默）：接口明确失败，不会出现"库还原了、记录还在"或反之
         var ok = Puller.LocalEdits.RestoreSubject(_paths.SqlitePath, target, courseId, id, out var message);
         /* ⚠️ 还原必须连 ianswercount 一起回，否则「还原 ≠ 恢复」：
            RestoreSubject 只写回 ctitle/cquestion/canswer/cdescription 四个字段，
@@ -4186,31 +5131,32 @@ sealed class QuestionBank
            （4→3）再还原：题干回到 A/B/C/D、答案回到 B，可 ianswercount 仍是 3 →
            学员端 options 被截成 A/B/C，D 消失。
            这里按**和保存路径同一口径**（CountOptions）从还原后的文本重算。 */
-        if (ok) RecomputeAnswerCount(id, courseId);
-        return new { ok, id, message, question = ok ? GetEditorQuestion(id) : null };
+        if (ok) RecomputeAnswerCount(id, courseId, owner);
+        return new { ok, id, message, backup = backupDir, backupOf = Path.GetFileName(target), question = ok ? GetEditorQuestion(id) : null };
     }
 
     /// <summary>
     /// 按保存时的同一口径重算这道题的 <c>ianswercount</c>。
     /// 保存路径写的是 <see cref="CountOptions"/>(title + "\n" + question)，回填必须同口径，
     /// 否则会出现「还原一次 / 保存一次就来回变」的抖动。
+    /// <paramref name="owner"/>（"main"/"pulled"）由调用方判定 —— 与还原写库的目标必须是同一份。
     /// </summary>
-    private void RecomputeAnswerCount(int id, int courseId)
+    private void RecomputeAnswerCount(int id, int courseId, string owner)
     {
         var row = Query("select ctitle, cquestion, dupdatedate from coursesubject where isubjectid=@id",
             new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
-        if (row is null) return;
+        if (row is null) throw new InvalidOperationException("题目已不在题库里（可能已被上游下线）");
         var count = CountOptions(TextForEdit(row["ctitle"], row["dupdatedate"]) + "\n" + TextForEdit(row["cquestion"], row["dupdatedate"]));
-        // 改的是还原那一步刚写过的同一份库（主库 / 拉取库）
-        var owner = ServerBankPuller.MainHoldsCourseContent(_paths.SqlitePath, courseId) ? "main" : "pulled";
         SqliteConnection.ClearAllPools();
         using var conn = OpenBank(_paths.SqlitePath, _paths.PulledSqlitePath, readOnly: false);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = $"update {owner}.coursesubject set ianswercount=@count where isubjectid=@id";
         cmd.Parameters.AddWithValue("@count", count);
         cmd.Parameters.AddWithValue("@id", id);
-        cmd.ExecuteNonQuery();
+        var rows = cmd.ExecuteNonQuery();
         SqliteConnection.ClearAllPools();
+        // 0 行 = 计数没回填却返回"还原成功"（旧实现如此），学员端下次仍会把选项截短
+        if (rows != 1) throw new InvalidOperationException($"还原后重算选项数没有生效（影响 {rows} 行），请刷新后重试");
     }
 
     /// <summary>这门课的内容在主库（导出产物）还是在拉取库（未购课程）。</summary>
@@ -4267,13 +5213,23 @@ sealed class QuestionBank
     private HashSet<int> ChapterPathIds(int courseId, int chapterId)
         => ChapterPathRows(courseId, chapterId).Select(row => row.Id).ToHashSet();
 
-    private string BackupQuestionBank(string reason)
+    /// <summary>
+    /// 备份**即将被修改的那一份**库：题在主库就备份主库，题在拉取库就备份拉取库
+    /// （旧实现永远只备份主库 —— 题写进拉取库时返回的 backup 里没有这道题的原数据，
+    /// 等于"给了个恢复不了这次操作的备份"）。
+    /// 用 SQLite 在线备份 API 取一致快照；名字用 <see cref="TimestampUnique"/>
+    /// （秒级时间戳在同一秒内连存两次会覆盖同一份快照）。
+    /// </summary>
+    private string BackupQuestionBank(string reason, string ownerDbPath)
     {
-        if (!File.Exists(_paths.SqlitePath)) throw new FileNotFoundException("SQLite question bank not found", _paths.SqlitePath);
+        var owner = Path.GetFullPath(ownerDbPath);
+        if (!File.Exists(owner)) throw new FileNotFoundException("SQLite question bank not found", owner);
         var dataRoot = Directory.GetParent(_paths.SqlitePath)?.FullName ?? _paths.BaseRoot;
-        var backupDir = Path.Combine(dataRoot, "_backups", CleanBackupName(reason) + "-" + Timestamp());
+        // 备份目录名里带上"备份的是哪一份库"，人工恢复时不会拿错（bank / bank-pulled）
+        var ownerTag = Path.GetFileNameWithoutExtension(owner).Replace("question-bank", "bank", StringComparison.OrdinalIgnoreCase);
+        var backupDir = Path.Combine(dataRoot, "_backups", CleanBackupName(reason) + "-" + ownerTag + "-" + TimestampUnique());
         Directory.CreateDirectory(backupDir);
-        File.Copy(_paths.SqlitePath, Path.Combine(backupDir, "question-bank.db"), true);
+        SqliteSnapshot.Copy(owner, Path.Combine(backupDir, Path.GetFileName(owner)));
         BackupRetention.Prune(Path.Combine(dataRoot, "_backups"));
         return backupDir;
     }
@@ -4282,6 +5238,21 @@ sealed class QuestionBank
     {
         value = Regex.Replace(value, @"[^\w\-]+", "-").Trim('-');
         return value.Length == 0 ? "edit" : value.Length > 80 ? value[..80] : value;
+    }
+
+    /// <summary>
+    /// 版本号（<c>dupdatedate</c>）比对，给保存路径做乐观并发用。
+    /// 两边先按读路径同一口径（<see cref="ToDateString"/>）比字符串，再退一步按时间解析比 ——
+    /// 客户端可能回传 "2026-07-02 15:10:02" / 带 T / 带毫秒的写法。
+    /// </summary>
+    private static bool RevisionMatches(string expected, string actual)
+    {
+        var left = expected.Trim();
+        var right = actual.Trim();
+        if (left == right) return true;
+        return DateTime.TryParse(left, CultureInfo.InvariantCulture, DateTimeStyles.None, out var a)
+               && DateTime.TryParse(right, CultureInfo.InvariantCulture, DateTimeStyles.None, out var b)
+               && a == b;
     }
 
     private static int BodyInt(Dictionary<string, object?> body, string key)

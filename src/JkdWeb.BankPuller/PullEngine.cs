@@ -9,7 +9,14 @@ namespace JkdWeb.BankPuller;
 
 public sealed class PullOptions
 {
-    public string ServiceUrl { get; set; } = SoapClient.DefaultServiceUrl;
+    /// <summary>
+    /// 上游服务地址。**留空表示"没指定"**，由 <see cref="BankCredentials.ResolveUrl"/> 按
+    /// 显式值 &gt; 环境变量 JKD_BANK_URL &gt; 内置默认值 解析。
+    /// （以前这里预填了内置默认值，CLI 再把"已经填好的"值传给 ResolveUrl，
+    /// 于是 JKD_BANK_URL 兜底永远轮不到 —— BE-11。）
+    /// </summary>
+    public string ServiceUrl { get; set; } = "";
+
     public string User { get; set; } = "";
     public string Password { get; set; } = "";
     public long CourseId { get; set; }
@@ -47,7 +54,28 @@ public sealed class PullOptions
     /// <summary>Strip the promotional text the upstream service splices into descriptions (default on).</summary>
     public bool CleanAds { get; set; } = true;
     public int? MaxSubjects { get; set; }
+
+    /// <summary>
+    /// 整课替换：删掉该课旧正文再写新的（数据库事务保证"一起提交"，**不保证集合完整**）。
+    /// 默认 true —— 注意与 <see cref="Mode"/>="incremental" 组合会删掉没下载的部分，
+    /// 所以增量模式必须配 <see cref="ReplaceCourse"/>=false（upsert），见 <see cref="DescribePartialFetch"/>。
+    /// </summary>
     public bool ReplaceCourse { get; set; } = true;
+
+    /// <summary>
+    /// 是否允许"残缺/部分"的整课替换。默认 false（拒绝提交）：
+    /// 缺题、上游坏题、部分拉取（incremental / --max-subjects / 非 union 题号源 / 显式水位）
+    /// 一律**在删旧数据之前**失败，旧内容一行不动。要接受部分更新必须显式打开
+    /// （CLI: --allow-partial-replace），且此时水位不会推进（否则下次增量拉取会跳过缺口）。
+    /// </summary>
+    public bool AllowPartialReplace { get; set; }
+
+    /// <summary>SOAP 单次调用最多尝试次数（含首次）。属请求预算，调试/测试可调小。</summary>
+    public int SoapMaxAttempts { get; set; } = 4;
+
+    /// <summary>SOAP 重试的基础退避毫秒数（第 n 次重试前等 n × 该值）。</summary>
+    public int SoapRetryDelayMs { get; set; } = 1500;
+
     public bool DryRun { get; set; }
 }
 
@@ -111,7 +139,11 @@ public sealed class SubjectStats
     public int WithPictureFlag { get; set; }
     public List<long> MissingSample { get; set; } = new();
 
-    /// <summary>上游对这些题号返回错误（HTTP 500），已跳过；不是拉取层的问题，属上游数据缺陷。</summary>
+    /// <summary>
+    /// 缩小到单题后上游仍然只对**这一题**返回 HTTP 500 的题号（二分定位得出）：
+    /// 属上游数据缺陷，跳过该题不算"拉取层失败"。网络故障 / 鉴权 / 协议错误**不会**进这里
+    /// —— 它们让整次拉取失败，绝不摊成"坏题"。
+    /// </summary>
     public List<long> BadIds { get; set; } = new();
 }
 
@@ -166,6 +198,9 @@ public sealed class PullEngine
         // 账号不再内置在代码里，缺了就直接给出带指引的错误
         BankCredentials.EnsureConfigured(o.User, o.Password);
 
+        // 服务地址在这里解析：显式 > JKD_BANK_URL > 内置默认（调用方传空 = 没指定，不许预填默认值）
+        var serviceUrl = BankCredentials.ResolveUrl(o.ServiceUrl);
+
         Report("starting", 0, 0, $"课程 {o.CourseId}");
 
         var report = new PullReport
@@ -173,7 +208,7 @@ public sealed class PullEngine
             CourseId = o.CourseId,
             Mode = o.Mode,
             SubjectSource = o.SubjectSource,
-            ServiceUrl = o.ServiceUrl,
+            ServiceUrl = serviceUrl,
             OutDb = Path.GetFullPath(o.OutDb),
             AssetsRoot = string.IsNullOrEmpty(o.AssetsRoot) ? "" : Path.GetFullPath(o.AssetsRoot),
             SoftwareVersion = typeof(PullEngine).Assembly.GetName().Version?.ToString(),
@@ -181,11 +216,31 @@ public sealed class PullEngine
         report.Ads.Enabled = o.CleanAds;
         var sw = Stopwatch.StartNew();
 
-        using var soap = new SoapClient(o.ServiceUrl, o.User, o.Password);
+        using var soap = new SoapClient(serviceUrl, o.User, o.Password)
+        {
+            MaxAttempts = Math.Max(1, o.SoapMaxAttempts),
+            RetryDelayMs = Math.Max(0, o.SoapRetryDelayMs),
+        };
         try
         {
             await RunCoreAsync(o, report, soap, ct).ConfigureAwait(false);
             report.Ok = true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 取消是控制流，不是"报告里的一条错误"：记日志后原样抛出，让取消语义穿透到调用方
+            // （否则 BankPull/界面会把它重新包装成普通失败，见 BE-10）。报告对象在这里就丢了，
+            // 所以不设"Canceled 字段"，取消只由异常本身表达。
+            _log("CANCELED: 拉取已取消：数据库未提交，旧内容与水位保持原样");
+            throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            // 没人请求取消却收到取消：按网络/超时口径记成失败（SoapClient 已把 deadline 归进网络类，
+            // 走到这里说明取消来自上游或别处信号）。
+            report.Ok = false;
+            report.Error = "拉取被中断（非调用方取消）: " + ex.Message;
+            _log("ERROR: " + report.Error);
         }
         catch (Exception ex)
         {
@@ -206,6 +261,16 @@ public sealed class PullEngine
     private async Task RunCoreAsync(PullOptions o, PullReport report, SoapClient soap, CancellationToken ct)
     {
         if (o.CourseId <= 0) throw new ArgumentException("--course is required");
+
+        // dry-run 的契约是"零写入"（CLI 帮助原文：query only, write nothing）：先把落点定下来。
+        // 真跑 → 题图写线上课程目录；dry run → 题图只写随机临时 staging，跑完删掉；
+        // 两种情况下题库文件都只在最后一步（事务）里被碰。任何目录创建/图片覆写都不许发生在
+        // DryRun 判断之前（BE-11）。
+        var dryRunStage = o.DryRun
+            ? Path.Combine(Path.GetTempPath(),
+                "jkd-dryrun-" + o.CourseId.ToString(CultureInfo.InvariantCulture) + "-" +
+                Guid.NewGuid().ToString("N")[..8])
+            : null;
 
         // ---- 0. auth probe (missing/invalid MGSoapHeader -> server returns empty with HTTP 200) ----
         var probe = await soap.InvokeAsync("LoadCouseFullChapterIdList",
@@ -331,6 +396,16 @@ public sealed class PullEngine
             }
             _log($"  batch {i / o.BatchSize + 1}/{batches}: asked {batch.Count}, got {rows.Count}");
             Report("subjects", i / o.BatchSize + 1, batches, $"{subjects.Count} 题");
+
+            // 坏题数量异常大 → 更像上游整体故障而不是"个别题数据缺陷"：立刻中止，
+            // 别让二分把每一批都摊成几百次请求（BE-10/BE-15 的请求预算）。
+            var tolerance = BadIdTolerance(ids.Count);
+            if (report.Subjects.BadIds.Count > tolerance)
+            {
+                throw new SoapCallException(SoapFailureKind.Upstream, "LoadCourseSubjectListInfo",
+                    $"上游对 {report.Subjects.BadIds.Count} 个题号持续返回 HTTP 500（超过容忍上限 {tolerance}）：" +
+                    "判定为上游整体故障，已中止本次拉取，未写入任何数据。");
+            }
         }
 
         report.Subjects.RowsReturned = returnedIds.Count;
@@ -341,7 +416,10 @@ public sealed class PullEngine
         if (missing.Count > 0)
         {
             report.Warnings.Add($"{missing.Count} requested subject ids came back with no row " +
-                                $"(sample: {string.Join(",", report.Subjects.MissingSample)})");
+                                $"(sample: {string.Join(",", report.Subjects.MissingSample)})" +
+                                (o.ReplaceCourse && !o.AllowPartialReplace
+                                    ? " —— 集合不完整，整课替换会被拒绝（旧内容保持不动）"
+                                    : ""));
         }
         if (report.Subjects.BadIds.Count > 0)
         {
@@ -362,7 +440,9 @@ public sealed class PullEngine
             var srcPrefix = string.IsNullOrEmpty(o.ImageSrcPrefix)
                 ? $"data/{o.CourseId.ToString(CultureInfo.InvariantCulture)}/"
                 : o.ImageSrcPrefix!;
-            var dir = Path.Combine(o.AssetsRoot, o.CourseId.ToString(CultureInfo.InvariantCulture));
+            // dry run 只写随机临时 staging —— 不创建、也不覆写线上题图目录（BE-11）
+            var imageRoot = dryRunStage ?? o.AssetsRoot;
+            var dir = Path.Combine(imageRoot, o.CourseId.ToString(CultureInfo.InvariantCulture));
             Directory.CreateDirectory(dir);
 
             var targets = o.ImageMode == "all"
@@ -506,15 +586,66 @@ public sealed class PullEngine
             Report("images", targets.Count, targets.Count, $"{report.Images.FilesWritten} 张");
         }
 
+        // ---- 5. 完整性闸（BE-10）：集合不完整/只拉了一部分时，破坏性的整课替换必须被拒绝 ----
+        // 判定放在 dry-run 之前算，这样 dry run 也能预告"真跑会不会被闸掉"。
+        var incomplete = IncompleteReasons(o, ids, chapters, subjects, missing, report);
+        var partialFlags = DescribePartialFetch(o);
+        var replaceIsPartial = o.ReplaceCourse && (incomplete.Count > 0 || partialFlags.Count > 0);
+
         if (o.DryRun)
         {
-            report.Notes.Add("dry run: nothing written");
+            CleanupStaging(dryRunStage);
+            report.Notes.Add("dry run: 题库与题图目录零写入（题图只落在临时 staging，已删除）");
+            if (o.ReplaceCourse && partialFlags.Count > 0 && !o.AllowPartialReplace)
+            {
+                report.Notes.Add("dry run 预警：真跑会被拒绝（部分拉取 + 整课替换）—— " +
+                                 string.Join("、", partialFlags));
+            }
+            if (o.ReplaceCourse && incomplete.Count > 0 && !o.AllowPartialReplace)
+            {
+                report.Notes.Add("dry run 预警：真跑会被完整性闸拒绝 —— " + string.Join("；", incomplete));
+            }
             return;
+        }
+
+        if (o.ReplaceCourse && partialFlags.Count > 0 && !o.AllowPartialReplace)
+        {
+            throw new InvalidOperationException(
+                "拒绝整课替换：这次是**部分拉取**（" + string.Join("、", partialFlags) + "），" +
+                "替换会删掉没有下载的章节/题目（incremental 只拿到水位之后变更的行）。" +
+                "改用整课语义（--mode full + --subject-source union），或加 --no-replace 只 upsert；" +
+                "确认要删旧内容再加 --allow-partial-replace。");
+        }
+        if (o.ReplaceCourse && incomplete.Count > 0 && !o.AllowPartialReplace)
+        {
+            throw new InvalidOperationException(
+                "拒绝提交残缺全课（旧内容一行未动、水位未推进）：" + string.Join("；", incomplete) + "。" +
+                "网络/上游恢复后重试即可；确实要接受这批部分数据，显式加 --allow-partial-replace" +
+                "（届时也不会推进水位，下次拉取仍会补齐这些缺口）。");
+        }
+        if (!o.ReplaceCourse && incomplete.Count > 0)
+        {
+            report.Warnings.Add("本次集合不完整（" + string.Join("；", incomplete) +
+                                "）：只 upsert 已拿到的行，且**不推进水位**（下次拉取会重新拉这些缺口）。");
+        }
+        if (replaceIsPartial && o.AllowPartialReplace)
+        {
+            report.Warnings.Add("--allow-partial-replace 已显式打开：" +
+                                (partialFlags.Count > 0 ? "部分拉取（" + string.Join("、", partialFlags) + "）" : "残缺集合") +
+                                "将照常整课替换，且不推进水位。");
+        }
+        // 残缺集合不许推进水位：否则下次增量拉取会以为这些缺口已经拿到，缺口永久留下。
+        var advanceWatermark = incomplete.Count == 0 && !(o.ReplaceCourse && partialFlags.Count > 0);
+        var chapterWatermark = advanceWatermark ? report.Chapters.NewWatermark : null;
+        var subjectWatermark = advanceWatermark ? report.Subjects.NewWatermark : null;
+        if (!advanceWatermark)
+        {
+            _log("watermarks: 集合不完整/部分拉取 → 本次不推进水位（dchapterchange/dsubjectchange 保持原值）");
         }
 
         Report("write", 0, 1, $"{chapters.Count} 章 / {subjects.Count} 题");
 
-        // ---- 5. write sqlite ----
+        // ---- 6. write sqlite ----
         // dupdatedate: the Access bank stores the client's LOCAL write time here; we store the
         // server's dchangedate instead - it is real upstream data and makes pulls reproducible.
         // Both work: the site only uses it as the decryption key seed (plaintext content is
@@ -541,8 +672,9 @@ public sealed class PullEngine
             if (o.ReplaceCourse)
             {
                 // 单事务替换：delete + insert + 水位一起提交；中途失败整门课回滚，不留"删了没写"的空课。
+                // acceptIncomplete：能走到这里说明调用方已显式放行部分集合（且上面已把水位置空）。
                 var written = db.ReplaceCourse(o.CourseId, chapters, subjects,
-                    report.Chapters.NewWatermark, report.Subjects.NewWatermark);
+                    chapterWatermark, subjectWatermark, acceptIncomplete: replaceIsPartial);
                 report.Chapters.Written = written.Chapters;
                 report.Subjects.Written = written.Subjects;
             }
@@ -550,7 +682,7 @@ public sealed class PullEngine
             {
                 report.Chapters.Written = db.InsertChapters(chapters);
                 report.Subjects.Written = db.InsertSubjects(subjects);
-                db.SetCourseWatermarks(o.CourseId, report.Chapters.NewWatermark, report.Subjects.NewWatermark);
+                db.SetCourseWatermarks(o.CourseId, chapterWatermark, subjectWatermark);
             }
             report.Chapters.DbRowsAfter = (int)db.Count("coursechapter", o.CourseId);
             report.Subjects.DbRowsAfter = (int)db.Count("coursesubject", o.CourseId);
@@ -574,8 +706,10 @@ public sealed class PullEngine
     /// </summary>
     /// <summary>
     /// 取一批题面。上游对个别题目会直接 500（数据缺陷，缩小批次也一样），
-    /// 所以整批失败就二分重试：拆到单个题目仍失败，就把该题号记进 <c>BadIds</c> 跳过，
-    /// 不因为一道坏题让整门课拉不下来。
+    /// 所以**只对这种上游 500**做二分：拆到单题仍失败才记进 <c>BadIds</c>。
+    ///
+    /// 网络故障 / 鉴权失败 / 协议错误 / 取消**绝不**二分、绝不降级成"坏题"：
+    /// 二分只会把一次整站故障摊成几百个"坏题"，然后整门课被残缺集合替换掉（BE-10）。
     /// </summary>
     private async Task<List<Dictionary<string, string?>>> FetchSubjectBatchAsync(
         SoapClient soap, long courseId, IReadOnlyList<long> batch, PullReport report, CancellationToken ct)
@@ -589,7 +723,11 @@ public sealed class PullEngine
             var resp = await soap.InvokeAsync("LoadCourseSubjectListInfo", args.ToString(), ct).ConfigureAwait(false);
             return JkdParsers.ParseDataTable(resp.Primary);
         }
-        catch (Exception ex) when (batch.Count > 1)
+        catch (OperationCanceledException)
+        {
+            throw; // 取消：立即透传
+        }
+        catch (SoapCallException ex) when (ex.Kind == SoapFailureKind.Upstream && batch.Count > 1)
         {
             var half = batch.Count / 2;
             _log($"  batch of {batch.Count} failed ({ShortError(ex)}); splitting in half");
@@ -597,13 +735,83 @@ public sealed class PullEngine
             var second = await FetchSubjectBatchAsync(soap, courseId, batch.Skip(half).ToList(), report, ct).ConfigureAwait(false);
             return first.Concat(second).ToList();
         }
-        catch (Exception ex)
+        catch (SoapCallException ex) when (ex.Kind == SoapFailureKind.Upstream)
         {
+            // 二分到单题仍是 500：这才是"单题数据缺陷"，可以跳过（是否允许跳过由完整性闸决定）
             report.Subjects.BadIds.Add(batch[0]);
-            report.Warnings.Add($"题号 {batch[0]} 上游返回错误，已跳过（{ShortError(ex)}）");
-            _log($"  subject {batch[0]} failed, skipped: {ShortError(ex)}");
+            report.Warnings.Add($"题号 {batch[0]} 上游返回 HTTP 500 数据错误，已跳过（{ShortError(ex)}）");
+            _log($"  subject {batch[0]} failed with upstream 500, skipped: {ShortError(ex)}");
             return new List<Dictionary<string, string?>>();
         }
+        catch (SoapCallException)
+        {
+            // 网络 / 鉴权 / 协议：与题目内容无关，必须让整次拉取失败
+            throw;
+        }
+        catch (InvalidOperationException ex)
+        {
+            // 批返回的内容不是可用 DataTable（契约破了）：同样整次失败，不当坏题
+            throw new SoapCallException(SoapFailureKind.Protocol, "LoadCourseSubjectListInfo",
+                $"LoadCourseSubjectListInfo 返回的内容不是可用 DataTable：{ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// "这次拉的是不是完整整课集合"的判定（BE-11）：出现任何一个这类参数，集合就不再是
+    /// "整课全量"，拿它做整课替换都会删掉没下载的部分。
+    /// </summary>
+    public static List<string> DescribePartialFetch(PullOptions o)
+    {
+        var flags = new List<string>();
+        if (o.Mode != "full") flags.Add("--mode " + o.Mode);
+        if (o.SubjectSource != "union") flags.Add("--subject-source " + o.SubjectSource);
+        if (o.MaxSubjects is not null) flags.Add("--max-subjects");
+        if (o.ChapterSince is not null) flags.Add("--chapter-since");
+        if (o.SubjectSince is not null) flags.Add("--subject-since");
+        return flags;
+    }
+
+    /// <summary>集合不完整的具体原因（缺行 / 坏题 / 空列表），用于"拒绝提交"时的说明。</summary>
+    private static List<string> IncompleteReasons(PullOptions o, List<long> ids, List<ChapterRow> chapters,
+        List<SubjectRow> subjects, List<long> missing, PullReport report)
+    {
+        var reasons = new List<string>();
+        if (missing.Count > 0)
+        {
+            reasons.Add($"{missing.Count} 个题号上游没有返回数据" +
+                        $"(sample: {string.Join(",", report.Subjects.MissingSample)})");
+        }
+        if (report.Subjects.BadIds.Count > 0)
+        {
+            reasons.Add($"{report.Subjects.BadIds.Count} 个题号上游持续返回 500" +
+                        $"(sample: {string.Join(",", report.Subjects.BadIds.Take(20))})");
+        }
+        // 空列表只有在"整课全量"语义下才是残缺：部分拉取本来就只拿到水位之后的变更行。
+        if (DescribePartialFetch(o).Count == 0)
+        {
+            if (chapters.Count == 0) reasons.Add("章节列表为空");
+            if (ids.Count == 0) reasons.Add("上游题号列表为空");
+            else if (subjects.Count == 0) reasons.Add("题目列表为空");
+        }
+        return reasons;
+    }
+
+    /// <summary>
+    /// "坏题"容忍上限：单题数据缺陷是少数现象；超过这个量更像上游整体故障，
+    /// 直接中止（也避免二分把每一批摊成几百次请求）。
+    /// </summary>
+    private static int BadIdTolerance(int requestedCount) => Math.Max(20, requestedCount / 50);
+
+    /// <summary>删掉 dry-run 的临时 staging：dry run 的契约是零写入，临时目录也不留。</summary>
+    private static void CleanupStaging(string? stagingRoot)
+    {
+        if (string.IsNullOrEmpty(stagingRoot)) return;
+        try
+        {
+            if (Directory.Exists(stagingRoot)) Directory.Delete(stagingRoot, recursive: true);
+        }
+        catch (IOException) { /* 尽力而为：删不掉只是临时目录残留 */ }
+        catch (UnauthorizedAccessException) { /* 同上 */ }
     }
 
     private static string ShortError(Exception ex)

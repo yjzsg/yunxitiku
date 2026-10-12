@@ -44,6 +44,7 @@ for (var i = 0; i < args.Length; i++)
         case "--backup-dir": backupDir = Next(a); break;
         case "--max-subjects": opts.MaxSubjects = int.Parse(Next(a), CultureInfo.InvariantCulture); break;
         case "--no-replace": opts.ReplaceCourse = false; break;
+        case "--allow-partial-replace": opts.AllowPartialReplace = true; break;
         case "--dry-run": opts.DryRun = true; break;
         case "--report": reportPath = Next(a); break;
         case "--quiet": quiet = true; break;
@@ -54,6 +55,47 @@ for (var i = 0; i < args.Length; i++)
             Console.Error.WriteLine($"unknown argument: {a}");
             PrintUsage();
             return 2;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLI 语义整理（BE-11）：默认值不许暗藏破坏性操作
+// ---------------------------------------------------------------------------
+if (opts.Mode is not ("full" or "incremental"))
+{
+    Console.Error.WriteLine($"[puller] --mode 只支持 full|incremental（收到 '{opts.Mode}'）");
+    return 2;
+}
+
+// incremental 只拿到"水位之后变更"的章节/题目：再去做整课替换，等于删掉没变的那些
+// （尤其 --subject-source group 时只有增量题目）。所以增量模式固定 upsert，不删旧内容。
+if (opts.Mode == "incremental")
+{
+    if (!opts.AllowPartialReplace)
+    {
+        opts.ReplaceCourse = false;
+        Console.WriteLine("[puller] incremental：只 upsert 水位之后的变更行，不删除既有章节/题目" +
+                          "（要整课替换请用 --mode full）");
+    }
+    else
+    {
+        Console.WriteLine("[puller] 警告：incremental + --allow-partial-replace → 增量集合会整课替换（删掉未变更部分）");
+    }
+}
+
+if (!cleanOnly)
+{
+    // 调试/部分拉取参数默认只能 staging/dry-run：与"整课替换"同时出现时提前挡住（exit 2 = 用法错误）。
+    // 语义层（PullEngine）还有同一道闸，这里只是让错误更早、更明确。
+    var partialFlags = PullEngine.DescribePartialFetch(opts);
+    if (partialFlags.Count > 0 && opts.ReplaceCourse && !opts.DryRun && !opts.AllowPartialReplace)
+    {
+        Console.Error.WriteLine(
+            "[puller] 拒绝执行：" + string.Join("、", partialFlags) +
+            " 是部分拉取，和整课替换（会删掉没下载的章节/题目）组合不安全。\n" +
+            "          加 --dry-run（只看不写）、--no-replace（只 upsert），" +
+            "或确认要删旧内容再加 --allow-partial-replace。");
+        return 2;
     }
 }
 
@@ -98,21 +140,34 @@ catch (InvalidOperationException ex)
 
 var engine = new PullEngine(quiet ? null : Console.WriteLine);
 Console.WriteLine($"[puller] course={opts.CourseId} mode={opts.Mode} source={opts.SubjectSource} " +
+                  $"replace={(opts.ReplaceCourse ? "yes" : "no")} dryRun={(opts.DryRun ? "yes" : "no")} " +
                   $"db={opts.OutDb} assets={opts.AssetsRoot} " +
                   $"service={BankCredentials.Describe(opts.ServiceUrl, opts.User, opts.Password)}");
 
 var report = await engine.RunAsync(opts);
 
-reportPath ??= Path.Combine(Path.GetDirectoryName(Path.GetFullPath(opts.OutDb)) ?? ".", "pull-report.json");
-try
+// dry-run 的契约是"零写入"：没显式给 --report 就不落盘（也不创建目录），报告打到 stdout。
+if (reportPath is null && !opts.DryRun)
 {
-    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
-    await File.WriteAllTextAsync(reportPath, PullEngine.ToJson(report));
-    Console.WriteLine($"[puller] report written to {reportPath}");
+    reportPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(opts.OutDb)) ?? ".", "pull-report.json");
 }
-catch (Exception ex)
+if (reportPath is null)
 {
-    Console.Error.WriteLine($"[puller] could not write report: {ex.Message}");
+    Console.WriteLine("[puller] dry-run: 未指定 --report → 报告不落盘（nothing written）");
+    if (!quiet) Console.WriteLine(PullEngine.ToJson(report));
+}
+else
+{
+    try
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
+        await File.WriteAllTextAsync(reportPath, PullEngine.ToJson(report));
+        Console.WriteLine($"[puller] report written to {reportPath}");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[puller] could not write report: {ex.Message}");
+    }
 }
 
 Console.WriteLine($"[puller] ok={report.Ok} chapters={report.Chapters.Written} " +
@@ -139,7 +194,8 @@ static void PrintUsage()
           --out-db <file>          target SQLite bank, created if missing (required)
           --assets <dir>           asset root; images go to <dir>/<courseId>/ (default: <out-db dir>/assets)
           --meta-db <file>         copy course/courseclass/coursesubclass/coursesubjecttype from this bank
-          --mode <full|incremental>            full = first-download sentinel (default), incremental = since stored watermark
+          --mode <full|incremental>            full = 全量（first-download sentinel）+ 整课替换（默认）
+                                   incremental = 只拉水位之后的变更行，并且只 upsert **不删除**
           --subject-source <union|group|full>  subject id source; union = group + full list (default)
           --chapter-since <date>   override chapter watermark, e.g. "2026-06-16 16:24:26.999"
           --subject-since <date>   override subject watermark
@@ -152,10 +208,13 @@ static void PrintUsage()
           --no-clean-ads           same as --clean-ads false
           --clean-ads-only         do not pull; only clean an existing bank in place (needs --out-db)
           --backup-dir <dir>       with --clean-ads-only: copy the bank here before writing
-          --max-subjects <n>       cap number of subjects (debug)
-          --no-replace             keep existing rows of this course instead of replacing
-          --dry-run                query only, write nothing
-          --report <file>          report json path (default <out-db dir>/pull-report.json)
+          --max-subjects <n>       cap number of subjects; 调试参数 —— 需配 --dry-run / --no-replace
+          --no-replace             keep existing rows of this course instead of replacing（只 upsert）
+          --allow-partial-replace  显式接受"部分/残缺集合也整课替换"（默认拒绝提交残缺全课；
+                                   放行时也不推进水位，下次拉取仍会补齐缺口）
+          --dry-run                query only：题库与题图目录零写入（题图只写临时 staging 且删掉）
+          --report <file>          report json path (default <out-db dir>/pull-report.json;
+                                   dry-run 未指定时不落盘，报告打到 stdout)
           --quiet                  suppress progress output
 
         upstream account (not built into the code; pick one):

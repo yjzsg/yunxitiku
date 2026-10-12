@@ -206,11 +206,40 @@ public sealed class BankWriter : IDisposable
     /// <summary>
     /// 原子替换一门课：删旧正文 + 写新章节/题目 + 更新水位，全部在**同一个事务**里。
     /// 中途失败/被 kill → 整门课回滚，不会留下"删了但没写"的空课（旧实现是 4 个独立提交）。
+    ///
+    /// 但事务保证的只是这批数据**一起提交**，不保证这批数据**完整**：残缺集合照样会被原子地
+    /// 提交上去，把完整旧数据删掉（BE-10）。所以这里另加两道闸：
+    /// · 没显式 <paramref name="acceptIncomplete"/> 时，拒绝用空集合清空一门原本有内容的课，
+    ///   在删任何一行**之前**抛出，旧数据一行不动；
+    /// · 残缺/部分集合即使被显式放行，也**不推进水位** —— 否则下次增量拉取会以为这些缺口
+    ///   已经拿到，缺口永久留下。
     /// </summary>
     public (int Chapters, int Subjects) ReplaceCourse(long courseId,
         IEnumerable<ChapterRow> chapters, IEnumerable<SubjectRow> subjects,
-        string? chapterChange, string? subjectChange)
+        string? chapterChange, string? subjectChange, bool acceptIncomplete = false)
     {
+        var chapterList = chapters as IReadOnlyCollection<ChapterRow> ?? chapters.ToList();
+        var subjectList = subjects as IReadOnlyCollection<SubjectRow> ?? subjects.ToList();
+
+        // 这一闸是"最后防线"：任何调用方忘了做完整性检查，也不能把一门课删成空的。
+        if (!acceptIncomplete)
+        {
+            var existingSubjects = Count("coursesubject", courseId);
+            if (subjectList.Count == 0 && existingSubjects > 0)
+            {
+                throw new InvalidOperationException(
+                    $"拒绝用空题目集合替换课程 {courseId}：库里现有 {existingSubjects} 行题目。" +
+                    "整课替换会删掉它们；确认要清空请显式传 acceptIncomplete。");
+            }
+            var existingChapters = Count("coursechapter", courseId);
+            if (chapterList.Count == 0 && existingChapters > 0)
+            {
+                throw new InvalidOperationException(
+                    $"拒绝用空章节集合替换课程 {courseId}：库里现有 {existingChapters} 行章节；" +
+                    "确认要清空请显式传 acceptIncomplete。");
+            }
+        }
+
         using var tx = _cn.BeginTransaction();
         using (var del = _cn.CreateCommand())
         {
@@ -226,9 +255,12 @@ public sealed class BankWriter : IDisposable
             del.Parameters.AddWithValue("$c", courseId);
             del.ExecuteNonQuery();
         }
-        var chapterCount = InsertChaptersCore(tx, chapters);
-        var subjectCount = InsertSubjectsCore(tx, subjects);
-        SetWatermarksCore(tx, courseId, chapterChange, subjectChange);
+        var chapterCount = InsertChaptersCore(tx, chapterList);
+        var subjectCount = InsertSubjectsCore(tx, subjectList);
+        // 残缺集合被放行时不推进水位：水位是"到这里为止都拿到了"的承诺。
+        SetWatermarksCore(tx, courseId,
+            acceptIncomplete ? null : chapterChange,
+            acceptIncomplete ? null : subjectChange);
         tx.Commit();
         return (chapterCount, subjectCount);
     }

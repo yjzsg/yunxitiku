@@ -123,6 +123,11 @@ const state = {
      这段时间 state.exam 仍是 null、state.questions 还是空，
      交卷入口必须拦掉（见 submitPaper / isExamGenerating）。 */
   examGenerating: false,
+  /* 这次组卷是**哪个科目**发起的。切到别的科目后旧组卷已经不会写 state 了
+     （见 beginExamFlow），它的「组卷中」标记也不该继续把新科目的「开始组卷」禁掉。 */
+  examGeneratingCourseId: 0,
+  /* 组卷 / 续考的**代际**编号：迟到的异步回包靠它作废，见 beginExamFlow。 */
+  examGenerationId: 0,
   correctionQuestion: null,
   expandedChapters: new Set(),
   examExpandedChapters: new Set(),
@@ -5900,7 +5905,12 @@ function shouldRevealCurrentAnswer(q) {
    这段窗口里 state.exam 还是 null（renderExamHome 刚置空）、state.questions 也是空，
    点交卷本来就没有对象 —— 旧实现在这里做出了一张 0/0 分的假成绩单。 */
 function isExamGenerating() {
-  return state.mode === "exam" && !!state.examGenerating;
+  if (state.mode !== "exam" || !state.examGenerating) return false;
+  /* 组卷是**按科目**进行的：挂在科目 1 的那次组卷已经不会再写 state 了
+     （见 beginExamFlow），它的标记只管科目 1 —— 否则切到科目 2 后
+     「开始组卷」和「交卷」会被一个跟自己无关的旧请求一直禁用着。 */
+  return !state.examGeneratingCourseId
+    || Number(state.examGeneratingCourseId) === Number(state.currentCourse?.id || 0);
 }
 
 /* 「离开页面时暂停计时」是用户选项，默认关 = 真限时。
@@ -10135,6 +10145,16 @@ function confirmExamSubmit() {
   return confirm(`确定交卷吗？\n\n已作答 ${answered} 题，还有 ${todo} 题未作答。交卷后不能再修改答案。`);
 }
 
+/* 所有**人工**交卷只有这一条入口：确认（confirmExamSubmit）→ 交卷（submitPaper）。
+   旧实现里按钮走确认，Ctrl+Enter 却直接调 submitPaper（实测 2 题、一个字没答，
+   按一下快捷键就 submitted=true、揭示答案、写出 0 分记录，一句都没问）。
+   超时自动交卷（计时器 tick / 恢复草稿时已过期）仍然直调 submitPaper(true)：
+   那一刻没有「用户正在点击」这件事，没法也不能问。 */
+function requestExamSubmit() {
+  if (!confirmExamSubmit()) return;
+  submitPaper().catch((err) => toast(err.message));
+}
+
 /* 本轮答案快照指纹：交卷时记下来，用来分出「重复交卷」和「改了答案再交」。
    只比内存里的这份快照（刷新之后 state.submitted 本来就没了，不会再走这条路）。 */
 function currentRoundAnswerKey(mode = state.mode, courseId = state.currentCourse?.id) {
@@ -10330,10 +10350,14 @@ async function submitPaper(autoSubmit = false) {
   }
 }
 function resetPractice() {
-  stopExamTimer();
   const resettingExam = state.mode === "exam";
   if (resettingExam) {
+    /* ⚠️ 确认之前**不许碰**考试的生命周期：旧实现在这里先 stopExamTimer() 再问，
+        用户点「取消」之后 timer 已经没了 —— 考试还在、endsAt 还在真实倒计时，
+        但状态条冻住、到点提醒和自动交卷都不会再触发（浏览器实测 timer true→false）。
+        取消路径必须零副作用。 */
     if (!confirm("确定放弃本次模拟考试吗？已答内容将清除。")) return;
+    stopExamTimer();
     clearExamDraft();
     state.exam = null;
     state.answers = {};
@@ -10356,6 +10380,9 @@ function resetPractice() {
     ? `当前章节「${state.currentChapter.name}」共 ${ids.length} 题`
     : `当前题单共 ${ids.length} 题`;
   if (!confirm(`仅清空${scopeLabel}的作答记录，不会影响其他章节。\n\n确定继续？`)) return;
+  /* 练习模式本来不该有考试计时器；真挂着也不能留在后台。
+     放在确认之后 —— 取消这条路径同样什么都不能改（见上面的注释）。 */
+  stopExamTimer();
 
   const courseStore = userCourseStore();
   const batchSession = activeSmartTrainingSession();
@@ -10618,6 +10645,101 @@ function bindExamDraftActions() {
   if (abandonBtn) abandonBtn.onclick = () => abandonExamDraft();
 }
 
+/* ── 组卷 / 续考的「代际」守卫 ──────────────────────────────────────────
+   组卷和续考都是「先发请求、稍后写 state」的异步流程。等待期间用户可以切科目、
+   换模块、登出，甚至再点一次组卷/续考 —— **迟到的回包绝不能写进活的 state**：
+   实测旧实现里科目 1 挂起的组卷回包会把科目 2 的题单变成 [202, 101]（两道不同
+   科目的题混在一起），还会清空当前答案、凭空建出一份混合科目的 exam；
+   科目 1 挂起的续考回包则会把科目 1 的题写进科目 2 的草稿（examDrafts[2]）。
+   所以：流程开始时领一个自增的 generationId，并在这一刻钉住
+   用户 / 科目 / 模式 / 导航代际（modeTransitionId）；结果先在**局部变量**里
+   累积，写 state 之前必须证明「还是我这一代，且上下文一个都没变」。
+   不能在活 state 上先累加、最后再检查 —— 检查失败时脏数据已经进去了。 */
+function beginExamFlow(kind) {
+  const generationId = (state.examGenerationId || 0) + 1;
+  state.examGenerationId = generationId;
+  return {
+    kind,
+    generationId,
+    user: state.user,
+    course: state.currentCourse,
+    courseId: Number(state.currentCourse?.id || 0),
+    mode: state.mode,
+    transitionId: state.modeTransitionId || 0,
+  };
+}
+
+function examFlowStillCurrent(flow) {
+  if (!flow) return false;
+  if (state.examGenerationId !== flow.generationId) return false;   // 已经有新的一代顶上
+  if (state.user !== flow.user) return false;                      // 换了账号/登出
+  if (state.mode !== flow.mode) return false;                      // 切了模块
+  if (state.currentCourse !== flow.course) return false;           // 换了科目对象
+  if (Number(state.currentCourse?.id || 0) !== flow.courseId) return false;
+  if ((state.modeTransitionId || 0) !== flow.transitionId) return false;   // 导航过一次再回来
+  return true;
+}
+
+/* 流程作废时的收尾：一个字都不写 state，也不要去动 DOM（用户很可能已经在别的
+   模块里了）。只有「仍停在同一科目的考场首页」时才把组卷页恢复出来 —— 那时
+   界面上还挂着「正在组卷...」的占位。 */
+function abortExamFlow(flow) {
+  if (flow?.kind === "generate" && state.mode === "exam"
+    && Number(state.currentCourse?.id || 0) === flow.courseId) {
+    renderExamHome();
+  }
+  toast(flow?.kind === "resume"
+    ? "已取消恢复考试：期间切换了科目或模块"
+    : "已取消这次组卷：期间切换了科目或模块");
+}
+
+/* 草稿缺题：**明确列出缺哪几道**，由用户选「放弃 / 重新组卷」，绝不静默缩卷。
+   旧实现只校验「拉到的题非空」：草稿 [101,102] 只拉到 101 也照样开考，而
+   state.exam.questionIds 和新写回去的草稿仍是 [101,102] —— 顶栏满分按 102 题算、
+   判分只算 101 题，用户既不知道少了一道，也永远拿不到满分。
+   返回值："abandon"（放弃草稿） / "regenerate"（按原配置重新组卷） /
+   "keep"（关闭 = 什么都不改，草稿留着等题库恢复后再续考）。 */
+function askExamDraftQuestionGap(missingIds, draft) {
+  return new Promise((resolve) => {
+    const shown = missingIds.slice(0, 12).map((id) => `#${id}`).join("、");
+    const more = missingIds.length > 12 ? ` 等共 ${missingIds.length} 道` : "";
+    const host = document.createElement("div");
+    host.id = "examDraftMissingModal";
+    host.className = "modal-backdrop";
+    host.innerHTML = `
+      <div class="modal-panel conflict-modal" role="dialog" aria-modal="true" aria-labelledby="examDraftMissingTitle">
+        <div class="modal-head">
+          <strong id="examDraftMissingTitle">这份考试草稿缺题</strong>
+          <button type="button" data-exam-draft-choice="keep">关闭</button>
+        </div>
+        <p class="conflict-message">草稿共 ${Number(draft.questionIds?.length || 0)} 题，其中
+          <b>${missingIds.length}</b> 道题在题库里已经不存在：${escapeHtml(shown)}${escapeHtml(more)}<br>
+          继续考试会让题数、顺序和满分跟你当初看到的那份卷子对不上，所以不能直接开考。</p>
+        <div class="modal-actions conflict-actions">
+          <button type="button" class="primary-action" data-exam-draft-choice="regenerate">按原配置重新组卷</button>
+          <button type="button" data-exam-draft-choice="abandon">放弃这份草稿</button>
+        </div>
+        <small class="conflict-hint">关闭 = 保留草稿（本场作答不丢），等题库恢复后再续考。</small>
+      </div>`;
+    const finish = (choice) => {
+      host.remove();
+      resolve(choice);
+    };
+    host.querySelectorAll("[data-exam-draft-choice]").forEach((btn) => {
+      btn.onclick = () => finish(btn.dataset.examDraftChoice);
+    });
+    host.addEventListener("click", (event) => {
+      if (event.target === host) finish("keep");
+    });
+    document.addEventListener("keydown", function onDraftGapKey(event) {
+      if (event.key !== "Escape") return;
+      document.removeEventListener("keydown", onDraftGapKey, true);
+      finish("keep");
+    }, true);
+    document.body.appendChild(host);
+  });
+}
+
 async function resumeExamDraft() {
   const draft = examDraftForCurrentCourse();
   if (!draft) {
@@ -10625,7 +10747,9 @@ async function resumeExamDraft() {
     renderExamHome();
     return;
   }
-  const ids = draft.questionIds.map(Number).filter(Boolean);
+  /* 题号先按**集合**去重：重复 id 会让「题数必须等于草稿题数」的校验永远失败，
+     而这种 id 本来也只该考一次。 */
+  const ids = Array.from(new Set(draft.questionIds.map(Number).filter(Boolean)));
   if (!ids.length) {
     clearExamDraft();
     toast("考试草稿已失效");
@@ -10639,36 +10763,72 @@ async function resumeExamDraft() {
   state.submitToken = (state.submitToken || 0) + 1;
   state.submitting = false;
   state.mode = "exam";
-  state.questions = [];
-  state.answers = { ...(draft.answers || {}) };
-  state.submitted = false;
-  state.answerVisible = false;
-  state.answerCardPage = Number(draft.answerCardPage || 0);
+  /* ⚠️ 恢复期间**一个字都不写** state.questions / state.answers / state.exam：
+     旧实现先把 answers 灌成草稿那份、再 await 拉题，回包只查 `state.mode === "exam"`
+     —— 科目 1 的草稿回包就这样写进了科目 2（实测 examDrafts[2] 里是科目 1 的题和
+     原 draftId）。现在全部攒在局部变量里，提交前按 flow 校验上下文。 */
+  const flow = beginExamFlow("resume");
   /* 分批拉题（100/批，见 fetchQuestionsByIds）。
      旧实现把全部 ids 拼进查询串：4200 题的 URL 37KB+，直接顶穿 Kestrel 的
      MaxRequestLineSize(32KB) → HTTP 414，草稿**永远恢复不了**，
      而 414 的响应体是空/HTML，前端拿到的只有一句英文 "URI Too Long"。 */
   const params = new URLSearchParams({
-    courseId: String(draft.courseId || state.currentCourse.id),
+    courseId: String(flow.courseId),
     limit: String(ids.length),
   });
   let items;
   try {
-    items = await fetchQuestionsByIds(params, ids, () => state.mode !== "exam");
+    items = await fetchQuestionsByIds(params, ids, () => !examFlowStillCurrent(flow));
   } catch (err) {
     if (err?.status === 414) throw new Error("这份草稿的题号太长，服务器拒绝了这个请求（414）。请放弃这份草稿后重新组卷。");
     throw err;
   }
-  if (state.mode !== "exam") return;   // 拉题期间用户切走了，别再改状态
-  state.questions = orderItemsByIds(items, ids);
-  if (!state.questions.length) {
-    clearExamDraft();
-    throw new Error("考试草稿中的题目已不存在");
+  if (!examFlowStillCurrent(flow)) return abortExamFlow(flow);
+  /* 拉回来的必须**逐题**对上草稿：少一道就不是同一份卷子。多出来的（服务端不按
+     ids 过滤时的兜底）直接丢掉，别让它混进题单把题数撑大。 */
+  const wanted = new Set(ids);
+  const usable = (items || []).filter((item) => wanted.has(Number(item?.id || 0)));
+  const loadedIds = new Set(usable.map((item) => Number(item.id)));
+  const missingIds = ids.filter((id) => !loadedIds.has(id));
+  if (missingIds.length) {
+    const choice = await askExamDraftQuestionGap(missingIds, draft);
+    /* 缺题对话框也可能选着选着就切走了（native/dispatch 都可能）—— 再查一次。 */
+    if (!examFlowStillCurrent(flow)) return;
+    if (choice === "abandon") {
+      clearExamDraft(flow.courseId);
+      toast(`已放弃这份草稿：其中 ${missingIds.length} 道题在题库中已不存在`);
+      renderExamHome();
+      return;
+    }
+    if (choice === "regenerate") {
+      clearExamDraft(flow.courseId);
+      const rule = draft.rule || getExamRule();
+      if (!normalizeExamParts(rule).length) {
+        toast("当前题库没有可用于组卷的题型");
+        renderExamHome();
+        return;
+      }
+      state.examConfig = rule;
+      toast("已作废缺题的草稿，按原配置重新组卷");
+      await startExamPaper();
+      return;
+    }
+    toast("已保留这份草稿，没有开始考试");
+    renderExamHome();
+    return;
   }
-  state.currentIndex = Math.min(Math.max(0, Number(draft.currentIndex || 0)), state.questions.length - 1);
+  const loaded = orderItemsByIds(usable, ids);
+  /* 提交前最后一次校验（缺题对话框期间同样可能切科目/切模块）。 */
+  if (!examFlowStillCurrent(flow) || loaded.length !== ids.length) return abortExamFlow(flow);
   const remaining = draft.pausedAt != null
     ? Math.max(0, Number(draft.remainingMs || 0))
     : Math.max(0, Number(draft.endsAt || 0) - Date.now());
+  state.questions = loaded;
+  state.answers = { ...(draft.answers || {}) };
+  state.submitted = false;
+  state.answerVisible = false;
+  state.answerCardPage = Number(draft.answerCardPage || 0);
+  state.currentIndex = Math.min(Math.max(0, Number(draft.currentIndex || 0)), loaded.length - 1);
   state.exam = {
     rule: draft.rule || getExamRule(),
     scoreMap: draft.scoreMap || {},
@@ -10682,10 +10842,14 @@ async function resumeExamDraft() {
     pauseReason: "",
     submittedAt: null,
     result: null,
-    draftId: draft.id || `${Date.now()}-${draft.courseId || 0}`,
+    draftId: draft.id || `${Date.now()}-${flow.courseId}`,
   };
+  /* 满分按**恢复出来的实际题单**重算：草稿里存的可能是旧题库/旧版本的满分，
+     而顶栏满分必须和判分口径（scoreMap → 题目分值）一致，否则又是「两个都说自己对」。 */
+  state.exam.rule.totalScore = loaded.reduce((sum, item) => sum + getQuestionScore(item.detail || item), 0);
   renderAll();
   await loadCurrentQuestion().catch((err) => toast(err.message));
+  if (!examFlowStillCurrent(flow)) return;
   if (remaining <= 0) {
     await submitPaper(true);
   } else {
@@ -11184,30 +11348,52 @@ async function startExamPaper() {
     return;
   }
   if (existingDraft) clearExamDraft();
+  /* 防重入：同一个科目已经在组卷时再点一次，只会白白再抽一份卷。
+     按**科目**判重而不是全局一个 bool —— 切到别的科目后旧组卷已经不会再写
+     state（见 beginExamFlow），不该继续挡着新科目的按钮。 */
+  const startCourseId = Number(state.currentCourse.id || 0);
+  if (state.examGenerating && Number(state.examGeneratingCourseId || 0) === startCourseId) {
+    toast("正在组卷，请稍候");
+    return;
+  }
   /* 从这一刻到卷子生成完成为止，「提交答卷」必须不可点：
      这段窗口里 state.exam 还是 null，点交卷会写出一条 0/0 分的假成绩单。
      用 try/finally 收口，而不是在每个提前 return 上各补一句 ——
-     生成期间还有「章节没选」提前返回、组卷失败抛错、以及用户中途切模块三条出口。 */
+     生成期间还有「章节没选」提前返回、组卷失败抛错、以及用户中途切模块三条出口。
+     finally 只认**自己那一代**：切走再回来重新组卷会开新一代，旧那代的 finally
+     不能把新一代的「组卷中」标记抹掉。 */
+  const flow = beginExamFlow("generate");
   state.examGenerating = true;
+  state.examGeneratingCourseId = flow.courseId;
   renderVerifyModeControls();
   try {
-    await generateExamPaper(rule, parts);
+    await generateExamPaper(rule, parts, flow);
   } finally {
-    state.examGenerating = false;
-    renderVerifyModeControls();
+    if (state.examGenerationId === flow.generationId) {
+      state.examGenerating = false;
+      state.examGeneratingCourseId = 0;
+      renderVerifyModeControls();
+    }
   }
 }
 
 /* 组卷主体：按章节比例抽题 → 落 state.exam → 起计时 → 打开第 1 题。
    从 startExamPaper 拆出来只是为了让 state.examGenerating 有个 try/finally。 */
-async function generateExamPaper(rule, parts) {
+async function generateExamPaper(rule, parts, flow = null) {
   /* 这里**不再**写 state.storage.settings.verifyMode（详见 currentVerifyMode 的注释）：
      考试期间的验证模式由 state.mode 决定，考完自动恢复用户原本的偏好。 */
   state.verifyMode = "paper";
   $("emptyState").innerHTML = `<strong>正在组卷...</strong><span>按章节比例抽取试题。</span>`;
+  /* ⚠️ 这一代组卷钉住的上下文：请求参数、结果累积、提交前校验只认它。
+     旧实现把异步结果直接 push 进**活的** state.questions、还在 fetch 途中读活的
+     state.currentCourse.id —— 挂起期间切科目，迟到回包就把科目 2 的题单变成
+     [202, 101]，又清空当前答案、建出一份混合科目的 exam。 */
+  const activeFlow = flow || beginExamFlow("generate");
+  const courseId = activeFlow.courseId;
   const scoreMap = {};
   const seen = new Set();
-  state.questions = [];
+  /* 结果先攒在**局部**数组里（generated），提交前校验通过才一次性写 state。 */
+  const generated = [];
   const selectedIds = new Set((rule.selectedChapterIds || []).map(Number));
   /* 一个章节都没选时**不要**回退成全章节 —— 那会让「清空」按钮的语义和它的名字相反
      （用户点「清空」期望不出卷，实际拿到的是全章节卷）。改为明确提示并退回考场首页。 */
@@ -11218,10 +11404,12 @@ async function generateExamPaper(rule, parts) {
   }
   const examChapters = examChaptersFromIds(Array.from(selectedIds));
   for (const part of parts) {
+    /* 每一批之前先确认这一代还活着：上下文已经变了就别再向服务器要题了。 */
+    if (!examFlowStillCurrent(activeFlow)) return abortExamFlow(activeFlow);
     const selected = [];
     const allocations = allocateExamCounts(part, examChapters);
     for (const allocation of allocations) {
-      const items = await fetchExamPartQuestions(part, allocation.count, allocation.chapterId);
+      const items = await fetchExamPartQuestions(part, allocation.count, allocation.chapterId, courseId);
       for (const item of items) {
         if (seen.has(item.id)) continue;
         seen.add(item.id);
@@ -11234,7 +11422,7 @@ async function generateExamPaper(rule, parts) {
       const fill = [];
       const fillChapters = selectedIds.size ? examChapters : [{ id: 0 }];
       for (const chapter of fillChapters) {
-        const chunk = await fetchExamPartQuestions(part, part.count * 3, Number(chapter.id || 0));
+        const chunk = await fetchExamPartQuestions(part, part.count * 3, Number(chapter.id || 0), courseId);
         fill.push(...chunk);
         if (fill.length >= part.count * 3) break;
       }
@@ -11246,10 +11434,14 @@ async function generateExamPaper(rule, parts) {
         if (selected.length >= part.count) break;
       }
     }
-    state.questions.push(...shuffleItems(selected));
+    generated.push(...shuffleItems(selected));
   }
-  if (!state.questions.length) throw new Error("组卷失败，当前题库没有可抽取的题目");
-  state.questions = state.questions.slice(0);
+  if (!generated.length) throw new Error("组卷失败，当前题库没有可抽取的题目");
+  /* 提交前最后一次校验 —— 这里是整条流程里**唯一**允许写 state 的位置：
+     校验失败则 state.questions / state.answers / state.exam 一个都不动。 */
+  if (!examFlowStillCurrent(activeFlow)) return abortExamFlow(activeFlow);
+  const questions = generated.slice(0);
+  state.questions = questions;
   state.answers = {};
   state.submitted = false;
   state.answerVisible = false;
@@ -11260,7 +11452,7 @@ async function generateExamPaper(rule, parts) {
     rule,
     scoreMap,
     /* 题单随考试对象一起存：saveExamDraft 只认它（见那边的注释）。 */
-    questionIds: state.questions.map((item) => Number(item.id)).filter(Boolean),
+    questionIds: questions.map((item) => Number(item.id)).filter(Boolean),
     startedAt: Date.now(),
     endsAt: Date.now() + durationMs,
     remainingMs: durationMs,
@@ -11274,20 +11466,24 @@ async function generateExamPaper(rule, parts) {
      「x / 7227 分」，而卷子只有 6727 题 —— 用户永远拿不到满分。
      分值口径与判分完全一致：每题都过 getQuestionScore（scoreMap 优先，
      所以上面必须先落 state.exam）。 */
-  state.exam.rule.totalScore = state.questions.reduce((sum, item) => sum + getQuestionScore(item.detail || item), 0);
+  state.exam.rule.totalScore = questions.reduce((sum, item) => sum + getQuestionScore(item.detail || item), 0);
   saveExamDraft();
   startExamTimer();
   renderAll();
   await loadCurrentQuestion().catch((err) => toast(err.message));
-  toast(`已生成模拟卷：${state.questions.length} 题`);
+  if (!examFlowStillCurrent(activeFlow)) return;
+  toast(`已生成模拟卷：${questions.length} 题`);
 }
 
-async function fetchExamPartQuestions(part, count, chapterId = 0) {
+/* 取题参数用**调用方捕获的** courseId：旧实现在 fetch 途中读活的
+   state.currentCourse.id，挂起期间切科目就会拿科目 2 去抽科目 1 的卷子。 */
+async function fetchExamPartQuestions(part, count, chapterId = 0, courseId = 0) {
   if (!count) return [];
+  const targetCourseId = Number(courseId || state.currentCourse?.id || 0);
   const items = [];
   for (const typeId of part.availableTypeIds) {
     const params = new URLSearchParams({
-      courseId: state.currentCourse.id,
+      courseId: String(targetCourseId),
       typeId,
       limit: String(Math.max(count * 2, count)),
       order: "random",
@@ -11935,7 +12131,7 @@ function bindImageViewer() {
 
 function hasOpenModal() {
   if (imageViewerOpen()) return true;
-  return ["correctionModal", "adminUserModal", "printModal", "conflictModal", "examHistoryModal"].some((id) => {
+  return ["correctionModal", "adminUserModal", "printModal", "conflictModal", "examHistoryModal", "examDraftMissingModal"].some((id) => {
     const el = $(id);
     return el && !el.classList.contains("hidden");
   });
@@ -11956,7 +12152,8 @@ function handleGlobalShortcuts(event) {
   }
   if (event.ctrlKey && event.key === "Enter" && state.questions.length) {
     event.preventDefault();
-    submitPaper().catch((err) => toast(err.message));
+    /* 和「交卷」按钮同一个入口：先确认再交（不可逆动作不能因为入口不同就少一道确认）。 */
+    requestExamSubmit();
     return;
   }
   if (!event.ctrlKey && !event.shiftKey && event.key === "Enter" && state.currentIndex >= 0) {
@@ -12114,11 +12311,10 @@ $("answerToggleBtn").onclick = toggleAnswer;
 $("verifyModeBtn").onclick = toggleVerifyMode;
 $("confirmAnswerBtn").onclick = confirmCurrentAnswer;
 /* ⚠️ 交卷确认放在这里、不放进 submitPaper：超时自动交卷走的是
-   submitPaper(true)（计时器 / 恢复草稿时直调），那条路不该被 confirm 拦住。 */
-$("submitBtn").onclick = () => {
-  if (!confirmExamSubmit()) return;
-  submitPaper().catch((err) => toast(err.message));
-};
+   submitPaper(true)（计时器 / 恢复草稿时直调），那条路不该被 confirm 拦住。
+   ⚠️ 快捷键也必须走同一个 requestExamSubmit（见 handleGlobalShortcuts）：
+   同一个不可逆动作不能因为入口不同就少一道确认。 */
+$("submitBtn").onclick = requestExamSubmit;
 $("resetBtn").onclick = resetPractice;
 $("favoriteBtn").onclick = toggleFavorite;
 $("mobileActionsBtn").onclick = () => setMobileActions(!state.mobileActionsOpen);
