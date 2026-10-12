@@ -389,23 +389,16 @@ body.is-admin .admin-only {
   color: var(--muted);
 }
 
-.login-check {
-  display: inline-flex !important;
-  grid-template-columns: none !important;
-  align-items: center;
-  justify-content: center;
-  gap: 9px !important;
+/* 原来这里是 `.login-check` / `.login-check input` —— 给那个假复选框（checked disabled、
+   不参与任何逻辑）做样式。控件本身已删，换成一行说明文字；
+   大字提示搬到 .login-hint 上，保留原来那条说明的视觉重量。 */
+.login-hint {
+  display: block;
   margin-top: -4px;
-  color: var(--text-4) !important;
+  color: var(--text-4);
   font-size: 14px;
-  font-weight: 600 !important;
-}
-
-.login-check input {
-  width: 17px !important;
-  height: 17px !important;
-  margin: 0;
-  accent-color: var(--primary);
+  font-weight: 600;
+  text-align: center;
 }
 
 .change-password-box {
@@ -677,7 +670,6 @@ body.is-admin .admin-only {
   }
 }
 
-#searchToggleBtn::before,
 #filterBtn::before,
 #printBtn::before,
 #zoomInBtn::before,
@@ -696,7 +688,8 @@ body.is-admin .admin-only {
   line-height: 1;
 }
 
-#searchToggleBtn::before { content: "⌎"; }
+/* #searchToggleBtn 已删除（与「试题筛选」逐字重复，见 index.html 的注释），
+   它那两条 ::before / --icon 规则一并删掉。 */
 #filterBtn::before { content: "≀"; }
 #printBtn::before { content: "▀"; }
 #zoomInBtn::before { content: "+"; }
@@ -4678,7 +4671,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   }
 
   .nav-item::before,
-  #searchToggleBtn::before,
   #filterBtn::before,
   #printBtn::before,
   #zoomInBtn::before,
@@ -4716,7 +4708,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   .nav-item[data-mode="progress"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 3v18h18'/%3E%3Cpath d='m19 9-5 5-4-4-3 3'/%3E%3C/svg%3E"); }
   .nav-item[data-mode="favorite"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'/%3E%3C/svg%3E"); }
 
-  #searchToggleBtn { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E"); }
   #filterBtn { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='21' x2='14' y1='4' y2='4'/%3E%3Cline x1='10' x2='3' y1='4' y2='4'/%3E%3Cline x1='21' x2='12' y1='12' y2='12'/%3E%3Cline x1='8' x2='3' y1='12' y2='12'/%3E%3Cline x1='21' x2='16' y1='20' y2='20'/%3E%3Cline x1='12' x2='3' y1='20' y2='20'/%3E%3Cline x1='14' x2='14' y1='2' y2='6'/%3E%3Cline x1='8' x2='8' y1='10' y2='14'/%3E%3Cline x1='16' x2='16' y1='18' y2='22'/%3E%3C/svg%3E"); }
   #printBtn { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 6 2 18 2 18 9'/%3E%3Cpath d='M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2'/%3E%3Crect width='12' height='8' x='6' y='14'/%3E%3C/svg%3E"); }
   #zoomInBtn { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3Cpath d='M11 8v6'/%3E%3Cpath d='M8 11h6'/%3E%3C/svg%3E"); }
@@ -4733,7 +4724,6 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   #wrongBtn { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E"); }
 
   .nav-item[data-mode]::before,
-  #searchToggleBtn::before,
   #filterBtn::before,
   #printBtn::before,
   #zoomInBtn::before,
@@ -8469,7 +8459,6 @@ body.panel-page .answer-card-wrap,
 .toolbar button::before,
 .question-actions button::before,
 #nextBtn::after,
-#searchToggleBtn::before,
 #filterBtn::before,
 #printBtn::before,
 #zoomInBtn::before,
@@ -13676,3 +13665,345 @@ textarea,
     max-height: 42px !important;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   第 4 批审计修复：手机端可达性 / ink 主题语义 / 一致性
+   ──────────────────────────────────────────────────────────────────────────
+   本段全部是**新增**规则，一律写在文件最后（同特异性时后写者胜），
+   不改动上面任何既有规则，便于单独回滚。
+   编号与审计清单一一对应。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── ① 手机端 toast 不再压在底部标签栏上 ────────────────────────────────
+   实测 390×844：toast 矩形 y=770..818（高 48），标签栏 y=780..834；
+   toast 的 z-index 300 > 标签栏 96，所以底栏上沿 38px 被吃掉、点不到。
+   底栏 54 + 20 = 74 → toast 落在 y=722..770，与标签栏完全分开。 */
+@media screen and (max-width: 760px) {
+  .toast {
+    bottom: calc(var(--tabbar-h) + 20px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* 管理视图没有底部标签栏（body.admin-view .mobile-tabbar 是 display:none），
+     那里保持原来的 26px，别凭空抬出一条空档。 */
+  body.admin-view .toast {
+    bottom: calc(26px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ── ② 手机端触控目标 ≥ 44px ─────────────────────────────────────────────
+   实测（390×844，改前 → 改后）：
+     #prevBtn / #nextBtn / #mobileActionsBtn   115.3×36 → 115.3×44
+     #answerCardCollapseBtn                    121.9×34 → 121.9×44（展开态）
+                                                121.9×34 → 121.9×42（收起态，见下）
+     #tagPanelToggleBtn                        324×30   → 324×44
+     .mobile-tabbar .nav-item                  58×42    → 58×44
+     .exam-chapter-toggle（章节树 +/−）         28×28    → 44×44
+     .exam-chapter-actions button（全选/清空）  56×32    → 56×44
+     .analysis-toggle（章节分析树展开）         28×28    → 44×44
+     .admin-actions button（用户卡 5 个按钮）   88×31    → 88×44
+     .theme-switch button（登录页主题）         48×30    → 48×44
+     .theme-switch-compact button（账号菜单）   39×34    → 39×44
+   只动 min-height / min-width / padding，**不动布局结构**（flex/grid 列数、DOM 顺序全保持）。
+   ⚠️ #answerCardCollapseBtn 收起态只能给到 42px：它所在的整条卡片是 42px（网格第 5 行轨道
+      的宽度，见 L13620 起那整段注释：轨道和 = pane 内容高，改轨道就要从读题区扣）。
+      按钮再高就会被卡片自己的 overflow:hidden 削平。展开态没有这个约束，给足 44。
+   ⚠️ 管理后台用户卡的「清空数据」「删除」紧挨着（原来只隔 8px），
+      删除又不可恢复 —— 这里让「删除」单独换行（见 ③）。 */
+@media screen and (max-width: 760px) {
+  .question-actions > button {
+    min-height: 44px !important;
+  }
+
+  body:not(.answer-card-collapsed) #answerCardCollapseBtn {
+    min-height: 44px !important;
+  }
+
+  body.answer-card-collapsed #answerCardCollapseBtn {
+    min-height: 42px !important;
+  }
+
+  #tagPanelToggleBtn {
+    min-height: 44px !important;
+  }
+
+  .mobile-tabbar .nav-item {
+    min-height: 44px !important;
+  }
+
+  .exam-chapter-toggle {
+    width: 44px !important;
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  .exam-chapter-actions button,
+  .analysis-toggle {
+    min-height: 44px !important;
+    min-width: 44px !important;
+  }
+
+  .admin-user-actions button,
+  .admin-actions button {
+    min-height: 44px !important;
+  }
+
+  .theme-switch button {
+    min-height: 44px !important;
+  }
+}
+
+/* ── ③ 管理后台用户卡：「删除」独占一行 ─────────────────────────────────
+   5 个按钮里「清空数据」和「删除」相邻，两个都不可恢复，误点代价高。
+   不用 flex-basis 硬挤，直接给「删除」一个整行（.admin-actions 是 flex-wrap:wrap）。 */
+@media screen and (max-width: 760px) {
+  .admin-user-actions .danger {
+    flex: 1 1 100% !important;
+    margin-top: 2px;
+  }
+}
+
+/* ── ④ 手机端标签面板内部可滚 ───────────────────────────────────────────
+   实测改前（390×844，面板展开）：#questionTagPanel box y=417..868（高 451），
+   视口只有 844 —— 底部 24px 在屏外；面板体 clientH == scrollH == 386，
+   overflow: visible，也就是**本身不可滚**，只能整页滚。
+   这里给面板体一个上限并让它自己滚：信心 / 错因 / 收藏夹都能在面板内滚到，
+   读题区也不再被一路顶下去。 */
+@media screen and (max-width: 760px) {
+  .question-tag-panel.open .tag-panel-body {
+    max-height: min(46vh, 330px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* ── ⑤ 管理后台 6 个页签占满一整行 ──────────────────────────────────────
+   实测 390×844：.admin-view-tabs 宽 220px（x=143..363），6 个页签各 54px 排在
+   398..514，「编辑」「数据」整块在屏外（能横滑但没有提示）。
+   根因：`.admin-toolbar` 在 ≤760px 是 `flex + nowrap + overflow-x:auto`（L8087），
+   tabs 的 `width:100%` 只是建议宽度，和 `.admin-toolbar-main` 挤在同一行被压成剩余空间。
+   修法：让工具栏允许换行 + tabs 独占一行 + 页签三列两行（6 个全在屏内，不用横滑）。 */
+@media screen and (max-width: 760px) {
+  .admin-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .admin-view-tabs {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .admin-view-btn {
+    flex: 1 1 calc(33.333% - 8px);
+    min-width: 0;
+  }
+}
+
+/* ── ⑥ 冲突弹窗的主按钮终于有主色 ───────────────────────────────────────
+   实测改前：`#conflictReloadBtn`（class="primary-action"）与另外两个按钮
+   **逐值相同** —— bg rgba(255,255,255,0.62) / color rgb(51,65,85)；
+   而同一个 class 在登录页是 bg rgb(98,101,239) / 白字。
+   根因：`.admin-actions button, .modal-head button, .modal-actions button`
+   （特异性 (0,1,1)）压过 `.primary-action`（(0,1,0)）。
+   这里补一条 (0,2,1) 的规则把主色还回来（登录页/纠错弹窗/添加用户弹窗一并生效）。 */
+.modal-actions button.primary-action,
+.admin-actions button.primary-action,
+.modal-head button.primary-action {
+  border-color: transparent;
+  background: var(--primary);
+  color: var(--on-accent);
+}
+
+@media screen and (hover: hover) {
+  .modal-actions button.primary-action:hover,
+  .admin-actions button.primary-action:hover,
+  .modal-head button.primary-action:hover {
+    border-color: transparent;
+    background: var(--primary-600);
+    color: var(--on-accent);
+  }
+}
+
+/* ── ⑦ .muted-card（整项目没有任何 CSS） ────────────────────────────────
+   app.js 的 `renderStudyDashboard` 在「没有可续训练单」时给卡片挂这个 class，
+   但 style.css / drawer.css 里都没有它 —— 这张卡和普通 .study-card 长得一模一样，
+   看不出「现在没有内容」。用浅底 + 虚线框（本项目的「未生效/待动作」语言）。 */
+.muted-card {
+  background: var(--surface-2);
+  border: 1px dashed var(--border-2);
+  color: var(--muted);
+}
+
+.muted-card strong {
+  color: var(--muted-3);
+}
+
+/* ── ⑧ 交卷后「未作答」的格子要能看出来 ─────────────────────────────────
+   ⚠️ 这条**有意**打破 L1651 那条「.mark.todo 与格子逐值同色」的约定：
+   交卷前「没做」是常态，整屏灰没问题；交卷后「这次没做」是需要一眼看出的信息
+   （实测改前 .card-cell.todo 与普通格子在 light/dark/eye/ink 四主题下逐值相同）。
+   表达方式：中性灰底 + 45° 斜纹 + 2px 虚线描边 —— 纯灰阶也成立，
+   且与 .wrong（实心红 / ink 下 2px 虚线）分得开。
+   ⚠️ 选择器必须带那三个 :not()：L5710 的
+   `.card-cell:not(.done):not(.correct):not(.wrong)`（(0,4,0)，@media screen 里）
+   比 `.card-cell.todo`（(0,2,0)）特异性高，不带就压不住它的 background 简写
+   （实测：只写 .card-cell.todo 时斜纹被那条规则整条抹掉，只剩描边生效）。 */
+.card-cell.todo:not(.done):not(.correct):not(.wrong) {
+  border: 2px dashed var(--text-3);
+  background:
+    repeating-linear-gradient(135deg, transparent 0 4px, rgba(var(--ink-rgb), 0.20) 4px 8px),
+    var(--surface-4);
+  color: var(--text-3);
+}
+
+/* ink：靠**点线**和 .wrong 的虚线分开（同 L10448 的「点线 vs 虚线」），
+   填充用 --ink-l1，与 .done 的 --ink-l2 差一级。 */
+[data-theme="ink"] .card-cell.todo:not(.done):not(.correct):not(.wrong) {
+  border-color: var(--ink-l5);
+  border-style: dotted;
+  background:
+    repeating-linear-gradient(135deg, transparent 0 4px, rgba(0, 0, 0, 0.22) 4px 8px),
+    var(--ink-l1);
+  color: var(--text);
+}
+
+/* ── ⑨ 「标签筛选」的可见标签 ───────────────────────────────────────────
+   #tagSelect 原来只有一个 title（手机点不出 tooltip、读屏读不到）。
+   现在它被包在 <label class="tag-filter-field"> 里（见 app.js ensureTagFilterControl），
+   这里只负责这一行的排版。 */
+.tag-filter-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tag-filter-field > span {
+  color: var(--text-4);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media screen and (max-width: 760px) {
+  /* 搜索面板在手机上是被 `.search-panel input, select { flex: 1 1 calc(50% - 8px) }`
+     排成两列的；select 现在不是面板的直接子元素，宽度改由这层 wrapper 承担。 */
+  .tag-filter-field {
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .tag-filter-field > select {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+}
+
+/* ── ⑩ 分配题库浮层里「未下载」的课不要写「0 题」 ───────────────────────
+   实测 13 门课全是「0 题」，看着像数据坏了，其实只是本地没这个题库。 */
+.assign-item small.is-missing {
+  color: var(--muted-2);
+  font-weight: 650;
+}
+
+/* ── ⑪ 到边界时禁用的翻页按钮要有禁用态 ─────────────────────────────────
+   #prevBtn / #nextBtn /（考场里的）#resetBtn 现在会在边界真正 disabled
+   （见 app.js syncQuestionNavButtons / renderVerifyModeControls）。
+   按钮本身没有禁用样式，不加这条就成了「看着能点、点了没反应」——
+   和被修掉的旧行为一样糟。 */
+#prevBtn:disabled,
+#nextBtn:disabled,
+#resetBtn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* ── ⑫ ink：「选中」的 chip 必须是反色，不能比未选中更淡 ────────────────
+   实测改前：`.quick-mark.active` 边框 rgb(128,128,128)（灰）、无填充，
+   而未选中是 border rgb(0,0,0)（黑）+ 白底 —— 选中反而更淡。
+   统一到 .status-pill.active / .admin-view-btn.active 那套：实心黑 + 白字。 */
+[data-theme="ink"] .quick-mark.active {
+  border-color: var(--ink-l5);
+  background: var(--ink-l5);
+  color: var(--ink-l0);
+  font-weight: 800;
+}
+
+/* ── ⑬ ink：「我选的 + 答对」与「正确答案」要能分开 ─────────────────────
+   两者都是实心黑 + 白字，只靠填充分不出来。这套主题给「我选了」留的通道是
+   内圈（outline），但改前只有 3px / offset -8px，太细。
+   这里把它加粗成**框**：4px、offset -5px —— 黑底上一圈醒目的白框，
+   和纯黑的「正确答案（没选）」一眼可分；「我选了但还没判定」（灰底）同理。 */
+[data-theme="ink"] .option.selected {
+  outline-width: 4px;
+  outline-offset: -5px;
+}
+
+/* ── ⑭ ink：顶栏保存状态点在灰度下也要能分「同步中 / 失败」 ─────────────
+   实心黑 = 失败（要看得到、要显眼），空心 = 同步中/未保存。
+   选择器必须和 L11711 那三条**同特异性**并写在后面才压得住。 */
+[data-theme="ink"] .account-box:has(#saveStatusLabel[data-status="dirty"]) .account-btn::after,
+[data-theme="ink"] .account-box:has(#saveStatusLabel[data-status="saving"]) .account-btn::after {
+  background: var(--ink-l0);
+  border-color: var(--ink-l5);
+}
+
+[data-theme="ink"] .account-box:has(#saveStatusLabel[data-status="error"]) .account-btn::after {
+  background: var(--ink-l5);
+  border-color: var(--ink-l0);
+}
+
+/* ── ⑮ 手机端科目/章节面板不再独占整屏 ─────────────────────────────────
+   实测改前：390×844 下面板高 703px，把读题区整块盖住（.question-pane 甚至是
+   display:none），唯一出口是面板底部那个「进入做题」按钮。
+   现在：面板最高 58dvh，读题区保留在下面 —— 点一下读题区就收起面板
+   （app.js 里 #questionView 的 click 早已实现，只是原来够不到）。
+   ⚠️ 只在手机端且非管理视图生效；桌面端（并排一栏）与 >760px 完全不动。 */
+@media screen and (max-width: 760px) {
+  body:not(.admin-view).picker-open .course-pane {
+    max-height: min(58dvh, calc(100dvh - 122px));
+  }
+
+  body:not(.admin-view).picker-open .question-pane {
+    display: grid;
+  }
+}
+
+/* ── ⑯ 考场首页「开始组卷」吸底（手机端） ───────────────────────────────
+   实测改前 390×844：按钮 top=1512、页面高 1183，要先滚约 1000px 才够得到。
+   现在整条（禁用原因 + 按钮）固定在底部标签栏上方，任何时候都点得到。
+   .exam-start-bar 是 app.js 里新包的一层（按钮 + .exam-warning），
+   桌面端它只是一个普通 grid 项，视觉与改前一致。 */
+@media screen and (max-width: 760px) {
+  .exam-home {
+    padding-bottom: 150px;   /* 让出吸底条的高度，最后一张卡不会被盖住 */
+  }
+
+  .exam-start-bar {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: calc(var(--tabbar-h) + 10px + env(safe-area-inset-bottom, 0px));
+    z-index: 95;             /* 低于标签栏(96)，高于答题卡(90) */
+    display: grid;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: rgba(var(--glass-rgb), 0.95);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+    box-shadow: var(--glass-highlight), var(--shadow-md);
+  }
+
+  .exam-start-bar .primary-action {
+    min-height: 44px;
+  }
+
+  .exam-start-bar .exam-warning {
+    margin: 0;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+}
+

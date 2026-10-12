@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261012-consistency1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261012-a11y1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -49,11 +49,11 @@
         <button type="button" data-theme-set="ink">墨水屏</button>
         <button type="button" data-theme-set="auto">跟随系统</button>
       </div>
-      <label class="login-check">
-        <input type="checkbox" checked disabled>
-        <span>第一次登录必须修改密码</span>
-      </label>
-      <small>初始密码由部署配置决定（默认 123456）</small>
+      <!-- 这里原来是一个 `<input type="checkbox" checked disabled>`——
+           勾不动、也不参与任何逻辑，纯粹是条说明。伪装成控件有害：
+           读屏会把它念成复选框、键盘用户会去试着勾它。
+           换成一行说明文字，和下面那句并起来。 -->
+      <small class="login-hint">第一次登录必须修改密码 · 初始密码由部署配置决定（默认 123456）</small>
       <div id="changePasswordBox" class="change-password-box hidden">
         <strong>首次登录，请先修改密码</strong>
         <label>
@@ -132,7 +132,10 @@
     </nav>
 
     <section class="toolbar">
-      <button id="searchToggleBtn">搜索</button>
+      <!-- 这里原来还有一个「搜索」按钮（#searchToggleBtn），onclick 与「试题筛选」
+           逐字相同 —— 两个按钮、同一个面板，而面板里既有题目内搜索也有题型/标签/题量。
+           两个入口只会让人猜哪个才是搜索。统一收成一个「试题筛选」，
+           题目内搜索仍在面板里的「题目内搜索」输入框（现在只做本地匹配）。 -->
       <button id="answerToggleBtn">显示答案</button>
       <button id="resetBtn" title="仅清空当前题单作答，不影响其他章节">清空本题单</button>
       <button id="submitBtn">提交答卷</button>
@@ -352,7 +355,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261012-consistency1"></script>
+  <script src="/app.js?v=20261012-a11y1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     if ("serviceWorker" in navigator) {

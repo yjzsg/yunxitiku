@@ -42,6 +42,11 @@ const state = {
   mobileToolsOpen: false,
   answerCardCollapsed: false,
   answerCardUserTouched: false,
+  /* 「显示/隐藏答案」的**显式**覆盖位（S-34）。
+     旧实现只靠 state.answerVisible，而 shouldRevealCurrentAnswer 在背题模式下恒真，
+     于是背题模式里点两次「隐藏答案」后按钮写回「显示答案」、答案却还在屏上 ——
+     按了没用。现在隐藏 = 置 true，任何自动显示规则都要先过这一关；换题/交卷清零。 */
+  answerHiddenOverride: false,
   mobileTagsOpen: false,
   tagPanelQuestionId: 0,
   /* 错题本筛选。`review` 默认 "all"：错题本的第一诉求是「我错过的题在哪」，
@@ -61,7 +66,10 @@ const state = {
   adminBankQuery: "",
   adminBankCategory: "",
   adminBankSubcategory: "",
+  /* 「更新」页签里一级分类的折叠表。**默认全折叠**：664 门课全展开会渲染 674 个按钮、
+     页面高 26 万像素（见 ensureAdminBankCollapsedInit）。 */
   adminBankCollapsed: {},
+  adminBankCollapsedInit: false,
   adminBankStatus: "",
   adminUpdateCheck: {},
   adminCourseAssign: null,
@@ -151,7 +159,6 @@ const SIMILAR_MIN_KEYWORD_HITS = 2;
    stage 0 的到期日是答错次日，只出到期题的话今天刚错的题今天一道都练不了。 */
 const DEFAULT_TAG_LABELS = ["计算量大", "易错题", "坑题", "重要", "待复盘"];
 const FAVORITE_GROUPS = ["公式", "易混点", "考前速看", "老师提醒"];
-const NOTE_TEMPLATE = "考点：\n\n易错点：\n\n正确思路：\n";
 
 /* ── 配色模式：浅色 / 暗色 / 护眼 / 墨水屏 ─────────────────────────────
    真正的调色在 style.css 的 [data-theme="dark"|"eye"|"ink"] 令牌块里；这里只负责
@@ -1124,8 +1131,12 @@ function ensureVerifyModeControl() {
     confirmBtn.className = "confirm-answer-btn hidden";
     confirmBtn.textContent = "确认答案";
     confirmBtn.title = "确认当前题并显示答案";
+    /* 「确认答案」放在「下一题」**右边**。
+       旧位置是 nextBtn 之前 → 桌面按钮行成了「上一题 / 确认答案 / 下一题」，
+       把不可撤销的判定动作夹在两个翻页键中间，翻页时极易误点。
+       手机端是 flex 等分（按钮个数自适应），顺序变了也不会掉行。 */
     const nextBtn = $("nextBtn");
-    nextBtn?.parentNode.insertBefore(confirmBtn, nextBtn);
+    nextBtn?.insertAdjacentElement("afterend", confirmBtn);
   }
 }
 
@@ -1590,6 +1601,24 @@ function setSaveStatus(status) {
 }
 
 function updateSaveStatusUi() {
+  const status = state.user ? (state.saveStatus || "idle") : "idle";
+  const map = {
+    idle: "已同步",
+    dirty: "未保存",
+    saving: "保存中…",
+    error: "保存失败",
+  };
+  /* 顶栏账号头像上的状态角标。
+     同步状态原本只写在账号下拉菜单里（#saveStatusLabel），菜单一关宽度就是 0 ——
+     409 之后按「暂时保留本地」时，界面上唯一的「保存失败」提示在看不见的地方。
+     角标是同一个 state.saveStatus 的第二个投递点，红点/同步点由 CSS 画。 */
+  const avatar = $("accountMenuBtn");
+  if (avatar) {
+    avatar.classList.toggle("has-error", status === "error");
+    avatar.classList.toggle("is-syncing", status === "dirty" || status === "saving");
+    avatar.dataset.sync = status;
+    avatar.title = state.user ? `账号 · ${map[status] || map.idle}` : "账号";
+  }
   const el = $("saveStatusLabel");
   if (!el) return;
   if (!state.user) {
@@ -1597,12 +1626,6 @@ function updateSaveStatusUi() {
     el.dataset.status = "idle";
     return;
   }
-  const map = {
-    idle: "已同步",
-    dirty: "未保存",
-    saving: "保存中…",
-    error: "保存失败",
-  };
   el.textContent = map[state.saveStatus] || map.idle;
   el.dataset.status = state.saveStatus || "idle";
 }
@@ -1857,26 +1880,9 @@ function keepLocalConflictDraft() {
   toast("已保留本地改动，暂不覆盖服务器。建议先导出草稿");
 }
 
-async function switchUser(name) {
-  /* 同 logout()：只有「本地确实有未保存改动」时才提示，避免多标签页场景误弹冲突框。 */
-  const hadUnsaved = !!state.storageDirty;
-  try {
-    await saveUserData();
-  } catch (err) {
-    if (hadUnsaved) {
-      handleUserSaveError(err);
-      if (err?.status === 409 || err?.code === "user_data_conflict") return;
-      if (!confirm("本地改动还没保存成功，确定仍要切换账号吗？\n\n点「取消」可留在页面重试。")) return;
-    }
-  }
-  localStorage.removeItem(SESSION_USER_KEY);
-  localStorage.removeItem(SESSION_TOKEN_KEY);
-  localStorage.setItem(LAST_USER_KEY, name);
-  $("loginUserSelect").value = name;
-  state.user = "";
-  document.body.classList.remove("is-admin", "admin-view", "picker-open");
-  showLogin();
-}
+/* 死代码清理：这里原来有一个 `switchUser(name)`（189 行前的位置）。
+   它没有任何调用者，而且不调 `/api/auth/logout` —— 将来谁把它接上，服务端会话就留在那里，
+   换个人用同一台机器还是上一个账号的身份。真需要「切账号」就直接走 logout()。 */
 
 async function loadCourses() {
   $("courseList").innerHTML = `<div class="muted">正在读取科目...</div>`;
@@ -1913,6 +1919,17 @@ function setCoursePicker(open) {
 function toggleCoursePicker() {
   if (document.body.classList.contains("admin-view")) return;
   setCoursePicker(!state.pickerOpen);
+}
+
+/* 「进题库时要不要自动弹面板」（S-35）。
+   桌面端维持原样：面板是并排的一栏，不挡题，开着反而方便。
+   手机端只在**还没选科目**时弹（那时必须选）；已经有科目就不拦人 ——
+   要换科目点顶栏的科目名（toggleCoursePicker），那是明确的意图。
+   不用「本次会话弹过一次」这种一次性标志：它会让「第一次其实没选科目」
+   和「第二次又弹一遍」同时发生，规则越绕越难解释。 */
+function shouldAutoOpenCoursePicker() {
+  if (!isPhoneViewport()) return true;
+  return !state.currentCourse;
 }
 
 function updatePickerHint() {
@@ -2511,6 +2528,9 @@ async function selectChapter(chapter) {
   await loadQuestions();
   if (transitionId !== state.modeTransitionId) return;
   updatePickerHint();
+  /* 手机端选完章节自动收起面板：面板占满整屏，不收就等于「点了一下什么也没发生」。
+     （761px 以上不关：那里是并排的一栏，用户的下一步很可能是继续挑题型。） */
+  if (isPhoneViewport()) setCoursePicker(false);
   scheduleSave();
 }
 
@@ -2534,6 +2554,14 @@ async function loadTypes(options = {}) {
 
 function ensureTagFilterControl() {
   if ($("tagSelect")) return;
+  /* 可见 label（S-25）。这个下拉原本只有一个 title="按标签筛选"：
+     读屏读不到、手机点不出 tooltip，而且它躺在默认收起的搜索面板里 ——
+     等于「标签筛选」这个功能在界面上没有名字。
+     包一层 <label> 同时解决可见文案和可访问名（原生 label 关联）。 */
+  const field = document.createElement("label");
+  field.className = "tag-filter-field";
+  const caption = document.createElement("span");
+  caption.textContent = "标签筛选";
   const select = document.createElement("select");
   select.id = "tagSelect";
   select.title = "按标签筛选";
@@ -2541,7 +2569,9 @@ function ensureTagFilterControl() {
     state.tagFilter = select.value;
     loadQuestions().catch((err) => toast(err.message));
   };
-  $("typeSelect").insertAdjacentElement("afterend", select);
+  field.appendChild(caption);
+  field.appendChild(select);
+  $("typeSelect").insertAdjacentElement("afterend", field);
 }
 
 async function loadQuestions() {
@@ -2589,8 +2619,10 @@ async function loadQuestions() {
   if (!isIdListMode()) applyChapterParams(params);
   if ($("typeSelect").value) params.set("typeId", $("typeSelect").value);
   if (orderValue && orderValue !== "random") params.set("order", orderValue);
-  const q = $("questionSearch").value.trim();
-  if (q) params.set("q", q);
+  /* 题内搜索**不再走后端**：`q` 以前会随 loadQuestions 发给 /api/questions，
+     于是「改题型/标签/题量」时也顺带把题单按搜索词过滤掉，而用户看到的只是
+     「格子整块重绘」。现在搜索词只参与本地匹配（highlightSearchTerm /
+     getSearchMatchIndexes / #searchMatchPanel），题单的构成只由题型+标签+题量决定。 */
   const idFilter = getModeQuestionIds(courseStore);
   if (state.mode !== "exam") state.answers = { ...currentPracticeAnswerStore() };
   const tagIds = getTagFilterIds();
@@ -2619,11 +2651,13 @@ async function loadQuestions() {
   backfillQuestionChapters(state.currentCourse.id).catch(() => { /* 补不上就算了，翻题也会慢慢攒 */ });
   if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
+  /* ⚠️ shuffleKey 里**没有**搜索词：搜索只做本地匹配，不再参与取题
+     （上面 `q` 那条注释）。旧实现在这里带 `q`，等于每敲一个字就换一次洗牌种子、
+     整份随机题单重排一遍 —— 那是搜索「整块重绘」的另一半原因。 */
   const shuffleKey = JSON.stringify({
     courseId: state.currentCourse.id,
     chapterId: state.currentChapter?.id || 0,
     typeId: $("typeSelect").value || "",
-    q,
     limit: effectiveLimit,
     mode: state.mode,
   });
@@ -3516,6 +3550,7 @@ async function loadCurrentQuestion() {
     syncCurrentTrainingSession(item.id);
   }
   state.answerVisible = state.submitted || isQuestionVerified(item.id);
+  state.answerHiddenOverride = false;   // 换题清掉「手动隐藏」，别把上一题的意图带过来
   renderQuestion();
   state.lastLoadedQuestionKey = questionKey;
   state.lastLoadedQuestions = questions;
@@ -3790,6 +3825,15 @@ function isMobileViewport() {
   return width <= 1280 || coarsePointer;
 }
 
+/* 手机端断点（≤760px），和 style.css 里那一整套 `@media (max-width: 760px)` 对齐。
+   ⚠️ 判断「面板会不会铺满整屏 / 底部标签栏在不在」这类**布局**问题时用它，
+   不要用 isMobileViewport()：那个把 ≤1280px 和粗指针都算进来（它服务的是
+   答题卡、预取、触摸手势那类「小屏或触摸设备」的判断），
+   761–1280px 上面板是并排的一栏、根本不挡题。 */
+function isPhoneViewport() {
+  return window.matchMedia?.("(max-width: 760px)")?.matches ?? false;
+}
+
 function scrollQuestionViewToTop(behavior = "auto") {
   const view = $("questionView");
   if (!isMobileViewport() || !view) return;
@@ -3827,7 +3871,10 @@ function renderQuestion() {
   setText("answerText", q.answer || "");
   $("description").innerHTML = q.description ? `<b>试题解析：</b>${highlightSearchTerm(addLazyLoading(q.description))}` : "";
   $("answerBox").classList.toggle("hidden", !revealAnswer);
-  setText("answerToggleBtn", revealAnswer && state.answerVisible ? "隐藏答案" : "显示答案");
+  /* 按钮文案跟着**实际可见性**走（不再看 state.answerVisible）：
+     背题模式下答案框是可见的，而 answerVisible 可能是 false，
+     旧条件会把按钮写成「显示答案」——按钮和它对应的框自相矛盾。 */
+  setText("answerToggleBtn", revealAnswer ? "隐藏答案" : "显示答案");
   setText("favoriteBtn", isFavorite(q.id) ? "取消收藏" : "收藏本题");
   setText("wrongBtn", state.mode === "wrong" ? "移出错题" : "纠错");
   $("noteEditor").value = getNote(q.id);
@@ -3839,6 +3886,7 @@ function renderQuestion() {
   ensureQuestionSidePanel();
   renderExamStatus();
   renderVerifyModeControls();
+  syncQuestionNavButtons();
   renderSearchMatches();
   renderAnswerCard();
   updateStats();
@@ -4042,17 +4090,10 @@ function setFavoriteGroup(q, group) {
   toast(record.group ? `已加入${record.group}` : "已取消收藏分组");
 }
 
-function applyNoteTemplate(questionId) {
-  const editor = $("noteEditor");
-  if (!editor) return;
-  const current = editor.value.trim();
-  if (!current) editor.value = NOTE_TEMPLATE;
-  else if (!current.includes("考点：") && !current.includes("易错点：")) editor.value = `${NOTE_TEMPLATE}\n${current}`;
-  editor.classList.remove("hidden");
-  saveNote();
-  editor.focus();
-  toast("已套用笔记模板");
-}
+/* 死代码清理：这里原来有一个 `applyNoteTemplate(questionId)` + 上面的 `NOTE_TEMPLATE`
+   常量。全项目没有调用者，界面上也没有入口（笔记编辑框是一个裸 <textarea>）——
+   与其留一个永远点不到的「已套用笔记模板」toast，不如删掉；将来要做就在
+   笔记编辑框旁边正经加一个入口，别让这段代码继续漂着。 */
 
 function addQuestionTag(questionId, rawLabel) {
   const label = String(rawLabel || "").trim();
@@ -5048,6 +5089,9 @@ function isQuestionVerified(questionId) {
 }
 
 function shouldRevealCurrentAnswer(q) {
+  /* 显式覆盖位优先：用户在背题模式/已判定题目上点了「隐藏答案」，
+     这条规则（恒真）不能再把答案顶回来 —— 否则按钮按了没用。 */
+  if (state.answerHiddenOverride) return false;
   return !!(state.answerVisible || state.submitted || currentVerifyMode() === "review" || isQuestionVerified(q?.id));
 }
 
@@ -5104,13 +5148,28 @@ function renderVerifyModeControls() {
   const submitBtn = $("submitBtn");
   if (submitBtn) {
     const generating = isExamGenerating();
-    submitBtn.textContent = state.mode === "exam" ? "提交答卷" : "提交答卷";
+    /* 两个分支的文案必须真的不同：旧实现写成 `exam ? "提交答卷" : "提交答卷"`，
+       三元毫无意义。考场里那个按钮的动作是**交卷**（confirm 弹的就是「确定交卷吗」），
+       练习里是「提交答卷」。 */
+    submitBtn.textContent = state.mode === "exam" ? "交卷" : "提交答卷";
     submitBtn.title = generating
       ? "正在组卷，请稍候"
       : state.mode === "exam"
         ? "交卷并计算模拟考试成绩"
         : "统一验证本次练习中的所有题目";
     submitBtn.disabled = !!state.submitting || generating;
+  }
+  /* 「清空本题单」在考场里清的不是本题单，是整场考试（resetPractice 的 exam 分支会
+     清掉草稿、整卷作答并回到组卷页）。文案/title 必须说实话，交卷后再禁用 ——
+     那时已经没有什么可放弃的了。 */
+  const resetBtn = $("resetBtn");
+  if (resetBtn) {
+    const examRunning = state.mode === "exam";
+    resetBtn.textContent = examRunning ? "放弃本场考试" : "清空本题单";
+    resetBtn.title = examRunning
+      ? "放弃本场考试：本场已答内容会全部清除，不计入成绩，且不可恢复"
+      : "仅清空当前题单作答，不影响其他章节";
+    resetBtn.disabled = examRunning && state.submitted;
   }
 }
 
@@ -5122,6 +5181,7 @@ function toggleVerifyMode() {
   state.storage.settings.verifyMode = next;
   state.verifyMode = next;
   if (next !== "review" && !state.submitted) state.answerVisible = false;
+  state.answerHiddenOverride = false;   // 换验证方式 = 重新按新规则的默认值显示答案
   scheduleSave();
   if (state.questions[state.currentIndex]?.detail) renderQuestion();
   else renderVerifyModeControls();
@@ -5375,7 +5435,11 @@ function renderTraining() {
    原因文案写在 strong（meta）里，title 兜底给鼠标用户 / 读屏。 */
 function renderTrainingCard(type, title, desc, meta, action, options = {}) {
   const disabled = !!options.disabled;
-  const reason = options.reason || meta || "";
+  /* 冷启动时 meta 是「正在计算」（分析数据还没回来），而 reason 是硬编码的
+     「当前科目暂无可冲刺的题」—— 两者在同一张卡上互相矛盾（title 说没题、正文说在算）。
+     还在算就只说在算，别下结论。 */
+  const loading = /正在计算/.test(meta || "");
+  const reason = loading ? "正在计算…" : (options.reason || meta || "");
   return `
     <section class="training-card">
       <div>
@@ -5405,17 +5469,21 @@ function previewPracticePlan(type, courseStore, context = {}) {
      前两段（复习 / 弱项）是分段的题量，与「新题」不是一个维度（会互相重叠），
      所以「新题」前面加「其中」，表明它是整张卷子的属性，不是第四段。 */
   const realNew = Number(mix?.neverDone ?? mix?.fresh ?? 0);
+  /* ⚠️ 这三个数**不可相加**：复习段 / 弱项段是分段装填的，而「新题」是整张卷子的属性，
+     同一个题可以既在「弱项」里又是「新题」（实测 12 + 22 + 38 = 72 > 60 题）。
+     所以分段数之间用「+」连、并在后面点明会重叠，别写成三个并列的统计量。
+     （旧文案「复习12 弱项22 · 其中新题38」用的全是空格分隔，读起来像可以相加。） */
   if (type === "smart") {
     if (!count) return "自动生成 · 错题优先";
     return mix
-      ? `${count} 题 · 复习${mix.due} 弱项${mix.repeated + mix.weak} · 其中新题${realNew}`
+      ? `${count} 题 · 复习${mix.due} + 弱项${mix.repeated + mix.weak}（两段会重叠）· 其中新题${realNew}`
       : `${count} 题 · 错题优先`;
   }
   if (type === "similar") return count ? `${count} 题 · 同章同型` : "自动生成 · 同章同型";
   if (type === "sprint") {
     if (!count) return "自动生成 · 冲刺组合";
     return mix
-      ? `${count} 题 · 错题${mix.wrong} 弱项${mix.weak} · 其中新题${realNew}`
+      ? `${count} 题 · 错题${mix.wrong} + 弱项${mix.weak}（两段会重叠）· 其中新题${realNew}`
       : `${count} 题 · 冲刺组合`;
   }
   return "";
@@ -5559,12 +5627,18 @@ function renderTrainingHistoryRow(session) {
   const closedNote = session.status === "abandoned"
     ? ` · 已结束（${SESSION_ABANDON_DAYS} 天未继续）`
     : session.status === "expired" ? " · 已结束" : "";
+  /* 时间是**相对**的，和课程列表（renderCourses 里的「更新 3 天前」）同一套说法。
+     裸绝对时间「2026-10-05 10:00:00」在列表里既长又难比；精确时刻留在 title 里。 */
+  const createdText = formatRelativeTime(session.createdAt);
+  const completedText = session.completedAt ? ` · 完成 ${formatRelativeTime(session.completedAt)}` : "";
+  const absolute = [session.createdAt || "", session.completedAt ? `完成 ${session.completedAt}` : ""]
+    .filter(Boolean).join(" · ");
   return `
     <section class="training-history-row ${isActive ? "active" : ""}">
       <div class="training-history-main">
         <span>${escapeHtml(session.sourceTitle || "智能训练")}</span>
         <strong>${done}/${total} 题 · 正确率 ${Number(session.rate || 0)}% · 错题 ${Number(session.wrong || 0)}</strong>
-        <small>${escapeHtml(session.courseName || "")} · ${escapeHtml(session.createdAt || "")}${session.completedAt ? ` · 完成 ${escapeHtml(session.completedAt)}` : ""}${closedNote}</small>
+        <small title="${escapeHtml(absolute)}">${escapeHtml(session.courseName || "")} · ${escapeHtml(createdText)}${completedText ? escapeHtml(completedText) : ""}${closedNote}</small>
       </div>
       <div class="training-history-progress" aria-hidden="true"><i style="width:${Math.max(2, progress)}%"></i></div>
       <button type="button" data-training-session="${escapeHtml(session.id)}" ${btn.disabled ? "disabled" : ""}>${btn.label}</button>
@@ -6870,10 +6944,14 @@ function dateKey(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/* 学习时长的人类可读文案（S6）。 */
+/* 学习时长的人类可读文案（S6）。
+   ⚠️ 不足 1 分钟时**不能**说「不到 1 分钟」：这个函数吃的是 ms，
+   实测打开一题又立刻切走只花了 412ms，卡片上照样写「用时 不到 1 分钟」——
+   读起来像「练了快一分钟」，其实连一秒都不到。按秒说实话。 */
 function formatDuration(ms) {
-  const minutes = Math.floor(Number(ms || 0) / 60000);
-  if (minutes < 1) return "不到 1 分钟";
+  const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 1) return `${totalSeconds} 秒`;
   if (minutes < 60) return `${minutes} 分钟`;
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
@@ -7284,12 +7362,18 @@ function assignFilteredCourses(assign) {
 function assignGroupedHtml(list) {
   const assign = state.adminCourseAssign;
   let budget = ASSIGN_LIST_CAP;
-  const renderItem = (course) => `
+  const renderItem = (course) => {
+    /* 未下载的课 questionCount 恒为 0，原来一律写「0 题」——
+       分配浮层里 13 门课全是「0 题」，像数据坏了，其实只是本地没这个题库。
+       说清原因，别让管理员以为这些课真的没题。 */
+    const count = Number(course.questionCount || 0);
+    return `
     <label class="assign-item">
       <input type="checkbox" data-assign-course="${course.id}" ${assign.selected.has(Number(course.id)) ? "checked" : ""}>
       <span>${escapeHtml(course.name)}</span>
-      <small>${Number(course.questionCount || 0)} 题</small>
+      <small class="${count ? "" : "is-missing"}">${count ? `${count} 题` : "未下载题库"}</small>
     </label>`;
+  };
   return groupCoursesByCategory(list).map((group) => {
     if (budget <= 0) return "";
     const subsHtml = group.subs.map((sub) => {
@@ -7754,9 +7838,23 @@ function stopBankPullProgress() {
   refreshBankPullProgressUi();
 }
 
+/* 「更新」页签的一级分类**默认折叠**（S-28）。
+   实测本地题库有 664 门课，全展开 = 674 个按钮、页面高 26 万像素 ——
+   打开这个页签先要滚过一片空白按钮墙。默认收起后一屏就能看到分类概览，
+   点分类表头即展开（bindAdminBankUpdateButtons 里的 data-bank-group 已实现）。
+   只在第一次渲染时铺初值，之后用户的展开/收起状态不被覆盖。 */
+function ensureAdminBankCollapsedInit() {
+  if (state.adminBankCollapsedInit) return;
+  state.adminBankCollapsedInit = true;
+  const tops = courseFilterOptions(state.adminCourses || []).tops;
+  state.adminBankCollapsed = {};
+  tops.forEach((name) => { state.adminBankCollapsed[name] = true; });
+}
+
 function renderAdminBankTable() {
   const courses = state.adminCourses || [];
   if (!courses.length) return `<div class="admin-empty">暂无题库数据</div>`;
+  ensureAdminBankCollapsedInit();
   const visibleCourses = getFilteredAdminCourses();
   const options = courseFilterOptions(courses);
   const top = state.adminBankCategory || "";
@@ -8598,7 +8696,16 @@ async function adminUserAction(target, action) {
     delete: "删除账号",
   };
   if (["delete", "clear-data", "reset-password", "disable"].includes(action)) {
-    const ok = confirm(`确定要${names[action]}「${target}」吗？`);
+    /* 确认文案必须写清**后果**（旧文案只说「确定要删除账号「x」吗？」）：
+       删账号会连做题数据一起删且不可恢复；重置密码会强制该用户下次登录改密。
+       用户按下去之前应该知道自己在放弃什么。 */
+    const consequences = {
+      delete: `删除后该账号的做题数据、错题本、笔记、收藏会一并删除，且无法恢复。`,
+      "clear-data": "该账号的做题记录、错题本、笔记、收藏会被清空，且无法恢复。",
+      "reset-password": `密码会被重置回部署配置的初始密码，该用户下次登录必须重新设置新密码。`,
+      disable: "该账号将无法登录（数据保留）。",
+    };
+    const ok = confirm(`确定要${names[action]}「${target}」吗？\n\n${consequences[action]}`);
     if (!ok) return;
   }
   const result = await api(`/api/admin/user-action?user=${encodeURIComponent(state.user)}`, {
@@ -8690,9 +8797,41 @@ function rateKpiTitle(stats) {
     + `（已做 ${stats.done} 题，其中 ${unverified} 题还没点「确认答案」，不计入正确率）`;
 }
 
+/* 上一题 / 下一题的可用性。
+   旧实现到头了也照样可点：index 被 Math.min/max 夹住 → 画面一动不动、也没有任何提示，
+   屏上还可能残留上一次操作留下的 toast（「已收藏到…」），看着像按钮坏了。
+   现在按钮在边界直接禁用，moveQuestion 里再兜一层 toast ——
+   滑动手势（不走按钮，走 moveQuestion）也能得到同一句提示。 */
+function syncQuestionNavButtons() {
+  const total = state.questions.length;
+  const index = state.currentIndex;
+  const prev = $("prevBtn");
+  const next = $("nextBtn");
+  if (prev) {
+    const atFirst = index <= 0;
+    prev.disabled = atFirst || index < 0;
+    prev.title = atFirst ? "已经是第一题" : "上一题";
+  }
+  if (next) {
+    const atLast = total > 0 && index >= total - 1;
+    next.disabled = atLast || index < 0;
+    next.title = index < 0 ? "请先选择题库" : atLast ? "已经是最后一题" : "下一题";
+  }
+}
+
 async function moveQuestion(delta) {
   if (!state.questions.length) return;
-  state.currentIndex = Math.max(0, Math.min(state.questions.length - 1, state.currentIndex + delta));
+  const next = state.currentIndex + delta;
+  /* 边界不再静默：说清为什么不动（旧实现 index 被夹住，一声不响）。 */
+  if (next < 0) {
+    toast("已经是第一题");
+    return;
+  }
+  if (next > state.questions.length - 1) {
+    toast("已经是最后一题");
+    return;
+  }
+  state.currentIndex = next;
   await loadCurrentQuestion().catch((err) => toast(err.message));
 }
 
@@ -8936,6 +9075,7 @@ async function submitPaper(autoSubmit = false) {
     state.storage.history = state.storage.history.slice(0, 200);
     scheduleSave();
     state.answerVisible = true;
+    state.answerHiddenOverride = false;   // 交卷后答案必须看得到（本次作答的对错全在这里）
     renderQuestion();
     renderPracticeContextPanel();
     if (submitMode === "exam") {
@@ -9035,8 +9175,15 @@ function isFavorite(id) {
 function toggleFavorite() {
   const q = state.questions[state.currentIndex]?.detail;
   if (!q) return;
-  if (state.storage.favorite[q.id]) delete state.storage.favorite[q.id];
-  else ensureFavoriteRecord(q, "考前速看");
+  if (state.storage.favorite[q.id]) {
+    delete state.storage.favorite[q.id];
+    toast("已取消收藏");
+  } else {
+    /* 默认塞进「考前速看」分组 —— 分组名必须说出来，否则用户既不知道收进去了，
+       也不知道它在哪个分组里（改分组在题目下方的标签面板里）。 */
+    ensureFavoriteRecord(q, "考前速看");
+    toast("已收藏到「考前速看」，可在标签面板改分组");
+  }
   scheduleSave();
   renderQuestion();
 }
@@ -9098,9 +9245,31 @@ function refreshNoteButton() {
   btn.title = q && getNote(q.id) ? "本题有笔记（点开查看/编辑）" : "写本题笔记";
 }
 
+/* 点「笔记」：切编辑框显隐。
+   手机上编辑框长期落在屏幕外（实测 350×116 的框在 y=892，而视口只有 844），
+   旧实现只 classList.toggle("hidden")，不聚焦也不滚动 ——
+   用户点完「操作 → 笔记」，屏上什么都没发生，只能以为按钮坏了。
+   block:"nearest" 只在需要时才滚，不会把整页跳走。 */
+function toggleNoteEditor() {
+  const editor = $("noteEditor");
+  if (!editor) return;
+  const willShow = editor.classList.contains("hidden");
+  editor.classList.toggle("hidden", !willShow);
+  if (!willShow) return;   // 收起时不抢焦点
+  editor.focus({ preventScroll: true });
+  editor.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
 function toggleAnswer() {
   if (state.currentIndex < 0) return;
-  state.answerVisible = !state.answerVisible;
+  const q = state.questions[state.currentIndex]?.detail;
+  /* 目标状态是「点完之后答案该不该在屏上」，而不是「翻转 state.answerVisible」。
+     背题模式下答案本来就在屏上（shouldRevealCurrentAnswer 恒真），
+     翻了 answerVisible 也收不回来 —— 旧实现点两次文案回到「显示答案」、
+     答案却还在。这里按可见性算，并落一个显式覆盖位。 */
+  const reveal = !shouldRevealCurrentAnswer(q);
+  state.answerHiddenOverride = !reveal;
+  state.answerVisible = reveal;
   scheduleSave();
   renderQuestion();
 }
@@ -9357,13 +9526,11 @@ function renderExamHistory() {
       <div class="exam-history-list">
         ${records.map((item) => {
           const used = Number(item.usedSeconds || 0);
-          const minutes = Math.floor(used / 60);
-          const seconds = used % 60;
           return `
             <div class="exam-history-row">
               <b>${formatScore(item.score)} / ${formatScore(item.totalScore)} 分</b>
               <span>${Number(item.correct || 0)}/${Number(item.done || 0)} 题 · ${Number(item.rate || 0)}%</span>
-              <small>${escapeHtml(item.at || "")} · 用时 ${minutes}:${String(seconds).padStart(2, "0")}${item.autoSubmit ? " · 自动交卷" : ""}</small>
+              <small>${escapeHtml(item.at || "")} · 用时 ${formatSeconds(used)}${item.autoSubmit ? " · 自动交卷" : ""}</small>
               ${renderExamHistoryDetails(item)}
             </div>
           `;
@@ -9379,9 +9546,14 @@ function renderExamHistoryDetails(item) {
   const wrongRows = details.filter((row) => row.answered && !row.subjective && !row.correct);
   const subjectiveRows = details.filter((row) => row.subjective);
   const rows = wrongRows.length ? wrongRows : details.slice(0, 12);
+  /* 「本卷前 12 题」在题量不足 12 时是假的（1 题卷也这么写）。
+     按**实际渲染条数**说，缩略范围才和下面真正列出来的行数一致。 */
+  const scope = wrongRows.length
+    ? `错题 ${wrongRows.length} 道`
+    : `本卷前 ${rows.length} 题`;
   return `
     <details class="exam-history-detail">
-      <summary>查看明细：${wrongRows.length ? `错题 ${wrongRows.length} 道` : "本卷前 12 题"}${subjectiveRows.length ? ` · 主观题 ${subjectiveRows.length} 道` : ""}</summary>
+      <summary>查看明细：${scope}${subjectiveRows.length ? ` · 主观题 ${subjectiveRows.length} 道` : ""}</summary>
       <div class="exam-history-detail-list">
         ${rows.map((row) => `
           <div class="exam-history-detail-row ${row.correct ? "correct" : row.subjective ? "subjective" : "wrong"}">
@@ -9507,7 +9679,15 @@ function renderExamHome() {
       <p>${escapeHtml(rule.autoScoreNote)}。组卷会按章节题量比例抽取，并尽量贴近正式考试结构。</p>
       ${parts.length ? "" : `<p class="exam-warning">当前题库没有可用于组卷的题型，请先切换题库或更新题库。</p>`}
       ${renderExamHistory()}
-      <button class="primary-action" id="startExamBtn" ${parts.length ? "" : "disabled"}>开始组卷</button>
+      <!-- 「开始组卷」在手机端要滚很远才够得到（实测 390×844 下 top≈1512，
+           页面高 1183，离屏约 1000px）→ ≤760px 时由 CSS 把这一条吸到底部
+           （.exam-start-bar，见 style.css）。
+           禁用原因原来只写在 title 上，手机点不出 tooltip；这里在按钮**上方**
+           渲一条 .exam-warning，由 syncStartExamBtn 填同一句话。 -->
+      <div class="exam-start-bar">
+        <p class="exam-warning hidden" id="examStartWarning"></p>
+        <button class="primary-action" id="startExamBtn" ${parts.length ? "" : "disabled"}>开始组卷</button>
+      </div>
     </div>
   `;
   bindExamDraftActions();
@@ -9535,11 +9715,21 @@ function renderExamHome() {
       return checked && Number.isFinite(value) && value > 0;
     });
     btn.disabled = !parts.length || noneChapter || noCount;
-    btn.title = noneChapter
-      ? "请至少选择一个章节"
-      : noCount
-        ? "请至少为一个题型设置题量（当前全部为 0）"
-        : "";
+    /* 禁用原因要说在**看得见**的地方：title 在手机上永远点不出来，
+       所以同一句话同时写进按钮上方的 .exam-warning。 */
+    const reason = !parts.length
+      ? "当前题库没有可用于组卷的题型，请先切换题库或更新题库"
+      : noneChapter
+        ? "请至少选择一个章节"
+        : noCount
+          ? "请至少为一个题型设置题量（当前全部为 0）"
+          : "";
+    btn.title = reason;
+    const warning = $("examStartWarning");
+    if (warning) {
+      warning.textContent = reason;
+      warning.classList.toggle("hidden", !reason);
+    }
     if (persist) persistExamChapters();
   };
   $("examSelectAllChapters").onclick = () => {
@@ -9826,16 +10016,17 @@ function renderExamStatus() {
     return;
   }
   const left = getExamRemainingMs();
-  const minutes = Math.floor(left / 60000);
-  const seconds = Math.floor((left % 60000) / 1000);
   const result = state.exam.result;
   const paused = !!state.exam.pausedAt && !result;
   host.classList.remove("hidden");
   /* 最后 1 分钟整条状态条变红（.exam-urgent），和 ≤60s 那一档 toast 同一个阈值。 */
   host.classList.toggle("exam-urgent", !result && !state.submitted && left <= 60000);
+  /* 倒计时走 formatSeconds：旧实现自己拼 `MM:SS`，超过 59 分钟就退化成
+     「999998:59」这种没有意义的数（组卷时把考试时间填成 999999 分钟即可复现）。
+     formatSeconds 在 ≥1 小时时给 H:MM:SS。 */
   host.innerHTML = `
     <span>模拟考场</span>
-    <b>${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}</b>
+    <b>${formatSeconds(left / 1000)}</b>
     ${paused ? `<span class="exam-paused-flag">已暂停</span>` : ""}
     <span>满分 ${state.exam.rule.totalScore} 分</span>
     ${result ? `<span>得分 <b>${formatScore(result.score)}</b> / ${formatScore(result.totalScore)}，正确率 ${result.rate}%</span>` : ""}
@@ -9911,7 +10102,10 @@ function showSubmitResult(payload) {
         <div><dt>答对</dt><dd class="is-right">${correct}</dd></div>
         <div><dt>答错</dt><dd class="is-wrong">${wrong}</dd></div>
         <div><dt>未作答</dt><dd>${unanswered}</dd></div>
-        <div><dt>正确率</dt><dd>${rate}%</dd></div>
+        ${/* 「得分率」是 score/totalScore，「正确率」是 correct/checked —— 两个口径。
+             用户点名「不要两个自称正确率的数」。这里把范围写进标签，
+             和趋势图标题「近期正确率趋势（每次交卷，按本次已作答）」同一套说法。 */ ""}
+        <div><dt>本次正确率</dt><dd>${rate}%</dd></div>
       </dl>
       ${subjective ? `<p class="submit-result-note">含 ${subjective} 道主观题，需人工核对，未计入得分。</p>` : ""}
     `;
@@ -10429,7 +10623,13 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
     state.submitting = false;
     setPanelPage(nextMode === "exam" || nextMode === "progress" || nextMode === "training");
     if (nextMode === "practice" && state.mode === "practice") {
-      setCoursePicker(!state.pickerOpen);
+      /* 已经在题库里，再点底栏「题库」不再往返切面板（S-35）：
+         手机上面板占满整屏（实测 390×844 高 703px），每点一次「题库」都被它拦一道，
+         而唯一的出口是面板底部叫「进入做题」的按钮。
+         现在：还没选科目 → 弹（必须选）；已有科目 → 收起 / 不动作
+         （点的是当前页签，本该没动作）。换科目请点顶栏的科目名。
+         桌面端维持原来的开关行为（面板是并排一栏，不挡题）。 */
+      setCoursePicker(isPhoneViewport() ? !state.currentCourse : !state.pickerOpen);
       renderMode();
       return;
     }
@@ -10445,7 +10645,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
     /* 进错题本一律按「全部」看：见 resetWrongBookPageFilter */
     if (nextMode === "wrong") resetWrongBookPageFilter();
     state.mode = nextMode;
-    if (state.mode === "practice") setCoursePicker(true);
+    if (state.mode === "practice") setCoursePicker(shouldAutoOpenCoursePicker());
     else setCoursePicker(false);
     renderMode();
     renderWrongFilters();
@@ -10521,7 +10721,7 @@ $("submitBtn").onclick = () => {
 $("resetBtn").onclick = resetPractice;
 $("favoriteBtn").onclick = toggleFavorite;
 $("mobileActionsBtn").onclick = () => setMobileActions(!state.mobileActionsOpen);
-$("noteBtn").onclick = () => $("noteEditor").classList.toggle("hidden");
+$("noteBtn").onclick = toggleNoteEditor;
 /* ⚠️ 必须用闭包抓「这一刻」的题号 + 文本。debounce 会把参数透传给回调，
    直接写 debounce(saveNote, 300) 会把 input 事件对象当成 questionId 传进去。 */
 $("noteEditor").addEventListener("input", () => {
@@ -10546,7 +10746,8 @@ $("adminUserModal").addEventListener("click", (event) => {
 });
 if ($("navCourseTitle")) $("navCourseTitle").onclick = toggleCoursePicker;
 if ($("courseTitle")) $("courseTitle").onclick = toggleCoursePicker;
-$("searchToggleBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
+/* 「搜索」按钮已删除（与「试题筛选」逐字重复，见 index.html 的注释）。
+   题目内搜索仍在 #searchPanel 里的 #questionSearch，只是只做本地匹配。 */
 $("filterBtn").onclick = () => $("searchPanel").classList.toggle("hidden");
 $("printBtn").onclick = openPrintDialog;
 $("printCloseBtn").onclick = closePrintDialog;
@@ -10628,7 +10829,17 @@ document.querySelector('[data-action="refresh"]').onclick = () => {
 };
 
 $("courseSearch").addEventListener("input", debounce(loadCourses));
-$("questionSearch").addEventListener("input", debounce(loadQuestions));
+/* 题内搜索：本地匹配（S-33）。旧实现是 debounce(loadQuestions)，每敲一个字
+   重拉一次整份题单、整块重绘答题卡 —— 搜索没有网络需求，题单也不该被它改变。
+   现在只重绘当前题（高亮）+ 命中面板 + 答题卡命中格；题单只在改题型/标签/题量时重取。 */
+const applyLocalQuestionSearch = debounce(() => {
+  if (state.currentIndex >= 0 && state.questions[state.currentIndex]?.detail) renderQuestion();
+  else {
+    renderSearchMatches();
+    renderAnswerCardPage({ updateNav: false });
+  }
+}, 180);
+$("questionSearch").addEventListener("input", applyLocalQuestionSearch);
 $("typeSelect").addEventListener("change", loadQuestions);
 $("orderSelect").addEventListener("change", () => { persistQuestionWindow(); loadQuestions(); });
 $("limitSelect").addEventListener("change", () => { persistQuestionWindow(); loadQuestions(); });
