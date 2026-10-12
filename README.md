@@ -104,15 +104,25 @@ docker compose up -d
 
 > **默认只绑回环**（`127.0.0.1:8787:8787`）：这样只有 NAS 本机上的反代/隧道能访问，
 > 局域网里其它设备直接打不开。**要在局域网里按 `http://NAS_IP:8787/` 用**（也是 PWA 之前的常见用法），
-> 就在 `docker-compose.override.yml` 里显式放开到本机 LAN IP：
+> 任选一种：
+>
+> **① 建一个 `.env`**（已 gitignore，不进仓库）——推荐，不动任何被 git 跟踪的文件：
+>
+> ```bash
+> echo 'YUNXI_BIND_ADDR=0.0.0.0' > .env
+> docker compose up -d
+> ```
+>
+> **② 或者直接改 `docker-compose.yml` 里那一行**：
 >
 > ```yaml
-> # docker-compose.override.yml（已 gitignore）
-> services:
->   yunxi-tiku:
 >     ports:
 >       - "192.168.1.10:8787:8787"   # 换成 NAS 自己的 LAN IP；不要写 0.0.0.0
 > ```
+>
+> ⚠️ **不要在 `docker-compose.override.yml` 里加 `ports:`** ——
+> compose 对 `ports` 是**追加**而不是替换，会和基础文件那一行形成
+> 「同一个容器端口发布两次」的冲突：容器会停在 `Created` 起不来、日志空白、端口探测 000。
 >
 > 直连是明文 HTTP（无 TLS），只在可信内网这么做；对外访问请用反代/隧道终结 TLS。
 

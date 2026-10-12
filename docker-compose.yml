@@ -4,10 +4,20 @@ services:
     container_name: yunxi-tiku
     ports:
       # 默认只绑回环：本机的反向代理/隧道能连，局域网和公网连不上。
-      # 需要 NAS 内网直连时显式写本机 LAN IP（别用 0.0.0.0 / 裸 "8787:8787"）：
-      #   - "192.168.1.10:8787:8787"
+      #
+      # 要让局域网设备（手机/平板/其它电脑）用 http://NAS_IP:8787 访问，任选一种：
+      #   ① 直接写本机 LAN IP（改这一行）：
+      #        - "192.168.1.10:8787:8787"
+      #   ② 或建一个 `.env`（已 gitignore，不进仓库）写：
+      #        YUNXI_BIND_ADDR=0.0.0.0
+      #      下面这行会把变量读进来；没配 `.env` 时回落环。
+      #
+      # ⚠️ 不要在 `docker-compose.override.yml` 里加 `ports:` 来放宽 ——
+      #    compose 对 ports 是**追加**不是替换，会和这一行形成「同一个容器端口发布两次」
+      #    的冲突，容器起来就退（实测：状态停在 Created、无日志、端口 000）。
+      #
       # 直连就是明文 HTTP（这里没有 TLS），只在可信网段这么做。
-      - "127.0.0.1:8787:8787"
+      - "${YUNXI_BIND_ADDR:-127.0.0.1}:8787:8787"
     volumes:
       - ./data:/app/data
       - ./userdata:/app/userdata
