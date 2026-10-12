@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261012-a11y1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261012-b5a1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -354,8 +354,21 @@
       <button id="submitResultCloseBtn" type="button" class="submit-result-close">知道了</button>
     </div>
   </div>
+  <!-- 全部模拟记录：考场首页只列最近 5 场，第 6 场之后原来在任何入口都看不到、
+       也删不掉（实测 7 场只显示 5 行，没有「更多」也没有删除）。这里给一个能翻
+       全部记录、并能逐条删除的抽屉，复用 .modal-panel 的外观。 -->
+  <div id="examHistoryModal" class="modal-backdrop hidden">
+    <div class="modal-panel exam-history-modal">
+      <div class="modal-head">
+        <strong id="examHistoryModalTitle">全部模拟记录</strong>
+        <button id="examHistoryModalCloseBtn" type="button">关闭</button>
+      </div>
+      <div id="examHistoryModalBody" class="exam-history-list"></div>
+      <small class="exam-history-modal-hint">删除一场记录后，本场的成绩与逐题明细都不再保留，也无法恢复。</small>
+    </div>
+  </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261012-a11y1"></script>
+  <script src="/app.js?v=20261012-b5a1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     if ("serviceWorker" in navigator) {

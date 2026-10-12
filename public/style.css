@@ -2169,6 +2169,103 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   font-size: 13px;
 }
 
+/* ── 模拟记录：题量上限提示 / 查看全部 / 抽屉里的删除 ───────────────────── */
+
+/* 「本章节仅 N 题」：题量填得比题库或已选章节还多时就地提示（只提示不改正）。 */
+.exam-part-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.exam-part-row input[type="number"][data-over-limit="1"] {
+  border-color: var(--warning-300);
+  background: var(--warning-50, var(--card));
+}
+
+/* 「查看全部 N 场」：首页只列最近 5 场，这条给出全部记录的入口。 */
+.exam-history-more {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.exam-history-more button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--primary-ink);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* 抽屉里每条的末尾：明细 + 删除。占满整行（.exam-history-row 是三列网格）。 */
+.exam-history-row-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.exam-history-row-actions .exam-history-detail {
+  grid-column: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.exam-history-delete {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--danger-200, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--danger-700, var(--danger));
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .exam-history-more button:hover {
+    border-color: var(--primary-300);
+    color: var(--primary-600);
+  }
+
+  .exam-history-delete:hover {
+    border-color: var(--danger-300, var(--danger-200, var(--border)));
+    background: var(--danger-50, var(--card));
+  }
+}
+
+/* 「该场次已仅保留成绩」：逐题数据只留最近 1 场，更早的如实说明。 */
+.exam-history-pruned {
+  color: var(--muted-2);
+  font-size: 13px;
+}
+
+/* 抽屉：比一般 .modal-panel 宽一点，列表自己滚动，别把整页撑长。 */
+.exam-history-modal {
+  width: min(720px, 100%);
+  max-height: calc(100dvh - 48px);
+}
+
+.exam-history-modal .exam-history-list {
+  overflow-y: auto;
+  max-height: calc(100dvh - 220px);
+  padding-right: 2px;
+}
+
+.exam-history-modal-hint {
+  color: var(--muted-2);
+}
+
 .primary-action {
   border: 1px solid transparent;
   border-radius: var(--radius-sm);

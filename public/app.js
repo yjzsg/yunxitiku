@@ -915,9 +915,27 @@ function calculateQuestionScore(q) {
   return Math.min(maxScore, mineSet.size * 0.5);
 }
 
+/* 考试时长上限（分钟）。600 = 10 小时，比任何真实卷子都宽松得多，
+   但挡得住「填 999999 → 状态栏渲染成 16666:38:59」这种明显不是本意的输入。
+   下限 1 分钟：0 / 负数 / 空值一律不启动（旧实现 Math.max(1, …) 静默改成 1 分钟）。 */
+const EXAM_DURATION_MAX_MINUTES = 600;
+
 function getExamConfigFromForm(rule) {
   const name = ($("examNameInput")?.value || rule.name).trim() || rule.name;
-  const duration = Math.max(1, Number($("examDurationInput")?.value || rule.durationMinutes));
+  /* 时长当场校验，不合法就返回 null 让调用方**不启动** ——
+     旧实现 Math.max(1, Number(…)) 把 0 / -5 静默改成 1 分钟开考
+     （输入框里还显示着 0，用户不会知道自己在考一份 1 分钟的卷子），
+     999999 也照收。空值（Number("") === 0）同样按「至少 1 分钟」拦下。 */
+  const rawDuration = Number($("examDurationInput")?.value);
+  if (!Number.isFinite(rawDuration) || rawDuration < 1) {
+    toast("考试时间至少 1 分钟");
+    return null;
+  }
+  if (rawDuration > EXAM_DURATION_MAX_MINUTES) {
+    toast(`考试时间最多 ${EXAM_DURATION_MAX_MINUTES} 分钟（10 小时）`);
+    return null;
+  }
+  const duration = rawDuration;
   const selectedParts = rule.parts
     .map((part, index) => {
       const checked = $("examPart" + index)?.checked !== false;
@@ -943,6 +961,29 @@ function selectableExamChapters() {
   return examChapterGroups();
 }
 
+/* 某个题型当前**真正能出多少题** = min(题型池, 已选章节的有效题量)。
+   题型池来自 /api/types 的 questionCount（服务端权威数字）；
+   章节题量用 examEffectiveQuestionCount（已扣掉被显式取消的子章）。
+   只用来给题量输入框设 max + 就地提示，**不静默改用户填的数字** ——
+   超出部分组卷时本来就抽不出来，满分按实际卷子重算（见 generateExamPaper）。 */
+function examPartAvailableCount(part) {
+  /* availableTypeIds 只有 normalizeExamParts 处理过的对象才有；没有就用原始 typeIds
+     （题量为 0 的题型本来也出不了题，求和时按 >0 过滤，两种入口结果一致）。 */
+  const typeIds = (part.availableTypeIds && part.availableTypeIds.length) ? part.availableTypeIds : (part.typeIds || []);
+  const typeCount = typeIds.reduce((sum, typeId) => {
+    const type = (state.types || []).find((item) => Number(item.id) === Number(typeId) && Number(item.questionCount || 0) > 0);
+    return sum + Number(type?.questionCount || 0);
+  }, 0);
+  const selected = normalizeExamChapterIds(Array.from(state.examSelectedChapters || []));
+  const chapterCount = selected.reduce((sum, chapterId) => {
+    const node = state.chapterTreeIndex?.get(Number(chapterId));
+    return sum + (node ? examEffectiveQuestionCount(node) : 0);
+  }, 0);
+  if (!typeCount) return chapterCount;
+  if (!chapterCount) return typeCount;
+  return Math.min(typeCount, chapterCount);
+}
+
 function renderExamChapterTree() {
   const roots = (state.chapterTreeRoots?.length ? state.chapterTreeRoots : buildChapterTree(state.chapters))
     .filter((node) => chapterTotalCount(node) > 0);
@@ -965,19 +1006,46 @@ function renderExamChapterNode(chapter, level) {
   if (total <= 0) return "";
   const hasChildren = (chapter.children || []).some((child) => chapterTotalCount(child) > 0);
   const expanded = state.examExpandedChapters.has(Number(chapter.id));
+  /* 「父章勾选 + 子章取消」在收起的树里**看不出来**：父章 checked 仍为 true，
+     题量小字写的还是整棵子树的量（实测 1305 → 有效 1080 却毫无视觉差别）。
+     所以：子树里有被排除的章 → 半选态 + 小字追加「（已排除 N 节）」。
+     indeterminate 只能通过 DOM 属性设置（innerHTML 写不出来），这里只留标记，
+     由 bindExamChapterTree 补上。 */
+  const excludedInSubtree = childChapterIds(chapter)
+    .filter((childId) => state.examExcludedChapters?.has(Number(childId))).length;
+  const indeterminate = state.examSelectedChapters.has(Number(chapter.id)) && excludedInSubtree > 0;
   return `
     <div class="exam-chapter-node level-${level}">
       <div class="exam-chapter-row">
         <button class="exam-chapter-toggle ${expanded ? "expanded" : "collapsed"}" type="button" data-exam-toggle="${chapter.id}" ${hasChildren ? "" : "disabled"}>${hasChildren ? (expanded ? "−" : "+") : ""}</button>
         <label title="${escapeHtml(chapter.name)}">
-          <input type="checkbox" data-exam-chapter value="${chapter.id}" data-exam-parent="${hasChildren ? "1" : "0"}" ${state.examSelectedChapters.has(Number(chapter.id)) ? "checked" : ""}>
+          <input type="checkbox" data-exam-chapter value="${chapter.id}" data-exam-parent="${hasChildren ? "1" : "0"}" ${state.examSelectedChapters.has(Number(chapter.id)) ? "checked" : ""}${indeterminate ? ' data-exam-indeterminate="1"' : ""}>
           <span>${escapeHtml(chapter.name)}</span>
-          <small>${total}题</small>
+          <small>${total}题${indeterminate ? `（已排除 ${excludedInSubtree} 节）` : ""}</small>
         </label>
       </div>
       ${hasChildren && expanded ? `<div class="exam-chapter-children">${chapter.children.map((child) => renderExamChapterNode(child, level + 1)).join("")}</div>` : ""}
     </div>
   `;
+}
+
+/* 勾选变化后**就地**刷新祖先链的「半选 + 已排除 N 节」显示。
+   不整棵重绘：.exam-chapter-list 自己是个滚动容器（max-height + overflow），
+   每点一次都 innerHTML 重绘会把 scrollTop 打回 0 —— 而这个列表通常要滚很深
+   才点到目标章。 */
+function syncExamChapterAncestors(chapterId) {
+  const path = chapterPathForId(Number(chapterId)) || [];
+  path.slice(0, -1).reverse().forEach((node) => {
+    const id = Number(node.id);
+    const input = document.querySelector(`[data-exam-chapter][value="${id}"]`);
+    if (!input) return;
+    const excluded = childChapterIds(node)
+      .filter((childId) => state.examExcludedChapters?.has(Number(childId))).length;
+    const indeterminate = !!input.checked && excluded > 0;
+    input.indeterminate = indeterminate;
+    const small = input.closest("label")?.querySelector("small");
+    if (small) small.textContent = `${chapterTotalCount(node)}题${indeterminate ? `（已排除 ${excluded} 节）` : ""}`;
+  });
 }
 
 function bindExamChapterTree() {
@@ -993,6 +1061,8 @@ function bindExamChapterTree() {
     };
   });
   document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
+    /* 半选态：innerHTML 渲染时只能写 data 标记，这里落到真正的 indeterminate。 */
+    if (input.dataset.examIndeterminate === "1") input.indeterminate = true;
     input.onchange = () => {
       const id = Number(input.value || 0);
       const node = state.chapterTreeIndex?.get(id);
@@ -1012,8 +1082,15 @@ function bindExamChapterTree() {
           state.examExcludedChapters.add(chapterId);
         }
         const child = document.querySelector(`[data-exam-chapter][value="${chapterId}"]`);
-        if (child) child.checked = input.checked;
+        if (child) {
+          child.checked = input.checked;
+          /* 勾上父章 = 整棵子树重新全选，之前的半选态要一起清掉。 */
+          if (input.checked) child.indeterminate = false;
+        }
       });
+      /* 被取消/勾上的章会改变**祖先**的「有没有被排除的子章」，就地更新它们的
+         半选态与「已排除 N 节」，否则要退出重进考场页才看得到差别。 */
+      syncExamChapterAncestors(id);
     };
   });
 }
@@ -3205,9 +3282,9 @@ function currentPracticeVerifiedStore() {
    现在只有一个事实来源：**会话列表**。
      · activeTrainingSessionId —— 「我现在正在哪一轮里」，退出就清，语义不变
      · 没有别的指针了（smartPractice 已删除，见 normalizeStorage 里的丢弃兜底）
-     · 「继续上次」= 今天未完成会话里最近更新的那条，由 resumableTrainingSession()
-       统一回答。hero 的「继续今日强化」、学习看板的「智能练习」卡、历史行的
-       「继续」都调它，不可能再各说各话。
+     · 「继续上次」= 未完成会话里最近更新的那条（**不限今天**），由
+       resumableTrainingSession() 统一回答。hero 的「继续今日强化」、学习看板的
+       「智能练习」卡、历史行的「继续」都调它，不可能再各说各话。
 
    终态三态：active（还能接着做）/ completed（本轮题全部确认过，见
    syncTrainingSessionStats）/ abandoned（超过 SESSION_ABANDON_DAYS 天没动过）。
@@ -3225,13 +3302,17 @@ function sessionLastTouchedAt(session) {
   return parseDate(session?.updatedAt) || parseDate(session?.createdAt) || null;
 }
 
-/* 「继续上次」的**唯一**判据。范围：当前科目 ∩ 今天 ∩ 未完成 ∩ 有题，
+/* 「继续上次」的**唯一**判据。范围：当前科目 ∩ 未完成 ∩ 有题，
    取最近更新的一条（getTrainingSessionsForCourse 已按 updatedAt desc 排好）。
-   只认今天：昨天及更早的轮次要么已经 completed，要么会被 sweepTrainingSessionStates
-   在 SESSION_ABANDON_DAYS 天后收成 abandoned，不该继续占着「继续上次」。 */
+   ⚠️ **不限今天**（本批产品决策）：旧实现只认 dayKey === 今天，于是昨天/前天
+   留下的半份题单在训练页和学习看板都点不到 —— 只能翻「个人训练看板」那一行
+   找，用户的原话是「继续上次就该是上次」。终态（completed / abandoned /
+   expired）仍按 isTrainingSessionOpen 排除；真正废弃由 SESSION_ABANDON_DAYS
+   在 sweepTrainingSessionStates 里收口。
+   返回的会话不一定是今天的 → 按钮/提示要用 sessionResumeDayText 带上日期。 */
 function resumableTrainingSession(courseId = state.currentCourse?.id) {
   for (const session of getTrainingSessionsForCourse(courseId)) {
-    if (!isSessionFromToday(session) || !normalizeSessionIds(session.ids).length) continue;
+    if (!normalizeSessionIds(session.ids).length) continue;
     if (!isTrainingSessionOpen(session)) continue;
     /* syncTrainingSessionStats 可能顺手把它标成 completed（本轮题全确认完了），
        那它就不再「可续」—— 继续往下找，别把已完成的当可续的返回。 */
@@ -3239,6 +3320,26 @@ function resumableTrainingSession(courseId = state.currentCourse?.id) {
     if (isTrainingSessionOpen(session)) return session;
   }
   return null;
+}
+
+/* 「继续上次」那条会话的日期（不是今天的才有值，今天返回空串）。
+   用途：按钮/卡片/toast 上写「继续上次（10 月 9 日）」而非光秃秃的「继续上次」——
+   否则用户以为是刚才那一条，点下去却回到了三天前的题单。
+
+   ⚠️ 用 **dayKey**（这条题单属于哪一天），**不用 updatedAt**：updatedAt 会在
+   点「继续」的瞬间被刷成今天，于是按钮上写「（10 月 9 日）」、点下去 toast 立刻
+   改口成「（今天）」—— 实测就是这么翻的。dayKey 只由 upsertTrainingSession 保留，
+   续考不会改它，前后说法一致。 */
+function sessionResumeDayText(session) {
+  if (!session || isSessionFromToday(session)) return "";
+  const key = String(sessionDayKey(session) || "");
+  /* "YYYY-MM-DD" 直接给 new Date 会按 UTC 解析，东八区以外的时区会差一天；
+     补上 00:00:00 走本地时间。 */
+  const date = (/^\d{4}-\d{2}-\d{2}$/.test(key) ? parseDate(`${key} 00:00:00`) : null)
+    || parseDate(session.createdAt)
+    || parseDate(session.updatedAt);
+  if (!date) return "";
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日`;
 }
 
 /* 会话终态收敛。旧实现只处理 activeTrainingSessionId 指向的那一条 ——
@@ -5284,12 +5385,15 @@ function renderProgress() {
         <div title="${escapeHtml(rateKpiTitle(stats))}"><b>${rate}%</b><span>正确率（已确认）</span></div>
         <div><b>${wrongTotal}</b><span>待解决错题</span></div>
         <div title="${escapeHtml(`当前科目 ${state.currentCourse?.name || ""} 的收藏；全部科目共 ${favAllCourses} 题`)}"><b>${favTotal}</b><span>收藏题（本科目）</span></div>
-        <div><b>${noteTotal}</b><span>笔记</span></div>
+        ${/* 笔记记录里**没有** courseId（加字段要迁移，见产品决策），所以这一格
+             统计的是**全部科目**的笔记。范围写进标题，和上一格「收藏题（本科目）」
+             形成对照 —— 不说清会让人以为同一页的两个数字同范围。 */ ""}
+        <div title="${escapeHtml(`笔记记录里没有科目字段，这一格是全部科目的笔记（共 ${noteTotal} 条）；同页其它数字都是当前科目 ${state.currentCourse?.name || ""}`)}"><b>${noteTotal}</b><span>笔记（全部科目）</span></div>
         <div><b>${analysisItems.length}</b><span>当前科目题量</span></div>
       </div>
       <div class="trend-panel">
-        ${/* 范围写明：曲线吃的是 storage.history，每条 = 一次交卷
-             （交卷时全部作答都判过分），分母是「本次已作答」，
+        ${/* 范围写明：曲线吃的是 storage.history（每条 = 一次交卷）+ 考场卷按
+             ref 回 examHistory 取数（考试记录的唯一事实来源），分母是「本次已作答」，
              和 KPI「正确率（已确认）」的累计口径不是一回事 —— 标题里点明。 */ ""}
         <div class="trend-title">近期正确率趋势（每次交卷，按本次已作答）</div>
         <canvas id="progressTrend" width="680" height="180"></canvas>
@@ -5348,11 +5452,15 @@ function renderTraining() {
      否则说「开始」—— 旧实现按 type 反查另一条会话，于是 hero 说「继续今日强化」
      而它续的是 A，「继续上次」续的是 B。 */
   const resumable = resumableTrainingSession();
+  /* 可续的那条不是今天的就带上日期（见产品决策：范围放宽到所有未完成会话）。 */
+  const resumeDay = sessionResumeDayText(resumable);
   const heroLabel = !resumable
     ? "开始今日强化"
-    : resumable.type === "smart"
-      ? "继续今日强化"
-      : "继续上次训练";
+    : resumeDay
+      ? `继续上次（${resumeDay}）`
+      : resumable.type === "smart"
+        ? "继续今日强化"
+        : "继续上次训练";
   const hasReviewPlan = !!activeReviewPlan().examDate;
   const planOverview = hasReviewPlan
     ? buildReviewPlanOverview(stats, Object.keys(courseStore.wrong || {}).length, items)
@@ -5417,7 +5525,7 @@ function renderTraining() {
         })}
       </div>
       <div class="training-tools">
-        <button type="button" id="trainingContinueSmartBtn" ${resumable ? "" : "disabled"}>继续上次：${resumable ? escapeHtml(resumable.sourceTitle || "智能训练") : `今天暂无题单`}</button>
+        <button type="button" id="trainingContinueSmartBtn" ${resumable ? "" : "disabled"}>继续上次${resumeDay ? `（${resumeDay}）` : ""}：${resumable ? escapeHtml(resumable.sourceTitle || "智能训练") : `暂无可继续的题单`}</button>
         <button type="button" id="trainingDashboardBtn">查看学习看板</button>
         <button type="button" id="trainingWrongBtn">查看错题本</button>
         <button type="button" id="trainingPracticeBtn">返回考试题库</button>
@@ -5534,6 +5642,9 @@ function renderStudyDashboard(courseStore, stats, items) {
      旧实现这张卡读 smartPractice 指针、行读会话列表，同屏互相否定：
      卡片写「暂无练习批次」（禁用），下面两行却是可点的「继续」。 */
   const resumable = resumableTrainingSession();
+  /* 「智能练习」卡的可续判据同上；不是今天的会话要写出日期，别让用户以为
+     是刚才那条（见 resumableTrainingSession 的注释）。 */
+  const resumeDay = sessionResumeDayText(resumable);
   return `
     <div class="study-dashboard">
       <div class="study-card">
@@ -5559,8 +5670,8 @@ function renderStudyDashboard(courseStore, stats, items) {
       </div>
       <div class="study-card ${resumable ? "" : "muted-card"}">
         <span>智能练习</span>
-        <b>${resumable ? `${normalizeSessionIds(resumable.ids).length} 题可继续 · ${escapeHtml(resumable.sourceTitle || "智能训练")}` : "今天暂无训练单"}</b>
-        <button id="continueSmartBtn" type="button" ${resumable ? "" : "disabled"}>继续上次</button>
+        <b>${resumable ? `${normalizeSessionIds(resumable.ids).length} 题可继续 · ${escapeHtml(resumable.sourceTitle || "智能训练")}${resumeDay ? ` · 上次 ${resumeDay}` : ""}` : "暂无可继续的训练单"}</b>
+        <button id="continueSmartBtn" type="button" ${resumable ? "" : "disabled"}>继续上次${resumeDay ? `（${resumeDay}）` : ""}</button>
       </div>
     </div>
   `;
@@ -5705,8 +5816,10 @@ async function continueTrainingSession(sessionId) {
   await loadQuestions();
   /* 题单拿不到（题库/接口问题）时不能还说「已继续」——把实际题数报出来。 */
   const loaded = state.questions.length;
+  /* toast 带上日期：续的可能不是今天那条（见 resumableTrainingSession）。 */
+  const dayText = sessionResumeDayText(session);
   toast(loaded
-    ? `已继续${session.sourceTitle || "智能训练"}（${loaded} 题）`
+    ? `已继续${session.sourceTitle || "智能训练"}（${loaded} 题）${dayText ? ` · 上次 ${dayText}` : ""}`
     : `${session.sourceTitle || "智能训练"}的题目暂时取不到，请重试`);
 }
 
@@ -5990,7 +6103,7 @@ async function continueSmartPractice() {
   refreshDailyTrainingState();
   const resumable = resumableTrainingSession();
   if (!resumable) {
-    toast("今天没有可继续的训练单，点「开始今日强化」新建一轮");
+    toast("没有可继续的训练单，点「开始今日强化」新建一轮");
     if (state.mode === "training") renderTraining();
     else if (state.mode === "progress") renderProgress();
     return;
@@ -6998,14 +7111,47 @@ function bindAccountMenuActions() {
   if (btn) btn.onclick = () => exportUserData();
 }
 
+/* 「近期正确率趋势」的数据源解析。
+   storage.history 每条 = 一次交卷：练习卷自带 done/correct；考场卷只存
+   {ref: <examHistory id>, at}，分数一律回 examHistory 取 —— 那里是考试记录的
+   **唯一事实来源**（旧实现两边各存一份，趋势图只读 history，改一处另一边不知道）。
+   兼容三种老/新数据：
+     · ref 能解析           → 用 examHistory 的 done/correct（新数据）
+     · 没有 ref 但自带数字   → 直接用（本批之前写下的 mode:"exam" 条目，不丢）
+     · ref 解析不到（那一场已被 examHistory 的 50 条上限裁掉）→ 若条目里还留着
+                              数字就用它；彻底没数就跳过这一点，不编造。 */
+function trendSeriesForCourse(courseId = state.currentCourse?.id, limit = 20) {
+  const examById = new Map((state.storage.examHistory || []).map((item) => [String(item.id), item]));
+  const rows = (state.storage.history || [])
+    .filter((item) => !courseId || Number(item.courseId || 0) === Number(courseId))
+    .slice(0, limit)
+    .reverse();
+  const points = [];
+  rows.forEach((item) => {
+    let source = item;
+    if (item.ref) {
+      source = examById.get(String(item.ref));
+      if (!source) source = (item.done != null || item.correct != null) ? item : null;
+    }
+    if (!source) return;
+    const done = Number(source.done || 0);
+    const correct = Number(source.correct || 0);
+    points.push({
+      mode: item.mode || "practice",
+      at: item.at || source.at || "",
+      done,
+      correct,
+      rate: done ? Math.round((correct / done) * 100) : 0,
+    });
+  });
+  return points;
+}
+
 function renderProgressTrend() {
   const canvas = $("progressTrend");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
-  const history = (state.storage.history || [])
-    .filter((item) => !state.currentCourse || Number(item.courseId || 0) === Number(state.currentCourse.id))
-    .slice(0, 20)
-    .reverse();
+  const history = trendSeriesForCourse();
   const w = canvas.width;
   const h = canvas.height;
   // 颜色全部从主题令牌取，切换配色后重画即可跟上
@@ -7037,8 +7183,8 @@ function renderProgressTrend() {
     return;
   }
   const points = history.map((item, index) => {
-    const done = Number(item.done || 0);
-    const rate = done ? Math.round((Number(item.correct || 0) / done) * 100) : 0;
+    /* rate 由 trendSeriesForCourse 按「答对 ÷ 本次已作答」算好（同一口径只算一处）。 */
+    const rate = Number(item.rate || 0);
     const x = history.length === 1 ? w / 2 : 42 + index * ((w - 72) / (history.length - 1));
     const y = 18 + (100 - rate) * ((h - 44) / 100);
     return { x, y, rate };
@@ -9053,25 +9199,41 @@ async function submitPaper(autoSubmit = false) {
     }
     const rate = checked ? Math.round((correct / checked) * 100) : 0;
     const submittedAt = nowText();
+    let examRecordId = "";
     if (submitMode === "exam" && submitExam) {
       submitExam.submittedAt = Date.now();
       submitExam.result = { score, totalScore, correct, checked, rate, subjective };
-      recordExamHistory({ score, totalScore, correct, checked, rate, subjective, autoSubmit, submittedAt }, examDetails);
+      examRecordId = recordExamHistory({ score, totalScore, correct, checked, rate, subjective, autoSubmit, submittedAt }, examDetails)?.id || "";
       clearExamDraft();
       stopExamTimer();
     }
-    state.storage.history.unshift({
-      user: state.user,
-      courseId: state.currentCourse?.id,
-      courseName: state.currentCourse?.name,
-      mode: submitMode,
-      total: submitQuestions.length,
-      done: checked,
-      correct,
-      score,
-      totalScore,
-      at: submittedAt,
-    });
+    if (examRecordId) {
+      /* 考场记录：history 里**只放一条指针**（{ref, at} + 科目信息）。
+         分数与明细一律回 examHistory 取（唯一事实来源）—— 旧实现两边各存一份，
+         口径一旦不同就是两个都说自己对。练习卷（非考场）没有 examHistory 记录，
+         照旧自带分数（趋势图的数据源解析见 trendSeriesForCourse）。 */
+      state.storage.history.unshift({
+        user: state.user,
+        courseId: state.currentCourse?.id,
+        courseName: state.currentCourse?.name,
+        mode: "exam",
+        ref: examRecordId,
+        at: submittedAt,
+      });
+    } else {
+      state.storage.history.unshift({
+        user: state.user,
+        courseId: state.currentCourse?.id,
+        courseName: state.currentCourse?.name,
+        mode: submitMode,
+        total: submitQuestions.length,
+        done: checked,
+        correct,
+        score,
+        totalScore,
+        at: submittedAt,
+      });
+    }
     state.storage.history = state.storage.history.slice(0, 200);
     scheduleSave();
     state.answerVisible = true;
@@ -9479,12 +9641,18 @@ function abandonExamDraft() {
   toast("已放弃未完成考试");
 }
 
+/* 考试历史 = 考试记录的**唯一事实来源**（分数、明细、趋势点都从这里取；
+   storage.history 里的考场条目只留一条 {ref, at} 指针，见 submitPaper）。
+   逐题数据（questionIds + answers + details）只保留**最近 1 条**：
+   单卷实测 6,167 B，上限 50 条 = 300KB 的同步包，而逐题明细只有最近几场会看。
+   更早的场次只留分数摘要，并**显式标记** perQuestionPruned —— 渲染时说
+   「该场次已仅保留成绩」，不假装数据还在（见 renderExamHistoryDetails）。 */
 function recordExamHistory(result, details = []) {
-  if (!state.exam) return;
+  if (!state.exam) return null;
   state.storage.examHistory ||= [];
   const submittedAtMs = state.exam.submittedAt || Date.now();
   const usedSeconds = Math.max(0, Math.round((submittedAtMs - state.exam.startedAt) / 1000));
-  state.storage.examHistory.unshift({
+  const record = {
     id: `${submittedAtMs}-${state.currentCourse?.id || 0}`,
     name: state.exam.rule?.name || "模拟考场",
     courseId: state.currentCourse?.id || 0,
@@ -9503,15 +9671,48 @@ function recordExamHistory(result, details = []) {
     questionIds: state.questions.map((item) => Number(item.id)).filter(Boolean),
     answers: { ...state.answers },
     details: details.slice(0, 200),
-  });
+  };
+  state.storage.examHistory.unshift(record);
   state.storage.examHistory = state.storage.examHistory.slice(0, 50);
+  state.storage.examHistory.forEach((item, index) => {
+    if (index === 0) return;
+    if (!item.questionIds && !item.answers && !item.details) return;
+    delete item.questionIds;
+    delete item.answers;
+    delete item.details;
+    item.perQuestionPruned = true;
+  });
+  return record;
 }
 
+/* 当前科目的模拟记录（新的在前）。列表和抽屉共用，口径只有这一处。 */
+function examHistoryForCourse(courseId = state.currentCourse?.id) {
+  const id = Number(courseId || 0);
+  return (state.storage.examHistory || [])
+    .filter((item) => !id || Number(item.courseId || 0) === id);
+}
+
+/* 一条模拟记录（首页列表 = 只读；抽屉 = 带「删除」）。 */
+function renderExamHistoryRow(item, options = {}) {
+  const used = Number(item.usedSeconds || 0);
+  return `
+    <div class="exam-history-row">
+      <b>${formatScore(item.score)} / ${formatScore(item.totalScore)} 分</b>
+      <span>${Number(item.correct || 0)}/${Number(item.done || 0)} 题 · ${Number(item.rate || 0)}%</span>
+      <small>${escapeHtml(item.at || "")} · 用时 ${formatSeconds(used)}${item.autoSubmit ? " · 自动交卷" : ""}</small>
+      ${options.deletable ? `<div class="exam-history-row-actions">
+        ${renderExamHistoryDetails(item)}
+        <button class="exam-history-delete" type="button" data-exam-history-delete="${escapeHtml(item.id)}">删除</button>
+      </div>` : renderExamHistoryDetails(item)}
+    </div>
+  `;
+}
+
+const EXAM_HISTORY_PREVIEW_COUNT = 5;
+
 function renderExamHistory() {
-  const currentCourseId = Number(state.currentCourse?.id || 0);
-  const records = (state.storage.examHistory || [])
-    .filter((item) => !currentCourseId || Number(item.courseId || 0) === currentCourseId)
-    .slice(0, 5);
+  const all = examHistoryForCourse();
+  const records = all.slice(0, EXAM_HISTORY_PREVIEW_COUNT);
   if (!records.length) {
     return `
       <div class="exam-history-card">
@@ -9520,29 +9721,106 @@ function renderExamHistory() {
       </div>
     `;
   }
+  /* 标题写清「最近几场 + 一共几场」：旧实现只写「模拟记录」，第 6 场之后
+     在任何入口都看不到（实测 7 场只显示 5 行、既没有「更多」也没有删除入口）。 */
+  const title = all.length > EXAM_HISTORY_PREVIEW_COUNT
+    ? `最近 ${EXAM_HISTORY_PREVIEW_COUNT} 场模拟记录 · 共 ${all.length} 场`
+    : `模拟记录 · 共 ${all.length} 场`;
   return `
     <div class="exam-history-card">
-      <div class="exam-section-title">模拟记录</div>
+      <div class="exam-section-title">${title}</div>
       <div class="exam-history-list">
-        ${records.map((item) => {
-          const used = Number(item.usedSeconds || 0);
-          return `
-            <div class="exam-history-row">
-              <b>${formatScore(item.score)} / ${formatScore(item.totalScore)} 分</b>
-              <span>${Number(item.correct || 0)}/${Number(item.done || 0)} 题 · ${Number(item.rate || 0)}%</span>
-              <small>${escapeHtml(item.at || "")} · 用时 ${formatSeconds(used)}${item.autoSubmit ? " · 自动交卷" : ""}</small>
-              ${renderExamHistoryDetails(item)}
-            </div>
-          `;
-        }).join("")}
+        ${records.map((item) => renderExamHistoryRow(item)).join("")}
       </div>
+      ${all.length > EXAM_HISTORY_PREVIEW_COUNT ? `
+        <div class="exam-history-more">
+          <button id="examHistoryAllBtn" type="button">查看全部 ${all.length} 场</button>
+        </div>
+      ` : ""}
     </div>
   `;
 }
 
+/* 首页历史卡片的局部重绘（删记录后同步，不用整页重渲染）。 */
+function refreshExamHistoryCard() {
+  const host = $("examHistoryCard");
+  if (!host) return;
+  host.innerHTML = renderExamHistory();
+  bindExamHistoryActions();
+}
+
+function openExamHistoryDrawer() {
+  const modal = $("examHistoryModal");
+  if (!modal) return;
+  const rows = examHistoryForCourse();
+  setText("examHistoryModalTitle", `全部模拟记录 · 共 ${rows.length} 场`);
+  const body = $("examHistoryModalBody");
+  if (body) {
+    body.innerHTML = rows.length
+      ? rows.map((item) => renderExamHistoryRow(item, { deletable: true })).join("")
+      : `<span class="muted">暂无模拟考记录</span>`;
+  }
+  bindExamHistoryDeleteActions();
+  modal.classList.remove("hidden");
+}
+
+function closeExamHistoryDrawer() {
+  $("examHistoryModal")?.classList.add("hidden");
+}
+
+/* 删一场模拟记录。examHistory 是唯一事实来源，所以：
+   · 删记录本身；
+   · 同时删掉 storage.history 里指向它的**指针**（否则趋势图会留一个取不到数的点）；
+   · 老数据（本批之前 history 自带分数、没有 ref）按 courseId + at 精确匹配同一次交卷。 */
+function deleteExamHistoryRecord(id) {
+  const key = String(id || "");
+  const record = (state.storage.examHistory || []).find((item) => String(item.id) === key);
+  if (!record) return false;
+  const at = record.at || "";
+  if (!confirm(`确定删除这场模拟记录吗？\n\n${at} · ${formatScore(record.score)} / ${formatScore(record.totalScore)} 分\n删除后本场成绩与明细都不再保留。`)) {
+    return false;
+  }
+  state.storage.examHistory = (state.storage.examHistory || []).filter((item) => String(item.id) !== key);
+  state.storage.history = (state.storage.history || []).filter((row) => {
+    if (row.mode !== "exam") return true;
+    if (row.ref) return String(row.ref) !== key;
+    return !(Number(row.courseId || 0) === Number(record.courseId || 0) && String(row.at || "") === String(at));
+  });
+  scheduleSave();
+  return true;
+}
+
+function bindExamHistoryDeleteActions() {
+  document.querySelectorAll("[data-exam-history-delete]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.dataset.examHistoryDelete;
+      if (!deleteExamHistoryRecord(id)) return;
+      /* 抽屉还开着就重绘抽屉（少一条），首页那张卡同步重绘 —— 只重绘这两块，
+         整页 renderExamHome 会顺手把章节勾选/输入框状态重置掉。 */
+      if (!$("examHistoryModal")?.classList.contains("hidden")) openExamHistoryDrawer();
+      refreshExamHistoryCard();
+      toast("已删除该场模拟记录");
+    };
+  });
+}
+
+/* 首页历史卡片的入口（「查看全部 N 场」+ 抽屉的关闭/删除）。 */
+function bindExamHistoryActions() {
+  const allBtn = $("examHistoryAllBtn");
+  if (allBtn) allBtn.onclick = () => openExamHistoryDrawer();
+  bindExamHistoryDeleteActions();
+}
+
 function renderExamHistoryDetails(item) {
   const details = Array.isArray(item.details) ? item.details : [];
-  if (!details.length) return `<small>此记录暂无逐题明细</small>`;
+  if (!details.length) {
+    /* 诚实：说清是**哪一种**没有明细 ——
+       perQuestionPruned = 这一场的题号/作答/逐题明细被清理过（只保留最近 1 场，
+       见 recordExamHistory），不是「本来就没有」。 */
+    return item.perQuestionPruned
+      ? `<small class="exam-history-pruned">该场次已仅保留成绩（题号与逐题明细已清理）</small>`
+      : `<small>此记录暂无逐题明细</small>`;
+  }
   const wrongRows = details.filter((row) => row.answered && !row.subjective && !row.correct);
   const subjectiveRows = details.filter((row) => row.subjective);
   const rows = wrongRows.length ? wrongRows : details.slice(0, 12);
@@ -9642,7 +9920,7 @@ function renderExamHome() {
         </label>
         <label>
           <span>考试时间</span>
-          <input id="examDurationInput" type="number" min="1" value="${rule.durationMinutes}">
+          <input id="examDurationInput" type="number" min="1" max="${EXAM_DURATION_MAX_MINUTES}" value="${rule.durationMinutes}">
         </label>
       </div>
       <!-- 默认不勾 = 真限时：切标签页/刷新/切模块时间都照走，到点自动交卷。
@@ -9662,6 +9940,9 @@ function renderExamHome() {
             <span>
               <input id="examPartCount${index}" type="number" min="0" value="${part.count}" ${parts.some((p) => p.label === part.label) ? "" : "disabled"}>
               题 · 每题 ${part.score} 分${parts.some((p) => p.label === part.label) ? "" : " · 本题库暂无该题型"}
+              <!-- 超出题库/章节题量时就地提示（填 7227 而库里只有 6727 时，
+                   旧实现一路照收，结果满分 7227 而实际只出 6727 题）。 -->
+              <small class="exam-part-hint hidden" data-exam-part-hint="${index}"></small>
             </span>
           </div>
         `).join("")}
@@ -9678,7 +9959,9 @@ function renderExamHome() {
       </div>
       <p>${escapeHtml(rule.autoScoreNote)}。组卷会按章节题量比例抽取，并尽量贴近正式考试结构。</p>
       ${parts.length ? "" : `<p class="exam-warning">当前题库没有可用于组卷的题型，请先切换题库或更新题库。</p>`}
-      ${renderExamHistory()}
+      ${/* 历史卡片单独套一层容器：抽屉里删掉一条之后要**只重绘这一块**
+           （整页重绘会顺带 reset 章节勾选/输入框状态，也会停掉计时）。 */ ""}
+      <div id="examHistoryCard">${renderExamHistory()}</div>
       <!-- 「开始组卷」在手机端要滚很远才够得到（实测 390×844 下 top≈1512，
            页面高 1183，离屏约 1000px）→ ≤760px 时由 CSS 把这一条吸到底部
            （.exam-start-bar，见 style.css）。
@@ -9691,6 +9974,7 @@ function renderExamHome() {
     </div>
   `;
   bindExamDraftActions();
+  bindExamHistoryActions();
   /* 「离开页面时暂停计时」：选项立刻落 settings（随账号同步），
      下一场考试的 pauseExamOnLeave() 就读它。 */
   const pauseOnLeaveToggle = $("examPauseOnLeave");
@@ -9701,11 +9985,36 @@ function renderExamHome() {
       scheduleSave();
     };
   }
+  /* 题量输入框的 max + 「本章节仅 N 题」提示。判据：examPartAvailableCount()
+     （题型池 ∩ 已选章节有效题量）。超出时**只提示不改正**：用户填的数字留着，
+     组卷时自然只抽得到这么多题，满分按实际卷子重算。 */
+  const syncExamPartLimits = () => {
+    rule.parts.forEach((part, index) => {
+      const input = $("examPartCount" + index);
+      if (!input) return;
+      const available = examPartAvailableCount(part);
+      if (available > 0) input.max = String(available);
+      const value = Number(input.value || 0);
+      const over = available > 0 && value > available;
+      if (over) input.dataset.overLimit = "1";
+      else delete input.dataset.overLimit;
+      const hint = document.querySelector(`[data-exam-part-hint="${index}"]`);
+      if (hint) {
+        hint.textContent = over
+          ? `本章节仅 ${available} 题，超出的 ${value - available} 题不会出卷（满分按实际题量算）`
+          : "";
+        hint.classList.toggle("hidden", !over);
+      }
+    });
+  };
   /* 章节一个都没勾选时禁用「开始组卷」，并给出 title 提示 ——
      否则用户点「清空」后会以为还能出卷（旧行为会悄悄给出全章节卷）。 */
   const syncStartExamBtn = (persist = false) => {
     const btn = $("startExamBtn");
     if (!btn) return;
+    /* 题量上限与「本章节仅 N 题」提示跟着一起刷新：这个函数是所有相关事件的
+       公共出口（章节勾选 / 题型勾选 / 题量输入），不用再挂一遍监听。 */
+    syncExamPartLimits();
     const noneChapter = !(state.examSelectedChapters && state.examSelectedChapters.size);
     /* 题量全填 0 = 用户把每种题型都排除了，等同于要一份空卷 —— 必须拦住。
        旧行为会悄悄生成一整份卷子（实测填 0 仍出 80 题）。 */
@@ -9737,6 +10046,9 @@ function renderExamHome() {
     state.examExcludedChapters = new Set();
     document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
       input.checked = true;
+      /* 全选 = 排除集合清空，之前的半选态必须一起落掉（indeterminate 是 DOM 属性，
+         光改 checked 不会自动消）。 */
+      input.indeterminate = false;
       state.examSelectedChapters.add(Number(input.value || 0));
     });
     syncStartExamBtn(true);
@@ -9744,7 +10056,10 @@ function renderExamHome() {
   $("examSelectNoChapters").onclick = () => {
     state.examSelectedChapters.clear();
     state.examExcludedChapters = new Set();
-    document.querySelectorAll("[data-exam-chapter]").forEach((input) => input.checked = false);
+    document.querySelectorAll("[data-exam-chapter]").forEach((input) => {
+      input.checked = false;
+      input.indeterminate = false;
+    });
     syncStartExamBtn(true);
   };
   bindExamChapterTree();
@@ -9766,11 +10081,15 @@ function renderExamHome() {
       toast("请至少选择一个章节");
       return;
     }
-    if (!getExamConfigFromForm(rule).parts.length) {
+    /* ⚠️ 配置只读一次：getExamConfigFromForm 现在会给「时长非法」弹提示并返回
+       null，读两次就会既弹两遍提示、又在 null 上取 .parts 抛错。 */
+    const config = getExamConfigFromForm(rule);
+    if (!config) return;                     // 时长非法，提示已经弹过了
+    if (!config.parts.length) {
       toast("请至少为一个题型设置题量（当前全部为 0）");
       return;
     }
-    state.examConfig = getExamConfigFromForm(rule);
+    state.examConfig = config;
     startExamPaper().catch((err) => toast(err.message));
   };
   // ⚠️ 必须刷新状态条：本函数上面已经把 `state.exam` 置 null 并停了计时，
@@ -9879,6 +10198,12 @@ async function generateExamPaper(rule, parts) {
     submittedAt: null,
     result: null,
   };
+  /* 满分按**实际出卷结果**重算，不按用户填的数字：题量填得比题库还大时
+     （实测单选池 6727、用户填 7227），旧实现顶栏写「满分 7227 分」、成绩面板写
+     「x / 7227 分」，而卷子只有 6727 题 —— 用户永远拿不到满分。
+     分值口径与判分完全一致：每题都过 getQuestionScore（scoreMap 优先，
+     所以上面必须先落 state.exam）。 */
+  state.exam.rule.totalScore = state.questions.reduce((sum, item) => sum + getQuestionScore(item.detail || item), 0);
   saveExamDraft();
   startExamTimer();
   renderAll();
@@ -10029,7 +10354,9 @@ function renderExamStatus() {
     <b>${formatSeconds(left / 1000)}</b>
     ${paused ? `<span class="exam-paused-flag">已暂停</span>` : ""}
     <span>满分 ${state.exam.rule.totalScore} 分</span>
-    ${result ? `<span>得分 <b>${formatScore(result.score)}</b> / ${formatScore(result.totalScore)}，正确率 ${result.rate}%</span>` : ""}
+    ${/* 「正确率」= 答对 ÷ 已作答，仅这一场（不是累计口径），标签里写明范围。
+         本批之前这里只写「正确率」，与学习看板 KPI「正确率（已确认）」同屏不同义。 */ ""}
+    ${result ? `<span>得分 <b>${formatScore(result.score)}</b> / ${formatScore(result.totalScore)}，本次正确率 ${result.rate}%</span>` : ""}
   `;
 }
 
@@ -10534,7 +10861,7 @@ function bindImageViewer() {
 
 function hasOpenModal() {
   if (imageViewerOpen()) return true;
-  return ["correctionModal", "adminUserModal", "printModal", "conflictModal"].some((id) => {
+  return ["correctionModal", "adminUserModal", "printModal", "conflictModal", "examHistoryModal"].some((id) => {
     const el = $(id);
     return el && !el.classList.contains("hidden");
   });
@@ -10757,6 +11084,13 @@ $("printAllBtn").onclick = () => printQuestions("all").catch((err) => toast(err.
 $("printModal").addEventListener("click", (event) => {
   if (event.target === $("printModal")) closePrintDialog();
 });
+if ($("examHistoryModal")) {
+  /* 全部模拟记录抽屉（考场首页「查看全部 N 场」打开）。 */
+  $("examHistoryModalCloseBtn").onclick = closeExamHistoryDrawer;
+  $("examHistoryModal").addEventListener("click", (event) => {
+    if (event.target === $("examHistoryModal")) closeExamHistoryDrawer();
+  });
+}
 if ($("conflictModal")) {
   $("conflictCloseBtn").onclick = keepLocalConflictDraft;
   $("conflictKeepBtn").onclick = keepLocalConflictDraft;
