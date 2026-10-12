@@ -103,6 +103,10 @@ const state = {
   analysisExpandedChapters: new Set(),
   chapterAutoExpanded: false,
   smartPracticeFreshStart: false,
+  /* ⑤ 切科目时记下上一轮智能练习属于哪个科目，空态用它说清原因；
+     打开新题单 / 离开智能练习时清掉。 */
+  smartLeftCourseName: "",
+  smartLeftCourseId: 0,
   practiceContextCollapsed: null,
   printAfterRender: false,
   lastAnimatedQuestionId: 0,
@@ -1531,7 +1535,12 @@ function normalizeStorage(data) {
     dailyActivity: data.dailyActivity && typeof data.dailyActivity === "object" ? data.dailyActivity : {},
     confidence: data.confidence && typeof data.confidence === "object" ? data.confidence : {},
     wrongReasons: data.wrongReasons && typeof data.wrongReasons === "object" ? data.wrongReasons : {},
-    smartPractice: data.smartPractice && typeof data.smartPractice === "object" ? data.smartPractice : null,
+    /* smartPractice 已删除：它是「当前可继续题单」的第二个指针，和
+       activeTrainingSessionId 生命周期不同 → 同屏两个「继续」各指一条题单。
+       现在唯一事实来源是 trainingSessions + activeTrainingSessionId。
+       老存档里的这个字段在这里被**丢弃**（不迁移）：它指向的会话本来就在
+       trainingSessions 里，迁移只会把两个指针的分歧带进来。
+       注意 data.smartPractice 里没有会话列表里没有的信息，丢弃不丢数据。 */
     trainingSessions: Array.isArray(data.trainingSessions) ? data.trainingSessions : [],
     activeTrainingSessionId: data.activeTrainingSessionId || "",
     tags,
@@ -1968,12 +1977,20 @@ async function selectCourse(course, options = {}) {
   state.submitToken = (state.submitToken || 0) + 1;
   state.submitting = false;
   state.answerCardUserTouched = false;
-  if (state.storage.smartPractice && Number(state.storage.smartPractice.courseId || 0) !== Number(course.id)) {
-    state.storage.smartPractice = null;
-    state.smartPracticeFreshStart = false;
-  }
+  /* 换科目：上一轮的训练会话属于别的科目，指针必须让位。
+     ⑤ 记下「上一轮属于哪个科目」——空态要用它说清原因（旧实现是让用户
+     「换章节、题型或清空搜索条件」，跟刚切科目毫无关系）。
+     题单本身留在会话列表里，切回去还能从看板「继续」。 */
   const activeSession = activeTrainingSession();
-  if (activeSession && Number(activeSession.courseId || 0) !== Number(course.id)) state.storage.activeTrainingSessionId = "";
+  if (activeSession && Number(activeSession.courseId || 0) !== Number(course.id)) {
+    state.storage.activeTrainingSessionId = "";
+    state.smartPracticeFreshStart = false;
+    /* 只在「人还停在智能练习里」时留提示，否则会污染下一次进入的空态文案。 */
+    if (state.mode === "smart") {
+      state.smartLeftCourseName = activeSession.courseName || state.currentCourse?.name || "";
+      state.smartLeftCourseId = Number(activeSession.courseId || 0);
+    }
+  }
   state.currentChapter = null;
   state.currentIndex = -1;
   state.answers = { ...userCourseStore(course.id).answers };
@@ -2736,7 +2753,7 @@ function orderItemsByIds(items, ids) {
 }
 
 function getModeQuestionIds(courseStore) {
-  if (state.mode === "smart") return getSmartPracticeIds(courseStore);
+  if (state.mode === "smart") return getSmartPracticeIds();
   if (state.mode === "wrong") {
     let ids = getWrongRecordsForCurrentCourse(courseStore)
       .filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore))
@@ -2750,22 +2767,32 @@ function getModeQuestionIds(courseStore) {
     return ids;
   }
   if (state.mode === "favorite") {
-    return Object.entries(state.storage.favorite || {})
-      .filter(([, item]) => Number(item?.courseId || 0) === Number(state.currentCourse.id))
-      .map(([id]) => Number(id))
-      .filter(Boolean);
+    /* 与 renderProgress 的「收藏题（本科目）」KPI / buildFavoriteGroupRows 同口径。 */
+    return favoriteIdsForCurrentCourse();
   }
   return null;
 }
 
-function getSmartPracticeIds(courseStore = userCourseStore()) {
-  const saved = state.storage.smartPractice;
-  if (canContinueSmartPractice(saved)) {
-    return saved.ids.map(Number).filter(Boolean);
-  }
-  const ids = buildSmartPracticeIds(courseStore);
-  saveSmartPracticeSession(ids);
-  return ids;
+/* 当前智能练习的题单 = **指针指向的那条会话自己的 ids**。
+   ⚠️ 这是 loadQuestions 的取数路径，必须只读。
+
+   旧实现在这里写了数据：续不上（canContinueSmartPractice 要求 dayKey === 今天）
+   就现场 buildSmartPracticeIds + saveSmartPracticeSession 现造一条 60 题的
+   「智能推荐」并存盘。后果实测（点看板上一条昨天的 77 题会话）：
+     · 被点的那条仍是 0/77、status=active，什么都没发生
+     · state.questions 换成新建的 smart-…「智能推荐」60 题
+     · toast 还说「已继续同类题型练习」（撒谎）
+     · 会话数 1 → 2，连点几次 5→6→7 全是「进行中」
+   根因就是「一个读列表的 getter 在写数据」，而且它被 getModeQuestionIds ← loadQuestions
+   这条纯渲染路径调用，任何一次列表刷新都可能悄悄建会话。
+
+   生成动作现在只发生在显式入口：startSmartPractice / startXxxPractice /
+   continueTrainingSession（见那边的注释）。续不上就返回空数组，
+   由 loadQuestions 给出正确的空态，而不是偷偷换一条题单。 */
+function getSmartPracticeIds() {
+  const session = activeTrainingSession();
+  if (!session) return [];
+  return normalizeSessionIds(session.ids);
 }
 
 /* ── 智能训练轮换 ──────────────────────────────────────────────────────
@@ -3134,24 +3161,89 @@ function currentPracticeVerifiedStore() {
   return courseStore.verified;
 }
 
-function savedSmartTrainingSession(smart = state.storage.smartPractice) {
-  if (!smart?.sessionId) return null;
-  const session = (state.storage.trainingSessions || []).find((item) => item.id === smart.sessionId) || null;
-  if (session) syncTrainingSessionStats(session);
-  return session;
+/* ── 训练会话：终态 + 「继续上次」的唯一判据 ────────────────────────────
+   为什么要重做：以前有**两个指针**指向「当前可继续的题单」——
+   state.storage.activeTrainingSessionId 和 state.storage.smartPractice.sessionId。
+   两者生命周期不同（退出智能练习清两个、点导航离开只清第一个、生成新题单都写），
+   于是同屏能出现两个都能点的「继续」各指一条题单：
+     hero「继续今日强化」→ 今日强化的 60 题 A（按 type 反查出来的一条）
+     「继续上次：同类题型练习」→ 指针里的 75 题 B
+   现在只有一个事实来源：**会话列表**。
+     · activeTrainingSessionId —— 「我现在正在哪一轮里」，退出就清，语义不变
+     · 没有别的指针了（smartPractice 已删除，见 normalizeStorage 里的丢弃兜底）
+     · 「继续上次」= 今天未完成会话里最近更新的那条，由 resumableTrainingSession()
+       统一回答。hero 的「继续今日强化」、学习看板的「智能练习」卡、历史行的
+       「继续」都调它，不可能再各说各话。
+
+   终态三态：active（还能接着做）/ completed（本轮题全部确认过，见
+   syncTrainingSessionStats）/ abandoned（超过 SESSION_ABANDON_DAYS 天没动过）。
+   "expired" 是历史数据里旧的终态（rolled_to_next_day / 手动过期），一并按终态读。 */
+const SESSION_ABANDON_DAYS = 7;
+const TRAINING_SESSION_TERMINAL = ["completed", "abandoned", "expired"];
+
+function isTrainingSessionOpen(session) {
+  return !!session && !TRAINING_SESSION_TERMINAL.includes(session.status);
 }
 
-function canContinueSmartPractice(smart = state.storage.smartPractice) {
-  if (!smart || Number(smart.courseId || 0) !== Number(state.currentCourse?.id || 0) || !Array.isArray(smart.ids) || !smart.ids.length) return false;
-  const smartDay = smart.dayKey || dateKey(parseDate(smart.createdAt) || new Date());
-  if (smartDay !== todayKey()) return false;
-  const session = savedSmartTrainingSession(smart);
-  return !session || (
-    session.mode === "smart"
-    && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0)
-    && session.status !== "completed"
-    && session.status !== "expired"
-  );
+/* 会话「最后一次被动过」的时间。updatedAt 由 upsertTrainingSession /
+   syncCurrentTrainingSession 维护（做题、切题、退出都会刷）。 */
+function sessionLastTouchedAt(session) {
+  return parseDate(session?.updatedAt) || parseDate(session?.createdAt) || null;
+}
+
+/* 「继续上次」的**唯一**判据。范围：当前科目 ∩ 今天 ∩ 未完成 ∩ 有题，
+   取最近更新的一条（getTrainingSessionsForCourse 已按 updatedAt desc 排好）。
+   只认今天：昨天及更早的轮次要么已经 completed，要么会被 sweepTrainingSessionStates
+   在 SESSION_ABANDON_DAYS 天后收成 abandoned，不该继续占着「继续上次」。 */
+function resumableTrainingSession(courseId = state.currentCourse?.id) {
+  for (const session of getTrainingSessionsForCourse(courseId)) {
+    if (!isSessionFromToday(session) || !normalizeSessionIds(session.ids).length) continue;
+    if (!isTrainingSessionOpen(session)) continue;
+    /* syncTrainingSessionStats 可能顺手把它标成 completed（本轮题全确认完了），
+       那它就不再「可续」—— 继续往下找，别把已完成的当可续的返回。 */
+    syncTrainingSessionStats(session);
+    if (isTrainingSessionOpen(session)) return session;
+  }
+  return null;
+}
+
+/* 会话终态收敛。旧实现只处理 activeTrainingSessionId 指向的那一条 ——
+   而指针一退出就被 clearActiveTrainingSession() 清空，别的会话于是永远停在
+   active：实测跨天 3 条仍全部「进行中」、expiredReason 为空，再造一条就是 4 条。
+   这里扫**全部**会话（跨科目），把
+     ① 本轮题全部确认过的 → completed（判据在 syncTrainingSessionStats 里）
+     ② 超过 SESSION_ABANDON_DAYS 天没动过的 → abandoned（带原因，可追溯）
+   收敛到一处，任何入口 refreshDailyTrainingState() 都会顺带跑一遍。 */
+function sweepTrainingSessionStates(now = Date.now()) {
+  let changed = false;
+  for (const session of state.storage.trainingSessions || []) {
+    if (!isTrainingSessionOpen(session)) continue;
+    syncTrainingSessionStats(session);
+    if (!isTrainingSessionOpen(session)) { changed = true; continue; }
+    const last = sessionLastTouchedAt(session);
+    const idleDays = last ? (now - last.getTime()) / 86400000 : Infinity;
+    if (idleDays > SESSION_ABANDON_DAYS) {
+      session.status = "abandoned";
+      session.abandonedAt ||= nowText();
+      session.abandonedReason = session.abandonedReason || `idle_over_${SESSION_ABANDON_DAYS}d`;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/* 会话行右侧的按钮文案与可点性，和 isTrainingSessionOpen 同一判据 ——
+   否则会出现「按钮能点，点下去提示『该训练已结束』」。 */
+function trainingSessionButton(session) {
+  const total = Number(session?.total || session?.ids?.length || 0);
+  const done = Number(session?.done || 0);
+  if (!isTrainingSessionOpen(session) || !total || done >= total) {
+    return {
+      label: session?.status === "completed" ? "已完成" : "已结束",
+      disabled: true,
+    };
+  }
+  return { label: "继续", disabled: false };
 }
 
 function resetExpiredSmartPracticeView() {
@@ -3177,6 +3269,10 @@ function isSessionFromToday(session) {
   return !!session && sessionDayKey(session) === todayKey();
 }
 
+/* ⚠️ 已不用于「继续上次」：它只按 type 反查会话，不看用户点的是哪条 ——
+   正是「hero 说继续今日强化、点下去续的却是另一条题单」的成因。
+   新代码请用 resumableTrainingSession()（唯一判据）。
+   保留是因为它仍被审计探针 (_co3-probe.js) 读取，别再往应用逻辑里加调用。 */
 function findActiveTrainingSessionByType(type, courseId = state.currentCourse?.id, options = {}) {
   const onlyToday = options.onlyToday !== false;
   const sessions = getTrainingSessionsForCourse(courseId);
@@ -3184,41 +3280,27 @@ function findActiveTrainingSessionByType(type, courseId = state.currentCourse?.i
     if (session.type !== type) return false;
     if (onlyToday && !isSessionFromToday(session)) return false;
     syncTrainingSessionStats(session);
-    return session.status !== "completed" && session.status !== "expired" && normalizeSessionIds(session.ids).length;
+    return isTrainingSessionOpen(session) && normalizeSessionIds(session.ids).length;
   }) || null;
 }
 
 function refreshDailyTrainingState() {
   const key = todayKey();
   let changed = false;
-  let expiredCurrentSmart = false;
+  /* 会话终态统一在这里收敛：completed（本轮题全确认完）/ abandoned
+     （SESSION_ABANDON_DAYS 天没动过）。扫的是**全部**会话，不是指针那一条 ——
+     旧实现只看指针，而指针一退出就被清空，所以会话永远停在「进行中」。 */
+  if (sweepTrainingSessionStates()) changed = true;
+  /* 旧的「跨天就把指针那条标 expired」不再做了：一天的间隔不该终止一轮训练，
+     用户第二天回来接着做才是对的（真正废弃由 SESSION_ABANDON_DAYS 判）。
+     这里只处理「指针指向的这条已经进了终态」——比如题全部确认完了。 */
   const active = activeTrainingSession();
-  if (active && !isSessionFromToday(active)) {
-    // Previous-day unfinished sessions stay in history, but must not block today's training.
-    expiredCurrentSmart = state.mode === "smart" && active.mode === "smart";
-    if (active.status !== "completed") {
-      active.status = "expired";
-      active.expiredAt = active.expiredAt || nowText();
-      active.expiredReason = "rolled_to_next_day";
-    }
+  if (active && !isTrainingSessionOpen(active)) {
+    const expiredCurrentSmart = state.mode === "smart" && active.mode === "smart";
     state.storage.activeTrainingSessionId = "";
     changed = true;
+    if (expiredCurrentSmart) resetExpiredSmartPracticeView();
   }
-  const smart = state.storage.smartPractice;
-  if (smart) {
-    const smartDay = smart.dayKey || dateKey(parseDate(smart.createdAt) || new Date());
-    const smartSession = smart.sessionId
-      ? (state.storage.trainingSessions || []).find((item) => item.id === smart.sessionId)
-      : null;
-    if (smartSession) syncTrainingSessionStats(smartSession);
-    if (smartDay !== key) expiredCurrentSmart = expiredCurrentSmart || state.mode === "smart";
-    if (smartDay !== key || smartSession?.status === "completed" || smartSession?.status === "expired") {
-      state.storage.smartPractice = null;
-      if (smartSession && state.storage.activeTrainingSessionId === smartSession.id) state.storage.activeTrainingSessionId = "";
-      changed = true;
-    }
-  }
-  if (expiredCurrentSmart) resetExpiredSmartPracticeView();
   // Keep dailyActivity keyed by date; ensure today bucket exists for stable UI.
   state.storage.dailyActivity ||= {};
   if (!state.storage.dailyActivity[key]) {
@@ -3255,7 +3337,7 @@ function upsertTrainingSession(session, activate = true) {
 
 function syncTrainingSessionStats(session = activeTrainingSession()) {
   if (!session) return null;
-  if (session.mode === "smart" && !isBatchScopedTrainingSession(session) && !["completed", "expired"].includes(session.status)) {
+  if (session.mode === "smart" && !isBatchScopedTrainingSession(session) && isTrainingSessionOpen(session)) {
     ensureSmartTrainingSessionState(session);
   }
   const courseStore = peekCourseStore(session.courseId || state.currentCourse?.id);
@@ -3284,8 +3366,8 @@ function syncTrainingSessionStats(session = activeTrainingSession()) {
   session.verified = verified;
   session.correct = correct;
   session.wrong = wrong;
-  session.rate = verified ? Math.round((correct / verified) * 100) : 0;
-  if (!["completed", "expired"].includes(session.status) && verified >= ids.length && ids.length) {
+  session.rate = confirmedRate(correct, verified);
+  if (isTrainingSessionOpen(session) && verified >= ids.length && ids.length) {
     session.status = "completed";
     session.completedAt ||= nowText();
     if (session.type === "plan" && Number(session.courseId || 0) === Number(state.currentCourse?.id || 0)) {
@@ -3337,6 +3419,10 @@ function resetWrongBookPageFilter() {
   state.wrongFilters = { ...(state.wrongFilters || {}), review: "all" };
 }
 
+/* 显式生成入口。**唯一**会新建/改写训练单的函数 —— 读路径（getSmartPracticeIds）
+   一律不碰它，这是 ④「点继续被静默换成另一条题单」的根因修法。
+   upsertTrainingSession 会把 activeTrainingSessionId 指到新会话上，
+   指针之外不写第二份「当前题单」（smartPractice 已删除）。 */
 function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {}) {
   const cleanIds = normalizeSessionIds(ids);
   const session = upsertTrainingSession({
@@ -3356,15 +3442,6 @@ function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {
   });
   ensureSmartTrainingSessionState(session, true);
   syncTrainingSessionStats(session);
-  state.storage.smartPractice = {
-    sessionId: session.id,
-    courseId: state.currentCourse?.id || 0,
-    courseName: state.currentCourse?.name || "",
-    sourceTitle,
-    ids: cleanIds,
-    dayKey: session.dayKey || todayKey(),
-    createdAt: session.createdAt,
-  };
   // A newly generated batch must never inherit the previous round's
   // runtime reveal state, even when the user starts it immediately after submit.
   state.answers = {};
@@ -3553,12 +3630,13 @@ function renderAll() {
   }
 }
 
-/* 空态里也可能有操作按钮（比如错题本「一道都没到期」时的「立即训练全部 N 道」）。
-   innerHTML 每渲染一次都会重建按钮，所以每次都要重新绑。 */
+/* 空态里也可能有操作按钮（比如错题本「一道都没到期」时的「立即训练全部 N 道」、
+   智能练习空态里的「开始今日强化」）。innerHTML 每渲染一次都会重建按钮，所以每次都要重新绑。 */
 function bindEmptyStateActions() {
-  const btn = $("emptyWrongStartBtn");
-  if (!btn) return;
-  btn.onclick = () => startWrongBookPractice({ ignoreReview: true }).catch((err) => toast(err.message));
+  const wrongBtn = $("emptyWrongStartBtn");
+  if (wrongBtn) wrongBtn.onclick = () => startWrongBookPractice({ ignoreReview: true }).catch((err) => toast(err.message));
+  const smartBtn = $("emptyStartSmartBtn");
+  if (smartBtn) smartBtn.onclick = () => startSmartPractice().catch((err) => toast(err.message));
 }
 
 /* 空状态文案。错题本里「列表是空的」有四种完全不同的原因，说错一种用户就会以为
@@ -3582,6 +3660,28 @@ function daysUntilReview(record) {
 }
 
 function buildEmptyMessage() {
+  /* ⑤ 智能练习的空列表有自己的一套原因，说错一种用户就会以为题库坏了：
+       ① 「续不上」——本轮题单的会话不在了 / 指针被清了；
+       ② 「切了科目」——上一轮题单属于**别的科目**，题单不会跟着过来。
+     实测（真实点击科目器）：写的是「当前范围没有题目 / 可以换章节、题型或清空搜索条件」——
+     用户刚切了科目，跟章节/题型毫无关系，照着做只会更迷糊。 */
+  if (state.mode === "smart") {
+    const courseName = state.currentCourse?.name || "当前科目";
+    const leftName = state.smartLeftCourseName;
+    if (leftName) {
+      return [
+        `「${leftName}」的智能练习不属于当前科目`,
+        `你切换到了「${courseName}」。智能练习的题单按科目生成，上一轮属于「${leftName}」，`
+          + `切回那个科目就能从学习看板继续；在本科目则要新开一轮。`,
+        `<button type="button" id="emptyStartSmartBtn" class="primary-action">开始「${escapeHtml(courseName)}」的今日强化</button>`,
+      ];
+    }
+    return [
+      "本次智能练习没有题目",
+      `当前科目（${courseName}）还没有可继续的题单。`,
+      `<button type="button" id="emptyStartSmartBtn" class="primary-action">开始「${escapeHtml(courseName)}」的今日强化</button>`,
+    ];
+  }
   if (state.mode !== "wrong") {
     return ["当前范围没有题目", "可以换章节、题型或清空搜索条件。"];
   }
@@ -4154,15 +4254,18 @@ function renderPracticeContextPanel() {
   }
   const done = state.questions.filter((item) => hasAnswer(item.id)).length;
   const verified = state.questions.filter((item) => isQuestionVerified(item.id)).length;
-  const smart = state.storage.smartPractice || {};
+  /* 标题 / 生成时间 / 科目全部取自**当前会话**（唯一事实来源）。
+     旧实现先读 smartPractice 指针再退回会话，两个指针不同步时，
+     面板上写的会是另一条题单的名字。 */
   const session = syncTrainingSessionStats(activeSession);
-  const title = session?.sourceTitle || smart.sourceTitle || "智能练习";
-  const createdAt = session?.createdAt || smart.createdAt || "";
+  const title = session?.sourceTitle || "智能练习";
+  const createdAt = session?.createdAt || "";
+  const rate = session ? Number(session.rate || 0) : confirmedRate(0, 0);
   panel.innerHTML = `
     <div>
       <span>${escapeHtml(title)}</span>
-      <b>${state.questions.length} 题 · 已做 ${session?.done ?? done} · 已确认 ${session?.verified ?? verified} · 正确率 ${session?.rate ?? 0}%</b>
-      <small>${escapeHtml(session?.courseName || smart.courseName || state.currentCourse.name || "")}${createdAt ? ` · 生成于 ${escapeHtml(createdAt)}` : ""}</small>
+      <b>${state.questions.length} 题 · 已做 ${session?.done ?? done} · 已确认 ${session?.verified ?? verified} · 本轮正确率 ${rate}%</b>
+      <small>${escapeHtml(session?.courseName || state.currentCourse.name || "")}${createdAt ? ` · 生成于 ${escapeHtml(createdAt)}` : ""}</small>
     </div>
     <button class="practice-context-toggle" id="practiceContextToggleBtn" type="button">${isPracticeContextCollapsed() ? "展开" : "收起"}</button>
     <div class="practice-context-actions">
@@ -5098,9 +5201,14 @@ function renderProgress() {
   const stats = getCourseStats();
   const analysisItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
   const wrongTotal = Object.keys(courseStore.wrong || {}).length;
-  const favTotal = Object.keys(state.storage.favorite || {}).length;
+  /* 收藏题只数**当前科目**——与同页的分组 chip、错题、题量同一范围。
+     旧 KPI 数的是全部科目（实测 11），同屏 chip 只数本科目（3），
+     两个数字都叫「收藏题」。 */
+  const favTotal = favoriteIdsForCurrentCourse().length;
+  const favAllCourses = Object.keys(state.storage.favorite || {}).length;
   const noteTotal = Object.keys(state.storage.notes || {}).filter((id) => state.storage.notes[id]).length;
-  const rate = stats.done ? Math.round((stats.correct / stats.done) * 100) : 0;
+  /* 正确率走 confirmedRate（唯一口径），标签也点明分母是「已确认」。 */
+  const rate = confirmedRate(stats.correct, stats.verified);
 
   $("questionBody").classList.add("hidden");
   $("emptyState").classList.remove("hidden");
@@ -5113,14 +5221,17 @@ function renderProgress() {
       ${renderStudyDashboard(courseStore, stats, analysisItems)}
       <div class="analysis-grid">
         <div><b>${stats.done}</b><span>已做试题</span></div>
-        <div><b>${rate}%</b><span>正确率</span></div>
+        <div title="${escapeHtml(rateKpiTitle(stats))}"><b>${rate}%</b><span>正确率（已确认）</span></div>
         <div><b>${wrongTotal}</b><span>待解决错题</span></div>
-        <div><b>${favTotal}</b><span>收藏题</span></div>
+        <div title="${escapeHtml(`当前科目 ${state.currentCourse?.name || ""} 的收藏；全部科目共 ${favAllCourses} 题`)}"><b>${favTotal}</b><span>收藏题（本科目）</span></div>
         <div><b>${noteTotal}</b><span>笔记</span></div>
         <div><b>${analysisItems.length}</b><span>当前科目题量</span></div>
       </div>
       <div class="trend-panel">
-        <div class="trend-title">近期正确率趋势</div>
+        ${/* 范围写明：曲线吃的是 storage.history，每条 = 一次交卷
+             （交卷时全部作答都判过分），分母是「本次已作答」，
+             和 KPI「正确率（已确认）」的累计口径不是一回事 —— 标题里点明。 */ ""}
+        <div class="trend-title">近期正确率趋势（每次交卷，按本次已作答）</div>
         <canvas id="progressTrend" width="680" height="180"></canvas>
       </div>
       ${renderTrainingHistoryPanel(courseStore)}
@@ -5151,8 +5262,6 @@ function renderTraining() {
   const dueLeft = dueRecords.filter(([id]) => !servedToday.has(Number(id))).length;
   const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
   refreshDailyTrainingState();
-  const smart = state.storage.smartPractice;
-  const canContinueSmart = canContinueSmartPractice(smart);
   const analysisReady = state.analysisCourseId === Number(state.currentCourse?.id || 0) && state.analysisQuestions.length;
   /* 卡片题量和题单构成都用「真实生成逻辑」算出来，避免文案与实际题单不符（旧实现是估算公式，
      实测卡片写「20 题」而点进去生成 60 题）。这里算一次给三张卡片共用，避免重复遍历题库。 */
@@ -5173,7 +5282,17 @@ function renderTraining() {
   const duePreview = dueLeft
     ? (dueLeft === dueTotal ? `${dueLeft} 道到期` : `${dueLeft} 道可复习 · 共 ${dueTotal} 道到期`)
     : (dueTotal ? `今天到期的 ${dueTotal} 道都练完了` : "今天没有到期错题");
-  const activeSmartSession = findActiveTrainingSessionByType("smart", state.currentCourse?.id, { onlyToday: true });
+  /* 「继续上次」和 hero 共用同一个判据（resumableTrainingSession），
+     所以同屏不会再出现两个都能点、却各指一条题单的「继续」。
+     hero 的文案据实而写：有可续的题单就说「继续」（且点下去续的就是这条），
+     否则说「开始」—— 旧实现按 type 反查另一条会话，于是 hero 说「继续今日强化」
+     而它续的是 A，「继续上次」续的是 B。 */
+  const resumable = resumableTrainingSession();
+  const heroLabel = !resumable
+    ? "开始今日强化"
+    : resumable.type === "smart"
+      ? "继续今日强化"
+      : "继续上次训练";
   const hasReviewPlan = !!activeReviewPlan().examDate;
   const planOverview = hasReviewPlan
     ? buildReviewPlanOverview(stats, Object.keys(courseStore.wrong || {}).length, items)
@@ -5199,7 +5318,7 @@ function renderTraining() {
           <strong>智能训练</strong>
           <p>${escapeHtml(state.currentCourse?.name || "当前科目")} · 今日已练 ${today.total} 题 · 确认正确率 ${today.rate}%</p>
         </div>
-        <button class="primary-action" id="trainingSmartBtn" type="button">${activeSmartSession ? "继续今日强化" : "开始今日强化"}</button>
+        <button class="primary-action" id="trainingSmartBtn" type="button">${heroLabel}</button>
       </div>
       <div class="training-advice">
         <span>今日建议</span>
@@ -5238,7 +5357,7 @@ function renderTraining() {
         })}
       </div>
       <div class="training-tools">
-        <button type="button" id="trainingContinueSmartBtn" ${canContinueSmart ? "" : "disabled"}>继续上次：${canContinueSmart ? escapeHtml(smart.sourceTitle || "智能训练") : "暂无题单"}</button>
+        <button type="button" id="trainingContinueSmartBtn" ${resumable ? "" : "disabled"}>继续上次：${resumable ? escapeHtml(resumable.sourceTitle || "智能训练") : `今天暂无题单`}</button>
         <button type="button" id="trainingDashboardBtn">查看学习看板</button>
         <button type="button" id="trainingWrongBtn">查看错题本</button>
         <button type="button" id="trainingPracticeBtn">返回考试题库</button>
@@ -5341,10 +5460,12 @@ function renderStudyDashboard(courseStore, stats, items) {
   const report = getTodayReport() || buildDailyReport(courseStore, stats, items);
   const today = getTodayActivity();
   const reportText = report
-    ? `已记录快照：${report.done} 题 · 正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
+    ? `已记录快照：累计已做 ${report.done} 题 · 确认正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
     : buildStudyReportSummary(courseStore, stats, items).summary;
-  const smart = state.storage.smartPractice;
-  const canContinueSmart = canContinueSmartPractice(smart);
+  /* 「智能练习」卡与下面的「个人训练看板」行共用 resumableTrainingSession ——
+     旧实现这张卡读 smartPractice 指针、行读会话列表，同屏互相否定：
+     卡片写「暂无练习批次」（禁用），下面两行却是可点的「继续」。 */
+  const resumable = resumableTrainingSession();
   return `
     <div class="study-dashboard">
       <div class="study-card">
@@ -5368,10 +5489,10 @@ function renderStudyDashboard(courseStore, stats, items) {
         <small>${escapeHtml(report.tomorrow || "明天继续保持节奏")}</small>
         <button id="dailyReportBtn" type="button">更新日报</button>
       </div>
-      <div class="study-card ${canContinueSmart ? "" : "muted-card"}">
+      <div class="study-card ${resumable ? "" : "muted-card"}">
         <span>智能练习</span>
-        <b>${canContinueSmart ? `${smart.ids.length} 题可继续` : "暂无练习批次"}</b>
-        <button id="continueSmartBtn" type="button" ${canContinueSmart ? "" : "disabled"}>继续上次</button>
+        <b>${resumable ? `${normalizeSessionIds(resumable.ids).length} 题可继续 · ${escapeHtml(resumable.sourceTitle || "智能训练")}` : "今天暂无训练单"}</b>
+        <button id="continueSmartBtn" type="button" ${resumable ? "" : "disabled"}>继续上次</button>
       </div>
     </div>
   `;
@@ -5400,19 +5521,23 @@ function renderTrainingHistoryPanel(courseStore) {
   const sessions = getTrainingSessionsForCourse().map((session) => syncTrainingSessionStats(session)).filter(Boolean);
   const recent = sessions.slice(0, 8);
   const finished = sessions.filter((item) => item.status === "completed").length;
-  const active = sessions.filter((item) => item.status !== "completed").length;
+  const ended = sessions.filter((item) => item.status === "abandoned" || item.status === "expired").length;
   const totalDone = sessions.reduce((sum, item) => sum + Number(item.done || 0), 0);
   const totalCorrect = sessions.reduce((sum, item) => sum + Number(item.correct || 0), 0);
   const totalVerified = sessions.reduce((sum, item) => sum + Number(item.verified || 0), 0);
-  const overallRate = totalVerified ? Math.round(totalCorrect / totalVerified * 100) : 0;
+  const overallRate = confirmedRate(totalCorrect, totalVerified);
   return `
     <div class="training-history-panel">
       <div class="training-history-head">
         <div>
           <span>个人训练看板</span>
-          <strong>${sessions.length} 套训练 · ${active} 套进行中 · ${finished} 套已完成</strong>
+          ${/* 标题不再声明「N 套进行中」——旧实现把「非 completed」一律算进行中，
+               而会话过去不会自动收尾（见 sweepTrainingSessionStates），于是
+               「3 套进行中」挂着一堆早就没人做的题单，只会误导。
+               现在只报两个可核实的事实：几套、平均正确率多少。 */ ""}
+          <strong>共 ${sessions.length} 套训练 · 已完成 ${finished} 套${ended ? ` · 已结束 ${ended} 套` : ""} · 平均正确率 ${overallRate}%</strong>
         </div>
-        <b>${totalDone} 题 · ${overallRate}%</b>
+        <b>累计作答 ${totalDone} 题</b>
       </div>
       ${recent.length ? `
         <div class="training-history-list">
@@ -5428,16 +5553,21 @@ function renderTrainingHistoryRow(session) {
   const done = Number(session.done || 0);
   const progress = total ? Math.round(done / total * 100) : 0;
   const isActive = state.storage.activeTrainingSessionId === session.id;
-  const canContinue = total && progress < 100;
+  /* 按钮的可点性与 isTrainingSessionOpen 同判据 ——
+     旧实现只要「没做完」就写「继续」，点下去才提示「该训练已结束」，自相矛盾。 */
+  const btn = trainingSessionButton(session);
+  const closedNote = session.status === "abandoned"
+    ? ` · 已结束（${SESSION_ABANDON_DAYS} 天未继续）`
+    : session.status === "expired" ? " · 已结束" : "";
   return `
     <section class="training-history-row ${isActive ? "active" : ""}">
       <div class="training-history-main">
         <span>${escapeHtml(session.sourceTitle || "智能训练")}</span>
         <strong>${done}/${total} 题 · 正确率 ${Number(session.rate || 0)}% · 错题 ${Number(session.wrong || 0)}</strong>
-        <small>${escapeHtml(session.courseName || "")} · ${escapeHtml(session.createdAt || "")}${session.completedAt ? ` · 完成 ${escapeHtml(session.completedAt)}` : ""}</small>
+        <small>${escapeHtml(session.courseName || "")} · ${escapeHtml(session.createdAt || "")}${session.completedAt ? ` · 完成 ${escapeHtml(session.completedAt)}` : ""}${closedNote}</small>
       </div>
       <div class="training-history-progress" aria-hidden="true"><i style="width:${Math.max(2, progress)}%"></i></div>
-      <button type="button" data-training-session="${escapeHtml(session.id)}" ${canContinue ? "" : "disabled"}>${canContinue ? "继续" : "已完成"}</button>
+      <button type="button" data-training-session="${escapeHtml(session.id)}" ${btn.disabled ? "disabled" : ""}>${btn.label}</button>
     </section>
   `;
 }
@@ -5448,6 +5578,11 @@ function bindTrainingHistoryActions() {
   });
 }
 
+/* 「继续」的唯一入口。只做一件事：把指针指到用户点名的那条会话上，
+   然后让 loadQuestions 从**这条会话自己的 ids** 取题（getSmartPracticeIds 只读）。
+   于是「点的是哪条，续的就是哪条」——旧实现点下去会走 loadQuestions →
+   getModeQuestionIds → getSmartPracticeIds，而那里续不上（跨天）就现场新建一条
+   60 题会话，用户的 77 题题单原样留着、toast 还说「已继续」。 */
 async function continueTrainingSession(sessionId) {
   const session = (state.storage.trainingSessions || []).find((item) => item.id === sessionId);
   if (!session || Number(session.courseId || 0) !== Number(state.currentCourse?.id || 0)) {
@@ -5459,8 +5594,11 @@ async function continueTrainingSession(sessionId) {
     return;
   }
   syncTrainingSessionStats(session);
-  if (session.status === "completed" || session.status === "expired") {
-    toast("该训练已结束，请开始新的智能训练");
+  /* toast 不能撒谎：续不上就说续不上，并说清为什么。 */
+  if (!isTrainingSessionOpen(session)) {
+    toast(session.status === "completed"
+      ? "该训练本轮题已全部完成，请开始新的智能训练"
+      : "该训练已结束，请开始新的智能训练");
     return;
   }
   state.storage.activeTrainingSessionId = session.id;
@@ -5482,23 +5620,20 @@ async function continueTrainingSession(sessionId) {
     return;
   }
   ensureSmartTrainingSessionState(session);
-  state.storage.smartPractice = {
-    sessionId: session.id,
-    courseId: session.courseId,
-    courseName: session.courseName || "",
-    sourceTitle: session.sourceTitle || "智能训练",
-    ids: normalizeSessionIds(session.ids),
-    createdAt: session.createdAt || nowText(),
-    dayKey: session.dayKey || sessionDayKey(session),
-  };
   state.smartPracticeFreshStart = false;
   state.mode = "smart";
   state.submitted = false;
   state.answerVisible = false;
+  state.smartLeftCourseName = "";
+  state.smartLeftCourseId = 0;
   setCoursePicker(false);
   scheduleSave();
   await loadQuestions();
-  toast(`已继续${session.sourceTitle || "智能训练"}`);
+  /* 题单拿不到（题库/接口问题）时不能还说「已继续」——把实际题数报出来。 */
+  const loaded = state.questions.length;
+  toast(loaded
+    ? `已继续${session.sourceTitle || "智能训练"}（${loaded} 题）`
+    : `${session.sourceTitle || "智能训练"}的题目暂时取不到，请重试`);
 }
 
 function getTodayReport() {
@@ -5507,18 +5642,20 @@ function getTodayReport() {
 }
 
 function buildStudyReportSummary(courseStore, stats, items) {
-  const rate = stats.done ? Math.round(stats.correct / stats.done * 100) : 0;
+  /* 与 KPI 同一口径：答对 ÷ 已确认。 */
+  const rate = confirmedRate(stats.correct, stats.verified);
   const weak = getWeakChapterRows(courseStore, items)[0];
   const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
   const focus = weak ? `优先练 ${weak.name}` : due ? "优先复习到期错题" : "保持当前节奏";
   return {
     done: stats.done,
     correct: stats.correct,
+    verified: stats.verified,
     wrong: stats.wrong,
     rate,
     due,
     focus,
-    summary: `当前进度快照：累计 ${stats.done} 题 · 正确率 ${rate}% · ${focus}`,
+    summary: `当前进度快照：累计已做 ${stats.done} 题 · 确认正确率 ${rate}%（答对 ${stats.correct} / 已确认 ${stats.verified}） · ${focus}`,
   };
 }
 
@@ -5558,21 +5695,28 @@ function getWeakChapterRows(courseStore, items) {
      旧实现只看 done：老数据（尤其**旧版考场交卷**只写 correct/wrong）里
      做错过的题一道都进不来，用户看着「薄弱章节」是空的，实际错题一堆。 */
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
+  /* 分母只算「已确认」（与 confirmedRate 同一口径）。
+     旧实现拿「已做」当分母 —— 这一屏同时出现三处分母不同的百分比
+     （本题 1/2=50%、今日卡片 1/1=100%、会话 1/1=100%）。 */
+  const verifiedIds = new Set(Object.keys(courseStore.verified || {}).map(Number));
   const byChapter = new Map();
   items.forEach((item) => {
     if (!isQuestionDone(courseStore, item.id)) return;
-    const isCorrect = correctIds.has(Number(item.id));
+    const id = Number(item.id);
+    const isVerified = verifiedIds.has(id);
+    const isCorrect = correctIds.has(id);
     textbookChapterKeys(item, items).forEach((key) => {
-      const row = byChapter.get(key) || { key, name: key.startsWith("#") ? "未分章节" : key, done: 0, correct: 0 };
+      const row = byChapter.get(key) || { key, name: key.startsWith("#") ? "未分章节" : key, done: 0, verified: 0, correct: 0 };
       row.done++;
-      if (isCorrect) row.correct++;
+      if (isVerified) row.verified++;
+      if (isVerified && isCorrect) row.correct++;
       byChapter.set(key, row);
     });
   });
   return [...byChapter.values()]
-    .filter((row) => row.done >= 3)
-    .map((row) => ({ ...row, rate: Math.round(row.correct / row.done * 100) }))
-    .sort((a, b) => a.rate - b.rate || b.done - a.done);
+    .filter((row) => row.verified >= 3)
+    .map((row) => ({ ...row, rate: confirmedRate(row.correct, row.verified) }))
+    .sort((a, b) => a.rate - b.rate || b.verified - a.verified);
 }
 
 function renderLearningSignalPanel(courseStore) {
@@ -5614,11 +5758,26 @@ function renderLearningSignalPanel(courseStore) {
   `;
 }
 
+/* 收藏范围的**唯一**口径：当前科目。
+   state.storage.favorite 是跨科目的（每条记录带 courseId），
+   而同一屏上「收藏题」KPI 数全部科目、「收藏分组」chip 只数本科目 ——
+   实测 11 vs 3，两个数字都叫「收藏题」。
+   这里统一成「当前科目」，和同页的错题 / 题量 / 已做 一致；
+   全部科目的总数仍可在 KPI 的 title 里看到（不丢信息）。 */
+function favoriteIdsForCurrentCourse(courseId = state.currentCourse?.id) {
+  const cid = Number(courseId || 0);
+  const favorite = state.storage.favorite || {};
+  return Object.keys(favorite)
+    .filter((id) => !cid || Number(favorite[id]?.courseId || 0) === cid)
+    .map(Number)
+    .filter(Boolean);
+}
+
 function buildFavoriteGroupRows(courseStore) {
   const counts = new Map();
-  const validCourseId = Number(state.currentCourse?.id || 0);
+  const allowed = new Set(favoriteIdsForCurrentCourse());
   Object.entries(state.storage.favorite || {}).forEach(([id, item]) => {
-    if (validCourseId && Number(item?.courseId || 0) !== validCourseId) return;
+    if (!allowed.has(Number(id))) return;
     const label = item?.group || "未分组";
     const row = counts.get(label) || { label, count: 0, ids: [] };
     row.count++;
@@ -5697,18 +5856,20 @@ async function startSignalPractice(type, label) {
   toast(`已生成「${label}」专项练习`);
 }
 
+/* hero「开始/继续今日强化」。续哪条、开新的，都走 resumableTrainingSession ——
+   和「继续上次」完全同一个判据，所以按钮上写「继续」时点下去必然续的就是
+   「继续上次」点名的那条（旧实现按 type 反查，会续另一条题单）。 */
 async function startSmartPractice(options = {}) {
   if (!state.currentCourse) return;
   refreshDailyTrainingState();
   if (!options.force) {
-    const activeSmart = findActiveTrainingSessionByType("smart", state.currentCourse?.id, { onlyToday: true });
-    if (activeSmart) {
-      await continueTrainingSession(activeSmart.id);
+    const resumable = resumableTrainingSession();
+    if (resumable) {
+      await continueTrainingSession(resumable.id);
       return;
     }
   }
   if (!state.analysisQuestions.length) await loadAnalysisQuestions();
-  if (options.force) state.storage.smartPractice = null;
   const ids = buildSmartPracticeIds(userCourseStore(), { randomize: !!options.force });
   if (!ids.length) {
     toast("暂无可生成的智能练习");
@@ -5717,16 +5878,20 @@ async function startSmartPractice(options = {}) {
   resetGeneratedPracticeFilters();
   saveSmartPracticeSession(ids, "今日强化", { type: "smart" });
   state.mode = "smart";
+  state.smartLeftCourseName = "";
+  state.smartLeftCourseId = 0;
   setCoursePicker(false);
   await loadQuestions();
-  toast("已生成智能练习");
+  toast(`已生成今日强化（${state.questions.length || ids.length} 题）`);
 }
 
 async function exitSmartPractice() {
   if (state.mode !== "smart") return;
   syncCurrentTrainingSession();
   state.mode = "practice";
-  state.storage.smartPractice = null;
+  /* 只清「我正在哪一轮」这个指针。题单本身还在会话列表里 ——
+     用户随时能从学习看板的「继续」回到它（旧实现顺带把题单指针也清了，
+     于是退出一次后「继续上次」变成「暂无题单」，与同屏还在的「继续继续」自相矛盾）。 */
   clearActiveTrainingSession();
   scheduleSave();
   await loadQuestions();
@@ -5744,58 +5909,19 @@ async function exitTrainingSession() {
   toast("已退出本次训练");
 }
 
+/* 「继续上次」。目标由 resumableTrainingSession 唯一决定（和 hero、看板卡片同一判据）。
+   没有就明确说没有 —— 不再偷偷生成一条新题单冒充「继续」。 */
 async function continueSmartPractice() {
   if (!state.currentCourse) return;
   refreshDailyTrainingState();
-  const smart = state.storage.smartPractice;
-  if (!canContinueSmartPractice(smart)) {
-    toast("没有可继续的今日智能练习，请开始今日强化");
+  const resumable = resumableTrainingSession();
+  if (!resumable) {
+    toast("今天没有可继续的训练单，点「开始今日强化」新建一轮");
     if (state.mode === "training") renderTraining();
+    else if (state.mode === "progress") renderProgress();
     return;
   }
-  let session = smart.sessionId
-    ? (state.storage.trainingSessions || []).find((item) => item.id === smart.sessionId)
-    : null;
-  if (session && (session.status === "completed" || session.status === "expired")) {
-    state.storage.smartPractice = null;
-    if (state.storage.activeTrainingSessionId === session.id) state.storage.activeTrainingSessionId = "";
-    scheduleSave();
-    toast("上一轮智能训练已完成，请开始新的智能训练");
-    if (state.mode === "training") renderTraining();
-    return;
-  }
-  if (!session) {
-    session = upsertTrainingSession({
-      id: smart.sessionId || trainingSessionId("smart"),
-      type: "smart",
-      mode: "smart",
-      sourceTitle: smart.sourceTitle || "智能训练",
-      courseId: state.currentCourse.id,
-      courseName: state.currentCourse.name || "",
-      ids: smart.ids,
-      createdAt: smart.createdAt || nowText(),
-      dayKey: smart.dayKey || todayKey(),
-      answerScopeVersion: 1,
-      answers: {},
-      verifiedAnswers: {},
-      results: {},
-      currentIndex: 0,
-      lastSubjectId: 0,
-    });
-  } else {
-    ensureSmartTrainingSessionState(session);
-  }
-  smart.sessionId = session.id;
-  state.storage.activeTrainingSessionId = session.id;
-  resetGeneratedPracticeFilters();
-  state.smartPracticeFreshStart = false;
-  state.mode = "smart";
-  state.submitted = false;
-  state.answerVisible = false;
-  setCoursePicker(false);
-  scheduleSave();
-  await loadQuestions();
-  toast("已继续上次智能练习");
+  await continueTrainingSession(resumable.id);
 }
 
 /* ── 错题本「开始训练」 ────────────────────────────────────────────────
@@ -5882,7 +6008,7 @@ async function startWrongBookPractice(options = {}) {
      快照，不会因为「刚答对的题变成已复习」而在中途缩水）。做完了才重新冻结一批。 */
   if (!options.restart) {
     const existing = (state.storage.trainingSessions || []).find((item) => item.id === sessionId);
-    if (existing && !["completed", "expired"].includes(existing.status)) {
+    if (existing && isTrainingSessionOpen(existing)) {
       await continueTrainingSession(sessionId);
       return;
     }
@@ -6189,6 +6315,9 @@ function buildSprintPracticeIds(courseStore = userCourseStore()) {
 function renderDeepAnalysis(courseStore, items = state.questions) {
   const answeredIds = new Set(Object.keys(courseStore.done || {}).map(Number));
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
+  /* 分母取「已确认」，与 confirmedRate / KPI 同一口径；
+     「已做」仍然单独统计并显示（它是有用的另一件事：做过多少题）。 */
+  const verifiedIds = new Set(Object.keys(courseStore.verified || {}).map(Number));
   const byChapter = new Map();
   const byType = new Map();
   const ensureChapterRow = (node, depth) => {
@@ -6200,6 +6329,7 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
         name: node.name || "未分章节",
         total: 0,
         done: 0,
+        verified: 0,
         correct: 0,
         depth,
       });
@@ -6207,21 +6337,26 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
     return byChapter.get(id);
   };
   items.forEach((item) => {
+    const id = Number(item.id);
+    const isVerified = verifiedIds.has(id);
+    const isCorrect = correctIds.has(id);
     const path = chapterPathForId(item.chapterId).slice(0, 2);
     const targets = path.length ? path : [{ id: item.chapterId || 0, name: item.chapterName || "未分章节" }];
     targets.forEach((node, index) => {
       const chapter = ensureChapterRow(node, index + 1);
       if (!chapter) return;
       chapter.total++;
-      if (answeredIds.has(Number(item.id))) chapter.done++;
-      if (correctIds.has(Number(item.id))) chapter.correct++;
+      if (answeredIds.has(id)) chapter.done++;
+      if (isVerified) chapter.verified++;
+      if (isVerified && isCorrect) chapter.correct++;
     });
 
     const typeKey = item.subjectType ?? item.type ?? "题目";
-    const type = byType.get(typeKey) || { id: typeKey, name: item.type || "题目", total: 0, done: 0, correct: 0 };
+    const type = byType.get(typeKey) || { id: typeKey, name: item.type || "题目", total: 0, done: 0, verified: 0, correct: 0 };
     type.total++;
-    if (answeredIds.has(Number(item.id))) type.done++;
-    if (correctIds.has(Number(item.id))) type.correct++;
+    if (answeredIds.has(id)) type.done++;
+    if (isVerified) type.verified++;
+    if (isVerified && isCorrect) type.correct++;
     byType.set(typeKey, type);
   });
   const chapterRows = [...byChapter.values()]
@@ -6251,13 +6386,14 @@ function renderAnalysisRows(rows, clickable) {
   if (!rows.length) return `<div class="muted">暂无统计数据</div>`;
   if (clickable) return renderAnalysisChapterTree(rows);
   return rows.map((row) => {
-    const rate = row.done ? Math.round(row.correct / row.done * 100) : 0;
+    /* 分母 = 已确认（唯一口径）；「已做」另列，两个数字不再混用。 */
+    const rate = confirmedRate(row.correct, row.verified);
     const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
     const mastery = chapterMastery(row);
     return `
       <button type="button" class="analysis-row ${level}" disabled>
         <span>${escapeHtml(row.name)}</span>
-        <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
+        <em>${row.total}题 · 已做${row.done} · 对${row.correct}/${row.verified}确认</em>
         <i class="mastery-badge ${mastery.level}">${mastery.label}</i>
         <b>${rate}%</b>
       </button>
@@ -6265,11 +6401,13 @@ function renderAnalysisRows(rows, clickable) {
   }).join("");
 }
 
+/* 掌握度分级。判据与 confirmedRate 同口径（答对 ÷ 已确认）——
+   旧实现用「已做」当分母，同一行里的 <b>rate%</b> 与 KPI 的正确率算法不同。 */
 function chapterMastery(row) {
-  const done = Number(row.done || 0);
-  const rate = done ? Math.round(Number(row.correct || 0) / done * 100) : 0;
-  if (!done) return { label: "未开始", level: "none" };
-  if (done < 5 || rate < 60) return { label: "薄弱", level: "weak" };
+  const verified = Number(row.verified || 0);
+  const rate = confirmedRate(row.correct, verified);
+  if (!verified) return { label: Number(row.done || 0) ? "待确认" : "未开始", level: "none" };
+  if (verified < 5 || rate < 60) return { label: "薄弱", level: "weak" };
   if (rate < 80) return { label: "一般", level: "normal" };
   return { label: "稳定", level: "stable" };
 }
@@ -6284,7 +6422,7 @@ function renderAnalysisChapterTree(rows) {
     if (!row) return "";
     const children = (node.children || []).filter((child) => map.has(Number(child.id)));
     const expanded = state.analysisExpandedChapters.has(Number(node.id));
-    const rate = row.done ? Math.round(row.correct / row.done * 100) : 0;
+    const rate = confirmedRate(row.correct, row.verified);
     const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
     const mastery = chapterMastery(row);
     return `
@@ -6293,7 +6431,7 @@ function renderAnalysisChapterTree(rows) {
           <button type="button" class="analysis-toggle ${expanded ? "expanded" : "collapsed"}" data-analysis-toggle="${node.id}" ${children.length ? "" : "disabled"}>${children.length ? (expanded ? "−" : "+") : ""}</button>
           <button type="button" class="analysis-row ${level} ${depth === 1 ? "heading" : ""}" ${depth === 1 ? "disabled" : `data-analysis-chapter="${row.id}"`}>
             <span>${escapeHtml(row.name)}</span>
-            <em>${row.total}题 · 已做${row.done} · 对${row.correct}</em>
+            <em>${row.total}题 · 已做${row.done} · 对${row.correct}/${row.verified}确认</em>
             <i class="mastery-badge ${mastery.level}">${mastery.label}</i>
             <b>${rate}%</b>
           </button>
@@ -8512,6 +8650,23 @@ async function adminCorrectionAction(user, correctionId, action) {
   await renderAdminDashboard();
 }
 
+/* 正确率的**唯一**口径：答对 ÷ 已确认（`correct / verified`）。
+   为什么分母不是「已做」（done）：done 里包含「已作答但还没点『确认答案』」的题，
+   拿它当分母等于把「还没判分」默认算成「错」。
+   实测（done=2 / verified=1 / correct=1，同一批数据、同一屏）：
+     学习看板 KPI「正确率」  = 1/2 = 50%
+     同屏今日卡片「确认正确率」= 1/1 = 100%
+   两个数字都自称「正确率」，范围也一样（当前科目的作答记录），
+   所以这不是「本次 vs 累计」的口径差，是算法本身取了两个分母 —— 属于 bug。
+   只有确认过的题才谈得上对错，所以分子分母都只取已确认的。
+   调用点：getCourseStats 的 KPI、学习日报、会话统计、看板汇总。
+   ⚠️ 交卷成绩面板 / 近期趋势用的是**另一次作答**的 scope（本次交卷，交卷时全部判过），
+   那边分母是「本次已作答」，不是这里的分母，文案里已标明范围。 */
+function confirmedRate(correct, verified) {
+  const v = Number(verified || 0);
+  return v ? Math.round((Number(correct || 0) / v) * 100) : 0;
+}
+
 function getCourseStats(courseId = state.currentCourse?.id) {
   const data = peekCourseStore(courseId);
   return {
@@ -8520,8 +8675,19 @@ function getCourseStats(courseId = state.currentCourse?.id) {
        和练习页顶部、章节树的口径又对不上 —— 这次一并统一。 */
     done: doneQuestionIds(data).size,
     correct: Object.keys(data.correct || {}).length,
+    /* verified = 真正的分母。给 KPI 用，顺带让调用方拿到分子分母两个数，
+       不用各自再写一遍除法。 */
+    verified: Object.keys(data.verified || {}).length,
     wrong: Object.keys(data.wrong || {}).length,
   };
+}
+
+/* 当前科目 KPI 那格的完整口径文案（值 + 分子/分母），
+   title 里给鼠标用户 / 读屏一个「这 50% 是怎么算出来的」。 */
+function rateKpiTitle(stats) {
+  const unverified = Math.max(0, Number(stats.done || 0) - Number(stats.verified || 0));
+  return `答对 ${stats.correct} ÷ 已确认 ${stats.verified} = ${confirmedRate(stats.correct, stats.verified)}%`
+    + `（已做 ${stats.done} 题，其中 ${unverified} 题还没点「确认答案」，不计入正确率）`;
 }
 
 async function moveQuestion(delta) {
