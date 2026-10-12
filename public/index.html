@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261011-namealign1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261012-examsafety1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -84,7 +84,6 @@
       <button class="nav-item study-only" data-mode="wrong">错题本</button>
       <button class="nav-item study-only" data-mode="progress">学习看板</button>
       <button class="nav-item study-only" data-mode="favorite">收藏试题</button>
-      <button class="hidden" data-action="refresh" type="button">刷新列表</button>
       <!-- 账号区：只放一个头像按钮，其余（用户名 / 保存状态 / 配色模式 / 退出）
            全部收进下拉菜单。手机上顶栏因此只剩「工具 + 账号」两个图标。
            `#accountLabel` / `#saveStatusLabel` / `[data-theme-set]` 的 id 与属性
@@ -143,6 +142,12 @@
       <button id="zoomInBtn">放大</button>
       <button id="zoomOutBtn">缩小</button>
       <button id="fullscreenBtn">全屏</button>
+      <!-- 重新读取题库（=loadCourses + reloadChaptersAfterBankChange）。
+           桌面端一直隐藏、手机端只在「工具」面板展开时出现 ——
+           见 style.css 里 `.toolbar > [data-action="refresh"]` 那条。
+           旧实现把它挂在 .main-nav 且永久带 .hidden（.hidden 是 !important），
+           任何视口都看不见 → 学员端没有任何手动重读题库/章节的入口。 -->
+      <button data-action="refresh" type="button" title="重新读取本地题库（章节、题型、题单一起刷新）">重新读取题库</button>
     </section>
 
     <div id="searchPanel" class="search-panel hidden">
@@ -347,7 +352,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261012-doneman1"></script>
+  <script src="/app.js?v=20261012-examsafety1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     if ("serviceWorker" in navigator) {

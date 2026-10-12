@@ -87,6 +87,10 @@ const state = {
   exam: null,
   examTimer: null,
   examConfig: null,
+  /* 组卷进行中（点了「开始组卷」→ 卷子还没生成出来）。
+     这段时间 state.exam 仍是 null、state.questions 还是空，
+     交卷入口必须拦掉（见 submitPaper / isExamGenerating）。 */
+  examGenerating: false,
   correctionQuestion: null,
   expandedChapters: new Set(),
   examExpandedChapters: new Set(),
@@ -1066,12 +1070,12 @@ function ensureMobileControls() {
     btn.className = "mobile-tools-btn";
     btn.type = "button";
     btn.textContent = "工具";
-    // ⚠️ 必须插在 `[data-action="refresh"]`（也就是 `.account-box`）**之前**。
-    // 这里原来是以已退役的 `#mobileMenuBtn` 为锚点；直接改成 `appendChild`
-    // 会把「工具」排到头像右边，顶栏顺序就反了。
-    const refresh = document.querySelector('[data-action="refresh"]');
+    // ⚠️ 必须插在头像（`.account-box`）**之前**，顶栏顺序才是「… 工具 头像」。
+    // 这里原来以 `[data-action="refresh"]` 作锚点；那个按钮已经搬进 .toolbar
+    // （手机「工具」面板里的「重新读取题库」），再用它当锚点会把「工具」插到工具栏里。
+    const anchor = document.querySelector(".main-nav .account-box");
     const nav = document.querySelector(".main-nav");
-    if (refresh) refresh.parentNode.insertBefore(btn, refresh);
+    if (anchor) anchor.parentNode.insertBefore(btn, anchor);
     else nav?.appendChild(btn);
   }
 
@@ -2006,6 +2010,11 @@ async function selectCourse(course, options = {}) {
   if (!isAdmin() && options.closePicker) setCoursePicker(false);
   updatePickerHint();
   if (JSON.stringify(state.storage) !== storageBefore) scheduleSave();
+  /* 换科目时如果人还在「模拟考场」，必须重新进一次考场首页。
+     旧实现只把题型/题单换成新科目的，页面就从组卷页退回**普通练习题**
+     （「第 1 / 80 题」），而导航仍高亮「模拟考场」、工具栏仍挂着「提交答卷」——
+     学员点一下就是一份 0/0 分的假成绩单（见 submitPaper 的守卫）。 */
+  if (state.mode === "exam") await enterExamHome(transitionId);
 }
 
 /* 最近一次**成功**读到章节的科目 id。切科目失败时用它判断
@@ -3386,6 +3395,11 @@ function findTrainingStartIndex(items, session, fallbackSubjectId = 0) {
 }
 
 async function loadCurrentQuestion() {
+  /* 翻题/换章节/切科目都会走这里，而它最终会 renderQuestion() 重写 #noteEditor。
+     挂起的那份笔记必须**先**落库，否则正在输入的内容会被下一次渲染冲掉
+     （实测：输入后立刻点下一题，qA 什么都没存到）。
+     pendingNote 自带题号，所以这里不用关心 index 有没有已经变过。 */
+  flushPendingNote();
   const requestId = (state.questionRequestId || 0) + 1;
   state.questionRequestId = requestId;
   const questions = state.questions;
@@ -3692,6 +3706,10 @@ function scrollQuestionViewToTop(behavior = "auto") {
 function renderQuestion() {
   const item = state.questions[state.currentIndex];
   if (!item || !item.detail) return;
+  /* 兜底：本函数下面会重写 #noteEditor，正在输入的那份先落库。
+     （翻题的主路径已经在 loadCurrentQuestion 里刷过一次，这里是给
+     「显示答案」「切验证模式」「交卷」这类直接重绘的入口收口。） */
+  flushPendingNote();
   const q = item.detail;
   const revealAnswer = shouldRevealCurrentAnswer(q);
   const questionBody = $("questionBody");
@@ -3713,6 +3731,7 @@ function renderQuestion() {
   setText("favoriteBtn", isFavorite(q.id) ? "取消收藏" : "收藏本题");
   setText("wrongBtn", state.mode === "wrong" ? "移出错题" : "纠错");
   $("noteEditor").value = getNote(q.id);
+  refreshNoteButton();
   renderOptions(q);
   ensureQuestionSidePanel();
   renderQuestionTags(q);
@@ -3952,6 +3971,9 @@ function addQuestionTag(questionId, rawLabel) {
 function toggleQuestionTag(questionId, rawLabel) {
   const label = String(rawLabel || "").replace(/\s*×$/, "").trim();
   if (!label) return;
+  /* 标签 chip 点完会 renderQuestion() 重写笔记框 —— 正在输入的那份先落库，
+     否则点一下 chip 就丢字（实测过）。 */
+  flushPendingNote();
   if (questionTags(questionId).includes(label)) removeQuestionTag(questionId, label);
   else addQuestionTag(questionId, label);
 }
@@ -4398,6 +4420,13 @@ function cleanupPrintView() {
 }
 
 function saveSubjectiveAnswer(q, answer) {
+  /* 交卷后不能再改答案：成绩、答题卡、考试历史都在交卷那一刻定格了，
+     旧实现却照样写 state.answers 并刷新选中态 —— 界面看着改了，分数不变，
+     用户以为改对了分。练习模式不受影响（那边交卷后仍可改写并重判）。 */
+  if (state.mode === "exam" && state.submitted) {
+    toast("已交卷，不能再修改答案");
+    return;
+  }
   const previous = state.answers[q.id] || "";
   const wasFilled = !!normalizeAnswer(previous);
   const isFilled = !!normalizeAnswer(answer);
@@ -4433,6 +4462,12 @@ function saveSubjectiveAnswer(q, answer) {
 }
 
 function chooseOption(q, label) {
+  /* 同 saveSubjectiveAnswer：交卷后考场里的选项必须冻结（实测 B→A 能改选中态，
+     但 score 不变、答题卡和历史都不动）。 */
+  if (state.mode === "exam" && state.submitted) {
+    toast("已交卷，不能再修改答案");
+    return;
+  }
   const previous = state.answers[q.id] || "";
   const selected = new Set((state.answers[q.id] || "").split("").filter(Boolean));
   const multi = isMultiChoice(q);
@@ -4913,6 +4948,22 @@ function shouldRevealCurrentAnswer(q) {
   return !!(state.answerVisible || state.submitted || currentVerifyMode() === "review" || isQuestionVerified(q?.id));
 }
 
+/* 组卷进行中：工具栏的「提交答卷」要禁掉。
+   这段窗口里 state.exam 还是 null（renderExamHome 刚置空）、state.questions 也是空，
+   点交卷本来就没有对象 —— 旧实现在这里做出了一张 0/0 分的假成绩单。 */
+function isExamGenerating() {
+  return state.mode === "exam" && !!state.examGenerating;
+}
+
+/* 「离开页面时暂停计时」是用户选项，默认关 = 真限时。
+   默认状态下 visibilitychange / beforeunload / 切模块**都不调** pauseExamTimer：
+   草稿里存的是 endsAt，续考时按真实时间算剩余（见 resumeExamDraft），
+   所以切标签页、刷新、切模块时间都照走，到点照样自动交卷。
+   旧实现无条件暂停 → 「150 分钟」是假的：切走一次就能无限暂停。 */
+function pauseExamOnLeave() {
+  return !!state.storage.settings?.pauseExamOnLeave;
+}
+
 function renderVerifyModeControls() {
   state.verifyMode = currentVerifyMode();
   const isExam = state.mode === "exam";
@@ -4949,11 +5000,14 @@ function renderVerifyModeControls() {
   }
   const submitBtn = $("submitBtn");
   if (submitBtn) {
+    const generating = isExamGenerating();
     submitBtn.textContent = state.mode === "exam" ? "提交答卷" : "提交答卷";
-    submitBtn.title = state.mode === "exam"
-      ? "交卷并计算模拟考试成绩"
-      : "统一验证本次练习中的所有题目";
-    submitBtn.disabled = !!state.submitting;
+    submitBtn.title = generating
+      ? "正在组卷，请稍候"
+      : state.mode === "exam"
+        ? "交卷并计算模拟考试成绩"
+        : "统一验证本次练习中的所有题目";
+    submitBtn.disabled = !!state.submitting || generating;
   }
 }
 
@@ -8575,6 +8629,30 @@ function bindQuestionSwipe() {
     state.touchStart = null;
   }, { passive: true });
 }
+/* 手动交卷前的二次确认（只在考场里问，且不问自动交卷）。
+   旧实现点一下立刻结束考试：3 道未作答不提示，全空白卷也能一键交掉。
+   未作答数按答题卡/统计行同一口径（hasAnswer）算，别让确认框里的数字
+   和页面上写的对不上。 */
+function confirmExamSubmit() {
+  if (state.mode !== "exam") return true;
+  /* 没有进行中的考试（组卷页静止 / 正在组卷 / 已经交过卷）时先给结论：
+     否则会先弹一句「确定交卷吗？已作答 0 题，还有 0 题未作答」再去拒绝它 ——
+     这句话本身就是在胡说（根本不存在一份卷子）。
+     submitPaper 里那条守卫照样保留：它挡的是**所有**入口，不只是这个按钮。 */
+  if (state.submitted) {
+    toast("已经交卷");
+    return false;
+  }
+  if (!state.exam || !state.questions.length) {
+    toast("当前没有进行中的模拟考试");
+    return false;
+  }
+  const total = state.questions.length;
+  const answered = state.questions.filter((item) => hasAnswer(item.id)).length;
+  const todo = Math.max(0, total - answered);
+  return confirm(`确定交卷吗？\n\n已作答 ${answered} 题，还有 ${todo} 题未作答。交卷后不能再修改答案。`);
+}
+
 async function submitPaper(autoSubmit = false) {
   if (state.submitting) {
     toast("正在提交，请稍候");
@@ -8586,6 +8664,14 @@ async function submitPaper(autoSubmit = false) {
   }
   if (state.mode === "exam" && state.submitted) {
     toast("正在提交，请稍候");
+    return;
+  }
+  /* 组卷页静止时（state.exam === null）和「开始组卷」后的生成期间都没有
+     「进行中的模拟考试」，这里必须拦住。旧实现一路走到底：写一条
+     total:0 的假记录进 state.storage.history（学习看板的正确率曲线就吃这个），
+     再弹一个「交卷完成 0/0 分」的成绩面板。 */
+  if (state.mode === "exam" && (!state.exam || !state.questions.length)) {
+    toast("当前没有进行中的模拟考试");
     return;
   }
   const submitMode = state.mode;
@@ -8793,11 +8879,57 @@ function getNote(id) {
   return state.storage.notes[id] || "";
 }
 
-function saveNote() {
-  const q = state.questions[state.currentIndex]?.detail;
-  if (!q) return;
-  state.storage.notes[q.id] = $("noteEditor").value;
+/* ── 笔记保存 ────────────────────────────────────────────────────────────
+   两条硬约束（旧实现的坑都在这）：
+   1. 题号必须在**输入发生的那一刻**捕获。旧实现在 300ms 防抖回调里现读
+      「当前题」，快速切题时会把这行字写到**新题**上（实测：给 qA 打字后立刻点
+      下一题 → notes 里多出 {新题id: ""}，qA 一个字都没存下来）。
+   2. 空串不写进 notes。留一个 "" 在表里，学习看板按 truthy 数（算 0 篇），
+      导出/同步里它又是真实存在的一条，两个口径打架。
+   ──────────────────────────────────────────────────────────────────────── */
+let pendingNote = null;   // { id, value }，正在输入、还没落库的这份笔记
+
+function currentNoteQuestionId() {
+  return state.questions[state.currentIndex]?.detail?.id ?? null;
+}
+
+function saveNote(questionId = null, value = null) {
+  const qid = questionId ?? currentNoteQuestionId();
+  if (!qid) return;
+  const editor = $("noteEditor");
+  const text = value != null ? String(value) : (editor ? editor.value : "");
+  const previous = state.storage.notes[qid] || "";
+  if (text === previous) {
+    refreshNoteButton();
+    return;   // 没变就别写、也别把存档标脏（省一次整包 POST）
+  }
+  if (text) state.storage.notes[qid] = text;
+  else delete state.storage.notes[qid];
   scheduleSave();
+  refreshNoteButton();
+}
+
+/* 把挂起的那份输入立刻落库（切题、点标签 chip 之前调）。
+   pendingNote 自带题号，所以哪怕此刻已经翻到别的题，写的还是原来那道题。 */
+function flushPendingNote() {
+  if (!pendingNote) return;
+  const { id, value } = pendingNote;
+  pendingNote = null;
+  saveNote(id, value);
+}
+
+/* 笔记防抖：题号和文本都在**这次 input** 里抓死（见上面第 1 条）。 */
+const scheduleNoteSave = debounce(flushPendingNote, 300);
+
+/* 「这题有笔记」提示：给 #noteBtn 加 .has-note（变色 + 角标）。
+   旧实现里 #noteBtn 的 onclick 只 classList.toggle("hidden") 切编辑框，
+   class 恒为空 —— 翻完一整章也看不出哪道题写过笔记。 */
+function refreshNoteButton() {
+  const btn = $("noteBtn");
+  if (!btn) return;
+  const q = state.questions[state.currentIndex]?.detail;
+  btn.classList.toggle("has-note", !!q && !!getNote(q.id));
+  btn.title = q && getNote(q.id) ? "本题有笔记（点开查看/编辑）" : "写本题笔记";
 }
 
 function toggleAnswer() {
@@ -9127,6 +9259,26 @@ function restoreExamChapters(courseId) {
     : null;
 }
 
+/* 进考场首页（组卷页）。导航点击和「换科目」共用这一段 ——
+   换科目时如果不重跑它，页面会停在**普通练习题**上：题单没清、导航还高亮着
+   「模拟考场」、工具栏还挂着「提交答卷」，必须再点一次「模拟考场」才回得来。
+   transitionId 用来判断这轮异步过程中用户有没有又切了模块。 */
+async function enterExamHome(transitionId = state.modeTransitionId) {
+  /* ⚠️ 这里**不能**再 saveExamDraft()。导航点击那条路已经在 state.mode 还是 "exam"、
+     state.questions 还是考卷的时候存过一次草稿；到这里 state.mode 已改成 "exam"、
+     但 state.questions 可能是**上一个模块**的题 —— 再存一次就会把草稿覆盖成别的
+     模块的题单（实测：10 题卷/2 个答案 → 被覆盖成错题本的 4 题/1 个答案）。 */
+  state.questions = [];
+  state.currentIndex = -1;
+  state.submitted = false;
+  state.answerVisible = false;
+  await loadTypes({ ignoreChapter: true });
+  if (transitionId !== state.modeTransitionId) return;
+  renderAnswerCard();
+  updateStats();
+  renderExamHome();
+}
+
 function renderExamHome() {
   setPanelPage(true);
   stopExamTimer();
@@ -9155,6 +9307,13 @@ function renderExamHome() {
           <input id="examDurationInput" type="number" min="1" value="${rule.durationMinutes}">
         </label>
       </div>
+      <!-- 默认不勾 = 真限时：切标签页/刷新/切模块时间都照走，到点自动交卷。
+           存 state.storage.settings.pauseExamOnLeave，见 pauseExamOnLeave()。 -->
+      <label class="exam-pause-row">
+        <input id="examPauseOnLeave" type="checkbox" ${pauseExamOnLeave() ? "checked" : ""}>
+        <span>离开页面时暂停计时</span>
+        <small>不勾选（默认）按真实时间倒计时：切标签页、刷新、切到别的模块时间都照走，到点自动交卷。勾选后离开即暂停，回来接着走。</small>
+      </label>
       <div class="exam-rule-list">
         ${rule.parts.map((part, index) => `
           <div class="exam-part-row">
@@ -9186,6 +9345,16 @@ function renderExamHome() {
     </div>
   `;
   bindExamDraftActions();
+  /* 「离开页面时暂停计时」：选项立刻落 settings（随账号同步），
+     下一场考试的 pauseExamOnLeave() 就读它。 */
+  const pauseOnLeaveToggle = $("examPauseOnLeave");
+  if (pauseOnLeaveToggle) {
+    pauseOnLeaveToggle.onchange = () => {
+      state.storage.settings ||= {};
+      state.storage.settings.pauseExamOnLeave = pauseOnLeaveToggle.checked;
+      scheduleSave();
+    };
+  }
   /* 章节一个都没勾选时禁用「开始组卷」，并给出 title 提示 ——
      否则用户点「清空」后会以为还能出卷（旧行为会悄悄给出全章节卷）。 */
   const syncStartExamBtn = (persist = false) => {
@@ -9269,6 +9438,23 @@ async function startExamPaper() {
     return;
   }
   if (existingDraft) clearExamDraft();
+  /* 从这一刻到卷子生成完成为止，「提交答卷」必须不可点：
+     这段窗口里 state.exam 还是 null，点交卷会写出一条 0/0 分的假成绩单。
+     用 try/finally 收口，而不是在每个提前 return 上各补一句 ——
+     生成期间还有「章节没选」提前返回、组卷失败抛错、以及用户中途切模块三条出口。 */
+  state.examGenerating = true;
+  renderVerifyModeControls();
+  try {
+    await generateExamPaper(rule, parts);
+  } finally {
+    state.examGenerating = false;
+    renderVerifyModeControls();
+  }
+}
+
+/* 组卷主体：按章节比例抽题 → 落 state.exam → 起计时 → 打开第 1 题。
+   从 startExamPaper 拆出来只是为了让 state.examGenerating 有个 try/finally。 */
+async function generateExamPaper(rule, parts) {
   /* 这里**不再**写 state.storage.settings.verifyMode（详见 currentVerifyMode 的注释）：
      考试期间的验证模式由 state.mode 决定，考完自动恢复用户原本的偏好。 */
   state.verifyMode = "paper";
@@ -9371,6 +9557,34 @@ function isExamTimedOut(exam = state.exam) {
   return !!exam && !state.submitted && getExamRemainingMs(exam) <= 0;
 }
 
+/* 超时提醒的两档阈値。**顺序 = 从最紧急到最宽松**，checkExamTimeWarnings 依赖它。
+   旧实现到 00:00 直接强制交卷，全程一句提示都没有 —— 用户切走一会儿回来
+   卷子已经交了。 */
+const EXAM_WARN_STEPS = [
+  { ms: 60000, flag: "warned1", text: "考试剩余 1 分钟，时间到会自动交卷" },
+  { ms: 5 * 60000, flag: "warned5", text: "考试剩余 5 分钟，请尽快作答" },
+];
+
+/* 每档只提醒一次（state.exam.warned5 / warned1，跟随考试对象，新一场考试自然重置）。 */
+function checkExamTimeWarnings() {
+  const exam = state.exam;
+  if (state.mode !== "exam" || !exam || state.submitted || exam.result) return;
+  const left = getExamRemainingMs(exam);
+  const index = EXAM_WARN_STEPS.findIndex((step) => !exam[step.flag] && left <= step.ms);
+  if (index < 0) return;
+  /* 命中最紧急的那档后，把更宽松的档一并标成「已提醒」：
+     恢复草稿时可能一进来就只剩 30 秒，此时再补一句「剩余 5 分钟」纯属噪音。 */
+  EXAM_WARN_STEPS.slice(index).forEach((step) => { exam[step.flag] = true; });
+  toast(EXAM_WARN_STEPS[index].text);
+}
+
+/* 计时器每秒做的事：刷新状态条 → 到点提醒 → 到点自动交卷。 */
+function tickExamClock() {
+  renderExamStatus();
+  checkExamTimeWarnings();
+  if (isExamTimedOut()) submitPaper(true).catch((err) => toast(err.message));
+}
+
 function pauseExamTimer(reason = "background") {
   if (state.mode !== "exam" || !state.exam || state.submitted) {
     stopExamTimer();
@@ -9417,15 +9631,9 @@ function startExamTimer() {
       renderExamStatus();
       return;
     }
-    renderExamStatus();
-    if (isExamTimedOut()) {
-      submitPaper(true).catch((err) => toast(err.message));
-    }
+    tickExamClock();
   }, 1000);
-  renderExamStatus();
-  if (isExamTimedOut()) {
-    submitPaper(true).catch((err) => toast(err.message));
-  }
+  tickExamClock();
 }
 
 function stopExamTimer() {
@@ -9439,10 +9647,7 @@ function syncExamTimer() {
     renderExamStatus();
     return;
   }
-  renderExamStatus();
-  if (isExamTimedOut()) {
-    submitPaper(true).catch((err) => toast(err.message));
-  }
+  tickExamClock();
 }
 
 function renderExamStatus() {
@@ -9450,6 +9655,7 @@ function renderExamStatus() {
   if (!host) return;
   if (state.mode !== "exam" || !state.exam) {
     host.classList.add("hidden");
+    host.classList.remove("exam-urgent");
     host.innerHTML = "";
     return;
   }
@@ -9459,6 +9665,8 @@ function renderExamStatus() {
   const result = state.exam.result;
   const paused = !!state.exam.pausedAt && !result;
   host.classList.remove("hidden");
+  /* 最后 1 分钟整条状态条变红（.exam-urgent），和 ≤60s 那一档 toast 同一个阈值。 */
+  host.classList.toggle("exam-urgent", !result && !state.submitted && left <= 60000);
   host.innerHTML = `
     <span>模拟考场</span>
     <b>${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}</b>
@@ -10059,6 +10267,12 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       renderMode();
       return;
     }
+    /* 切模块：默认（未勾选项）时间照走 —— 草稿存的是 endsAt，回考场续考按真实时间算。
+       勾了「离开页面时暂停计时」才真暂停，而且必须**先暂停再存草稿**：
+       否则草稿里没有 pausedAt，续考时会把离开的这段时间也算成考试时间。 */
+    if (state.mode === "exam" && nextMode !== "exam" && pauseExamOnLeave()) {
+      pauseExamTimer("module");
+    }
     if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
     if (state.mode === "exam" && nextMode !== "exam") stopExamTimer();
     if (["practice", "wrong", "favorite"].includes(nextMode)) leaveActiveTrainingSession();
@@ -10075,20 +10289,7 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       return;
     }
     if (state.mode === "exam") {
-      /* ⚠️ 这里**不能**再 saveExamDraft()。上面（进考场分支之前）已经在
-         state.mode 还是 "exam"、state.questions 还是考卷的时候存过一次草稿；
-         这里是 state.mode 刚被改成 "exam"、但 state.questions 还是**上一个模块**
-         的题 —— 再存一次就会把草稿覆盖成别的模块的题单
-         （实测：10 题卷/2 个答案 → 被覆盖成错题本的 4 题/1 个答案）。 */
-      state.questions = [];
-      state.currentIndex = -1;
-      state.submitted = false;
-      state.answerVisible = false;
-      await loadTypes({ ignoreChapter: true });
-      if (transitionId !== state.modeTransitionId) return;
-      renderAnswerCard();
-      updateStats();
-      renderExamHome();
+      await enterExamHome(transitionId);
       return;
     }
     if (state.mode === "progress" || state.mode === "training") {
@@ -10145,12 +10346,22 @@ $("nextBtn").onclick = () => moveQuestion(1);
 $("answerToggleBtn").onclick = toggleAnswer;
 $("verifyModeBtn").onclick = toggleVerifyMode;
 $("confirmAnswerBtn").onclick = confirmCurrentAnswer;
-$("submitBtn").onclick = () => submitPaper().catch((err) => toast(err.message));
+/* ⚠️ 交卷确认放在这里、不放进 submitPaper：超时自动交卷走的是
+   submitPaper(true)（计时器 / 恢复草稿时直调），那条路不该被 confirm 拦住。 */
+$("submitBtn").onclick = () => {
+  if (!confirmExamSubmit()) return;
+  submitPaper().catch((err) => toast(err.message));
+};
 $("resetBtn").onclick = resetPractice;
 $("favoriteBtn").onclick = toggleFavorite;
 $("mobileActionsBtn").onclick = () => setMobileActions(!state.mobileActionsOpen);
 $("noteBtn").onclick = () => $("noteEditor").classList.toggle("hidden");
-$("noteEditor").addEventListener("input", debounce(saveNote, 300));
+/* ⚠️ 必须用闭包抓「这一刻」的题号 + 文本。debounce 会把参数透传给回调，
+   直接写 debounce(saveNote, 300) 会把 input 事件对象当成 questionId 传进去。 */
+$("noteEditor").addEventListener("input", () => {
+  pendingNote = { id: currentNoteQuestionId(), value: $("noteEditor").value };
+  scheduleNoteSave();
+});
 $("wrongBtn").onclick = () => handleWrongAction().catch((err) => toast(err.message));
 $("correctionCloseBtn").onclick = closeCorrectionDialog;
 $("correctionCancelBtn").onclick = closeCorrectionDialog;
@@ -10213,7 +10424,9 @@ window.addEventListener("resize", debounce(() => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     if (state.mode === "exam" && state.exam && !state.submitted) {
-      pauseExamTimer("background");
+      /* 默认（未勾「离开页面时暂停计时」）只存草稿、不暂停 ——
+         草稿里带着 endsAt，回来续考时按真实时间算剩余，时间照走。 */
+      if (pauseExamOnLeave()) pauseExamTimer("background");
       saveExamDraft();
     }
     if (state.storageDirty) {
@@ -10232,7 +10445,10 @@ document.addEventListener("visibilitychange", () => {
     if (state.mode === "training") renderTraining();
   }
   if (state.mode === "exam" && state.exam && !state.submitted) {
-    resumeExamTimer();
+    /* 真暂停过才「恢复」；默认状态时间一直在走，这里只补一次到点检查 ——
+       后台标签页的 setInterval 被浏览器限流，回来时可能已经超时但还没交卷。 */
+    if (state.exam.pausedAt) resumeExamTimer();
+    else syncExamTimer();
     if (!state.submitted) saveExamDraft();
   }
 });
@@ -10254,7 +10470,8 @@ $("limitSelect").addEventListener("change", () => { persistQuestionWindow(); loa
 window.addEventListener("beforeunload", () => {
   syncCurrentTrainingSession();
   if (state.mode === "exam" && state.exam && !state.submitted) {
-    pauseExamTimer("unload");
+    /* 刷新/关页默认不暂停（时间照走，草稿按 endsAt 续），勾了选项才暂停。 */
+    if (pauseExamOnLeave()) pauseExamTimer("unload");
     saveExamDraft();
   }
   if (state.saveTimer) {

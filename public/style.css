@@ -652,6 +652,15 @@ body.is-admin .admin-only {
   min-width: 84px;
 }
 
+/* 「重新读取题库」：桌面端工具栏排不下、也一直隐藏；手机端它只在
+   「工具」面板展开时出现（`body.mobile-tools-open .toolbar > button` 那条规则
+   特异性更高，会把这里的 display:none 覆盖掉）。
+   ⚠️ 不能用 .hidden 收起来 —— `.hidden { display: none !important }` 优先级太高，
+   手机面板里的覆盖规则压不住它，那个按钮就永远出不来了（旧实现就是这样）。 */
+.toolbar > [data-action="refresh"] {
+  display: none;
+}
+
 @media (hover: hover) {
   .toolbar button:hover,
   .question-actions button:hover,
@@ -702,6 +711,25 @@ body.is-admin .admin-only {
 #noteBtn::before { content: "✀"; }
 #favoriteBtn::before { content: "☀"; }
 #wrongBtn::before { content: "▀"; }
+
+/* 「这题有笔记」：renderQuestion / saveNote 按 getNote(q.id) 给 #noteBtn 挂 .has-note。
+   旧实现里这个按钮的 class 恒为空（onclick 只 toggles 编辑框的 .hidden），
+   翻完一整章也看不出哪道题写过笔记。 ::before 已被图标占用，角标走 ::after。 */
+#noteBtn.has-note {
+  border-color: var(--primary-200);
+  background: var(--primary-50);
+  color: var(--primary-ink);
+  font-weight: 800;
+}
+
+#noteBtn.has-note::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+}
 
 .toolbar-spacer {
   flex: 1;
@@ -1119,6 +1147,25 @@ body.admin-view .workspace {
 
 .exam-status span b {
   color: var(--primary-ink);
+}
+
+/* 最后 1 分钟（剩余 ≤60s）：整条状态条转红，和「剩余 1 分钟」那条提醒同一个阈值。
+   class 由 renderExamStatus() 打（见 app.js）。
+   注意底色不是从头开始加 —— .exam-status 本身就是浅红底，这里要的是明显更深一档。 */
+.exam-status.exam-urgent {
+  border-bottom-color: var(--danger-500);
+  background: var(--danger-100);
+  color: var(--danger-800);
+}
+
+.exam-status.exam-urgent > b {
+  color: var(--danger-700);
+}
+
+.exam-status.exam-urgent .exam-paused-flag {
+  border-color: var(--danger-250);
+  background: var(--danger-50);
+  color: var(--danger-700);
 }
 
 
@@ -1842,6 +1889,43 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .exam-part-row input[type="number"] {
   height: 40px;
   padding: 0 12px;
+}
+
+/* 组卷页的「离开页面时暂停计时」选项（见 app.js 的 pauseExamOnLeave）。
+   默认不勾 = 真限时：离开页面时间照走、到点自动交卷。checkbox 与说明各占一列，
+   说明文字排在 checkbox 右边第二列。 */
+.exam-pause-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(var(--glass-rgb), 0.9);
+  box-shadow: var(--shadow-xs);
+  color: var(--text-3);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.exam-pause-row input[type="checkbox"] {
+  /* ⚠️ 必须写 min-height：全局 `input, select { min-height: var(--control-h) }`
+     （style.css 顶部）会把 checkbox 的布局盒撑到 40px 高，
+     height: 18px 单写无效（min-height 优先）。视觉上框还是小的，但盒子是歪的。 */
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.exam-pause-row small {
+  grid-column: 2;
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.5;
 }
 
 .exam-rule-list {
@@ -9163,6 +9247,17 @@ body.answer-card-collapsed .answer-card-collapse-btn::before {
 @media screen and (max-width: 760px) {
   .practice-context-panel.collapsed > div:first-child b {
     font-size: 12px;
+  }
+}
+
+/* 宽屏但矮的笔记本（1366×768 这类）：app.js 的 isPracticeContextCollapsed() 会在
+   `w > 1280 && h < 900` 时**默认折叠**上下文面板，而 .practice-context-toggle 原本
+   只在 `max-width: 760px` 里 display:inline-flex —— 这个视口下折叠了却拿不到展开键
+   （实测 toggleDisplay:"none"，元素在、点不到，永远展不开）。
+   这里的媒体条件必须和 JS 的折叠条件对齐：JS 是 >1280 且 <900。 */
+@media screen and (min-width: 1280px) and (max-height: 899px) {
+  .practice-context-panel .practice-context-toggle {
+    display: inline-flex;
   }
 }
 
