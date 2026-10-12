@@ -1792,6 +1792,42 @@ static class BackupRetention
 
 static class AdminDataTransfer
 {
+    /// <summary>
+    /// 导入之后的广告清洗 —— 整包上传（<see cref="ImportBank"/>）与单课导入
+    /// （<see cref="ImportCourseBank"/>）都走这里。
+    ///
+    /// 以前只有「拉取」（PullEngine 的 CleanAds）和 /api/admin/clean-ads 会清广告，
+    /// 上传/导入进来的库里带的促销句原样进库、直接展示给学员。现在导入路径也清。
+    ///
+    /// 为什么**同步**清、不给开关：导入本身就是重活（解包 + 整库替换 + assets 拷贝），
+    /// 再跑一遍全库正则的代价实测 ~0.2-0.5s/3-5.5 万题（AdCleaner.CleanDatabase 一遍扫全表），
+    /// 比"上传完还要管理员再点一次清广告"省事，也堵住"导入到手动清洗之间"那段展示窗口；
+    /// 管理员事后仍可用 /api/admin/clean-ads 手动清（那条路径带独立备份）。
+    ///
+    /// 失败**不**让导入失败：导入本身已经成功、备份也在，广告最多是晚一点清掉，
+    /// 所以只记日志并把 ads 返回 null。
+    /// </summary>
+    private static object? CleanAdsAfterImport(string dbPath, int courseId)
+    {
+        try
+        {
+            // 备份在导入流程里已经做过（整库 + assets），这里不再复制一份
+            var result = Puller.AdCleaner.CleanDatabase(dbPath, courseId);
+            return new
+            {
+                courses = result.Courses,
+                cleanedSubjects = result.SubjectsCleaned,
+                ads = result.AdHits,
+                charsRemoved = result.CharsRemoved
+            };
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 导入后清广告失败（忽略，导入结果不受影响）: {ex.Message}");
+            return null;
+        }
+    }
+
     public static object GetStatus(AppPaths paths)
     {
         var sqlite = new FileInfo(paths.SqlitePath);
@@ -1903,11 +1939,19 @@ static class AdminDataTransfer
                 type = "bank",
                 message = "题库和图片资源已上传",
                 backup = backupDir,
+                // 导入路径也清广告（见 CleanAdsAfterImport 的说明）
+                ads = CleanAdsAfterImport(paths.SqlitePath, 0),
                 status = GetStatus(paths)
             };
         }
         finally
         {
+            /* ⚠️ ValidateQuestionDb / TryReadTableCounts 开过的 SqliteConnection 会被**连接池**留着，
+               池里的连接在 Windows 上占着解包目录里那个 question-bank.db 的文件句柄，
+               于是这里的 Directory.Delete 会抛「being used by another process」——
+               上传明明已经成功（题库都换进去了），接口却回 400（实测 HEAD 上必现）。
+               删目录前先把池清掉。 */
+            SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
         }
     }
@@ -1958,12 +2002,16 @@ static class AdminDataTransfer
                 subjects = result.Subjects,
                 message = $"题库已更新：{sourceInfo.Name}（{result.Chapters} 章，{result.Subjects} 题）",
                 backup = backupDir,
+                // 导入路径也清广告，只扫这门课（整库别动：别的课可能正在被用）
+                ads = CleanAdsAfterImport(paths.SqlitePath, courseId),
                 results = new[] { new { courseId, chapters = result.Chapters, subjects = result.Subjects } },
                 status = GetStatus(paths)
             };
         }
         finally
         {
+            // 同 ImportBank：连接池占着解包目录里的库文件，先清池再删目录
+            SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
         }
     }
@@ -3970,6 +4018,16 @@ sealed class QuestionBank
         var r = rows[0];
         var courseId = ToInt(r["icourseid"]);
         var chapterId = ToInt(r["ichapterid"]);
+        /* 选项体检：口径与读侧同一份 ParseOptions —— 重复 / 非顺序标签、答案不在选项里。
+           只对客观题（单选 0 / 多选 1 / 不定项 6）算；判断题的「对/错」和主观题本来就没有选项，
+           拿选项规则去套它们只会报假警。 */
+        var subjectType = ToInt(r["isubjecttype"]);
+        var optionWarnings = subjectType is 0 or 1 or 6
+            ? AuditOptions(TextForEdit(r["ctitle"], r["dupdatedate"]),
+                           TextForEdit(r["cquestion"], r["dupdatedate"]),
+                           TextForEdit(r["canswer"], r["dupdatedate"]),
+                           ToInt(r["ianswercount"]))
+            : new List<string>();
         return new
         {
             ok = true,
@@ -3982,12 +4040,13 @@ sealed class QuestionBank
             chapterGrade = ToInt(r["igrade"]),
             chapterPath = GetChapterPath(courseId, chapterId),
             type = ToStr(r["csubjectname"]),
-            subjectType = ToInt(r["isubjecttype"]),
+            subjectType,
             title = TextForEdit(r["ctitle"], r["dupdatedate"]),
             question = TextForEdit(r["cquestion"], r["dupdatedate"]),
             answer = TextForEdit(r["canswer"], r["dupdatedate"]),
             description = TextForEdit(r["cdescription"], r["dupdatedate"]),
             answerCount = ToInt(r["ianswercount"]),
+            optionWarnings,
             score = ToStr(r["iscore"]),
             updatedAt = ToDateString(r["dupdatedate"]),
             // 本地改动叠层里有记录 → 界面标「本地已改」并提供一键还原
@@ -4276,13 +4335,129 @@ sealed class QuestionBank
             .Trim();
     }
 
-    private static int CountOptions(string text)
+    /* ---- 选项解析：读 / 数 / 保存 / 还原 / 重贴的**唯一口径** ---------------------------
+       ⚠️ 以前这里有**两套**口径，而且写侧用的是更粗的那套：
+         · 读侧 ExtractOptions：行首标签之外还切行内标签；
+         · 写侧 CountOptions（保存 / 还原 / 重贴共用）：只数**行首**标签、只按去重计数。
+       于是「A. one B. two / C. three D. four」这种同行写法：读侧能解析出 4 个选项，
+       写侧只写 ianswercount=2 → 学员端 Take(2) 把 C/D 截掉 → 正确答案的按钮根本不存在。
+       反过来，题干里引用了一个标签（「A. see B. clause」后面才是真正的 B. 行）时，
+       读侧把引用也当成选项（A/B/B/C/D），写侧写 4 → 截成 A/B/B/C，D 又被砍掉。
+       现在只有一份解析（ParseOptions）：读取、计数、保存、还原、重贴全用它，
+       计数**不再用来截断**真实选项 —— 它只是"这道题有几个选项"的元数据。
+       （拉取层不能引用本工程，LocalEdits.cs 里有一份逐字等价的镜像，改这里必须同步那边，
+         有 scripts/verify-puller-sync.ps1 兜底。） */
+
+    /// <summary>一个解析出来的选项。</summary>
+    private sealed record OptionItem(string Label, string Text);
+
+    /// <summary>规范解析结果 + 给编辑器看的诊断（重复 / 非顺序标签）。</summary>
+    private sealed record OptionParse(List<OptionItem> Options, List<string> Warnings);
+
+    /// <summary>
+    /// 题干（HTML 或纯文本）→ 规范选项列表。规则：
+    ///   1. 行首标签是选项的骨架；同一标签重复出现时只有第一次算选项，后面那几行并进上一个选项的
+    ///      正文（实测 22421001 的选项块后面又跟了一遍 C./D. 行、24298363 跟着 B./D. 开头的解释行）。
+    ///   2. 行内标签只有「不是任何行首标签、且还没出现过」时才当成选项分隔点 ——
+    ///      题干里引用标签（「A. see B. clause」后面才是真正的 B. 行）不会被切碎。
+    ///   3. 文本一律先过 StripHtml（<br> → 换行、去标签、HtmlDecode），\r 归一成 \n。
+    /// </summary>
+    private static OptionParse ParseOptions(string? html)
     {
-        var labels = Regex.Matches(text ?? "", @"(?m)(?:^|\n)\s*([A-H])[\.\u3001\uff0e:：]\s*")
-            .Select(match => match.Groups[1].Value)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count();
-        return labels is >= 2 and <= 8 ? labels : 0;
+        var text = StripHtml(html ?? "").Replace("\r", "\n");
+        var warnings = new List<string>();
+
+        var lineLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var heads = new List<Match>();
+        foreach (Match match in OptionLabelRegex.Matches(text))
+        {
+            var label = match.Groups[1].Value.ToUpperInvariant();
+            if (!lineLabels.Add(label))
+            {
+                warnings.Add($"选项标签 {label} 重复出现：只有第一次算选项，后面那几行并入上一个选项的正文");
+                continue;
+            }
+            heads.Add(match);
+        }
+
+        var options = new List<OptionItem>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < heads.Count; i++)
+        {
+            var start = heads[i].Index + heads[i].Length;
+            var end = i + 1 < heads.Count ? heads[i + 1].Index : text.Length;
+            SplitOptionSegment(heads[i].Groups[1].Value, text.Substring(start, Math.Max(0, end - start)),
+                options, seen, lineLabels);
+        }
+
+        var labels = options.Select(option => option.Label.ToUpperInvariant()).ToList();
+        if (labels.Count > 0)
+        {
+            var missing = new List<string>();
+            for (var i = 0; i < labels.Count; i++)
+            {
+                var expected = ((char)('A' + i)).ToString();
+                if (!string.Equals(labels[i], expected, StringComparison.Ordinal)) missing.Add(expected);
+            }
+            if (missing.Count > 0)
+            {
+                warnings.Add($"选项标签不是 A 起连续编号：解析出 {string.Join("、", labels)}" +
+                             $"（期望 A、B、C…；缺 {string.Join("、", missing)}）");
+            }
+        }
+        return new OptionParse(options, warnings);
+    }
+
+    /// <summary>
+    /// 题干里能数出几个选项 —— 直接数 <see cref="ParseOptions"/> 的规范结果
+    /// （不再是"行首标签去重个数"：同行写法的选项会被那个口径漏掉）。
+    /// 2..8 之外一律记 0，保持旧语义：0 = 不作约束，学员端不截断。
+    /// </summary>
+    private static int CountOptions(string? text)
+    {
+        var count = ParseOptions(text).Options.Count;
+        return count is >= 2 and <= 8 ? count : 0;
+    }
+
+    /// <summary>
+    /// 编辑器用的选项体检：解析口径与读侧完全一致（题干优先，题干里解析不出选项再看补充题干），
+    /// 把「重复 / 非顺序标签、答案不在选项里、库里计数与解析结果不一致」直接摆给编辑看。
+    /// </summary>
+    private static List<string> AuditOptions(string? title, string? question, string? answer, int storedCount)
+    {
+        var parsed = ParseOptions(title);
+        var source = "题干";
+        if (parsed.Options.Count == 0)
+        {
+            var fromQuestion = ParseOptions(question);
+            if (fromQuestion.Options.Count > 0)
+            {
+                parsed = fromQuestion;
+                source = "补充题干";
+            }
+        }
+
+        var warnings = new List<string>(parsed.Warnings);
+        var labels = parsed.Options.Select(option => option.Label.ToUpperInvariant()).ToList();
+        var answerLabels = Regex.Matches(answer ?? "", "[A-H]")
+            .Select(match => match.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (labels.Count > 0)
+        {
+            var absent = answerLabels.Where(label => !labels.Contains(label, StringComparer.Ordinal)).ToList();
+            if (absent.Count > 0)
+            {
+                warnings.Add($"正确答案 {string.Join("、", absent)} 不在{source}解析出的选项" +
+                             $"（{string.Join("、", labels)}）里：学员端选不中正确答案");
+            }
+        }
+        if (storedCount > 0 && labels.Count > 0 && storedCount != labels.Count)
+        {
+            warnings.Add($"库里的 ianswercount={storedCount} 与{source}解析出的 {labels.Count} 个选项不一致" +
+                         "（保存后按解析结果回写）");
+        }
+        return warnings;
     }
 
     private List<Dictionary<string, object?>> Query(string sql, Dictionary<string, object?> parameters)
@@ -4344,42 +4519,46 @@ sealed class QuestionBank
     /* 选项标签出现在「行首」的形式（老口径，不变）。 */
     private static readonly Regex OptionLabelRegex = new(@"(?m)(?:^|\n)\s*([A-H])[\.\u3001\uff0e:：]\s*");
 
-    /* 行内标签：标签前必须是空白。分隔符后**不加**空白要求 ——
-       实测 1509100 的「132 D、66; 99」在 D 后面直接跟内容，加了 \s 就切不开，
-       而它的正确答案正是 D（选项里没有 D，学员无法作答）。 */
-    private static readonly Regex InlineOptionLabelRegex = new(@"\s([A-H])[\.\u3001\uff0e:：]\s*");
+    /* 行内标签：同一行里写了两个及以上选项（实测 1509065 的「A.11. 34 B. 11. 33」、
+       1509104 的「A.甲 B.乙 C、丙 D. 丁」、1512051 的「…B. F1-F3-F2 C, …  D. F3-F1-F2」）。
+       分隔符后**不加**空白要求 —— 实测 1509100 的「132 D、66; 99」在 D 后面直接跟内容，
+       加了 \s 就切不开，而它的正确答案正是 D（选项里没有 D，学员无法作答）。
+       标签前的边界：空白（会被当分隔符吃掉）**或**一个汉字（零宽，必须保留 ——
+       实测 1509074 的「合理的施工组织设计C.生产要素消耗水平」中间没有空格，
+       老口径整个 C 选项被吞进 B 的正文，全库 1600+ 道题受影响）。 */
+    private static readonly Regex InlineOptionLabelRegex = new(@"(?:\s|(?<=[\u4e00-\u9fff]))([A-H])[\.\u3001\uff0e:：]\s*");
 
+    /// <summary>
+    /// 学员端读侧：题干 → 选项。与 <see cref="CountOptions"/> 共用 <see cref="ParseOptions"/>，
+    /// 所以"写进去的计数"与"读出来的选项数"不可能再对不上。
+    /// <paramref name="answerCount"/> 保留在签名里（调用点与探针都按它反射），但**不再用来截断**：
+    /// 库里那个数可能是旧保存路径写错的小值（或上游就没跟上题干），拿它 Take() 会砍掉真实选项。
+    /// 实测整库扫描：解析数 > 库里计数 的行只有 2 条，而那 2 条恰恰是库里计数错的。
+    /// </summary>
     private static List<object> ExtractOptions(string html, int answerCount)
     {
-        var text = StripHtml(html).Replace("\r", "\n");
-        var matches = OptionLabelRegex.Matches(text);
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var parsed = new List<(string Label, string Text)>();
-        for (var i = 0; i < matches.Count; i++)
-        {
-            var start = matches[i].Index + matches[i].Length;
-            var end = i + 1 < matches.Count ? matches[i + 1].Index : text.Length;
-            SplitOptionSegment(matches[i].Groups[1].Value, text.Substring(start, Math.Max(0, end - start)), parsed, seen);
-        }
-        if (answerCount > 0 && parsed.Count > answerCount && answerCount <= 8) parsed = parsed.Take(answerCount).ToList();
-        return parsed.Select(item => (object)new { label = item.Label, text = item.Text }).ToList();
+        _ = answerCount;
+        return ParseOptions(html).Options
+            .Select(option => (object)new { label = option.Label, text = option.Text })
+            .ToList();
     }
 
     /// <summary>
-    /// 把「行首标签 + 整行正文」再按**行内标签**切开：同一行写了两个选项时，后一个会被
+    /// 把「行首标签 + 整段正文」再按**行内标签**切开：同一行写了两个选项时，后一个会被
     /// 前一个吞进正文（实测 1509065 的 A 里混进「11. 34 B.」、1509100 的正确答案 D
     /// 根本不在选项里、1509104 只剩 1 个选项 → 学员无法作答）。
-    /// 只在该标签**还没出现过**时切，避免把正文里引用的标签当成分隔点。
+    /// 只切「既不是行首标签、也没出现过」的标签，避免把正文里引用的标签当成分隔点。
     /// </summary>
-    private static void SplitOptionSegment(string label, string body, List<(string Label, string Text)> parsed, HashSet<string> seen)
+    private static void SplitOptionSegment(string label, string body, List<OptionItem> parsed,
+        HashSet<string> seen, HashSet<string> lineLabels)
     {
         var pendingLabel = label;
         var rest = body;
         while (true)
         {
-            var cut = FindInlineOptionLabel(rest, seen);
+            var cut = FindInlineOptionLabel(rest, seen, pendingLabel, lineLabels);
             var head = (cut is null ? rest : rest[..cut.Index]).Trim();
-            if (head.Length > 0) parsed.Add((pendingLabel, head));
+            if (head.Length > 0) parsed.Add(new OptionItem(pendingLabel, head));
             seen.Add(pendingLabel);
             if (cut is null) return;
             pendingLabel = cut.Groups[1].Value;
@@ -4387,11 +4566,15 @@ sealed class QuestionBank
         }
     }
 
-    private static Match? FindInlineOptionLabel(string body, HashSet<string> seen)
+    private static Match? FindInlineOptionLabel(string body, HashSet<string> seen, string pendingLabel, HashSet<string> lineLabels)
     {
         for (var match = InlineOptionLabelRegex.Match(body); match.Success; match = match.NextMatch())
         {
-            if (!seen.Contains(match.Groups[1].Value)) return match;
+            var label = match.Groups[1].Value.ToUpperInvariant();
+            if (lineLabels.Contains(label)) continue;   // 是行首标签 → 正文里的标签引用，不是分隔点
+            if (seen.Contains(label)) continue;         // 已经出现过（含正在拼的这一段）
+            if (label.Equals(pendingLabel, StringComparison.OrdinalIgnoreCase)) continue;
+            return match;
         }
         return null;
     }

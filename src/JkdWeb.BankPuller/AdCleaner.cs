@@ -18,35 +18,82 @@ public sealed record AdCleanResult(
 /// descriptions. Verified against the live bank (29,738 subjects / 1,129 courses):
 /// 47 subjects carried ads across 5 courses (20, 21, 23, 24, 570), all in cdescription.
 ///
-/// Observed wordings (the domain is sometimes misspelled and "压卷" is sometimes "Y卷",
-/// so the patterns tolerate that):
+/// Observed wordings (the domain is sometimes misspelled, "压卷" is sometimes "Y卷",
+/// and lately the mark itself is written with spaces/commas inside):
 ///   新版章节练习，考前压卷，完整优质题库+考生笔记分享，实时更新，金考典软件，下载链接 www.jinkaodian.com，
 ///   新版习题，考前押题，金考典软件考前更新，更多考生做题笔记分享，下载链接 www.jinkaodian.com
 ///   考前【黑钻押题】，金考典软件考前一周更新，下载链接 www.jinkaodian.com
 ///   【彩蛋】压卷，金考典软件考前更新，下载链接 www.jinkaodian.com
 ///   (jinkdoain.com 金考典题库)
+///   （新版章节练习，考前压卷，考生笔记分享，实时更新，金,考 典 APP，ww.ji nkaod ian.com）
+///
+/// ⚠️ 2026-10 的线上残留（18 条）**没有 URL**：上一次清洗把「下载链接 <url>」整段删掉了，
+/// 而老规则要求结尾必须有那个 URL，于是「…金考典软件考前更新，」「金考典软件，」这些
+/// 剩下的半截促销句再也匹配不上、永久留在库里。所以现在的规则**不依赖 URL**：
+///   1. 先看「促销段」——促销词（新版章节练习/考前压卷/考生笔记分享/实时更新/下载链接/域名…）
+///      被「，,、」和空格串起来的一整段；
+///   2. 段里出现**锚点**（金考典 / jink / 下载链接 / 黑钻押题）才删整段 ——
+///      单独一个「实时更新」是正文里的正常词，没有锚点就一个字符都不动；
+///   3. 促销段可能被**插在正文中间**（实测「如住宅楼的客厅、金考典软件，卧室、厨房…」），
+///      删整段就是精确删掉插进去的那一小截，不动周围正文，绝不按「删整行/整段」处理。
 ///
 /// IMPORTANT: "jinkaodian" also appears ~4,000 times inside &lt;img src="C:\...\jinkaodian\data\..."&gt;
-/// image paths. Matching the bare token would destroy every image reference, so the rules
-/// only ever match the promo wordings themselves (they all contain 金考典软件/金考典题库).
+/// image paths. Matching the bare token would destroy every image reference, so the anchor
+/// is the Chinese mark 金考典 (tolerating "金,考 典") plus the *full domain* — never the bare
+/// "jinkaodian" path token (which has no ".com").
 /// </summary>
 public static class AdCleaner
 {
-    private const string Url = @"(?:w{2,3}\.)?jink[a-z]*\.com";
+    /* 域名：老样式 www.jinkaodian.com；线上还见到把空格塞进字母里的防清洗写法
+       （ww.ji nkaod ian.com）。字母之间只容忍空格/制表符，不容许跳行。 */
+    private const string Url = @"(?:w{1,3}[ \t]*\.[ \t]*)?j[ \t]*i[ \t]*n[ \t]*k[a-z][a-z \t]{0,10}\.[ \t]*c[ \t]*o[ \t]*m";
 
-    private static readonly Regex[] AdPatterns =
+    /* 促销句的零件。单独拿出来都不足以判定是广告（"实时更新" 正文里也合法），
+       它们的用处是拼出「促销段」；删不删由段里有没有锚点决定。 */
+    private static readonly string[] PromoParts =
     {
-        // 新版章节练习/习题，…压卷|Y卷，…金考典软件(，|考前更新，)…下载链接 <url>
-        new(@"新版(?:章节练习|习题)，[^，。\n]{0,16}，(?:完整优质题库\+考生笔记分享，实时更新，)?金考典软件(?:，|考前[^，。\n]{0,10}，)(?:更多考生做题笔记分享，)?下载链接\s*" + Url + @"，?[ \t]*",
-            RegexOptions.Compiled),
-        // 考前【黑钻押题】/【彩蛋】…，金考典软件考前(一周)?更新，下载链接 <url>
-        new(@"(?:考前【黑钻押题】|【彩蛋】[^，。\n]{0,10})，金考典软件考前(?:一周)?更新，下载链接\s*" + Url + @"[ \t]*",
-            RegexOptions.Compiled),
-        // safety net: any bare "下载链接 <url>"
-        new(@"下载链接\s*" + Url + @"，?[ \t]*", RegexOptions.Compiled),
-        // (jinkdoain.com 金考典题库)
-        new(@"\(\s*" + Url + @"\s+金考典题库\s*\)", RegexOptions.Compiled),
+        @"新版(?:章节练习|习题)",
+        // 顺序有意义：`考前黑钻押题` 必须排在 `黑钻押题` 前面，否则正则会从「黑钻」开始吃，
+        // 把前面的「考前」留在库里（实测 17327964 会留下「考前考前，」）。
+        @"考前(?:压卷|Y卷|押题|黑钻押题)",
+        @"(?:考前)?【(?:黑钻押题|彩蛋)】[^，。；、\n]{0,12}",
+        @"黑钻押题",
+        @"(?:完整|更多)?(?:优质)?题库\+考生笔记分享",
+        @"(?:更多)?考生做题笔记分享",
+        @"考生笔记分享",
+        @"实时更新",
+        @"下载链接",
+        @"金考典题库",
+        // 促销标记本体：金考典软件 / 金考典软件考前(一周)更新 / 用金考典软件考 / 金,考 典 APP
+        // 顺序有意义：`考前(一周)更新` 必须排在 `考` 前面，否则只吃掉「…软件考」，
+        // 把「前更新，」留在库里（实测 17327964 会留下「前更新，」）。
+        @"(?:用)?金[ \t]*[,，、]?[ \t]*考[ \t]*[,，、]?[ \t]*典[ \t]*(?:APP|软件)(?:考前(?:一周)?更新|考)?",
+        Url,
     };
+
+    /* 一整段促销：促销零件被「，,、」和空格串起来（可以只有一个零件）。 */
+    private static readonly Regex PromoRun = new(
+        @"(?:(" + string.Join("|", PromoParts) + @")[，,、 \t]*)+",
+        RegexOptions.Compiled);
+
+    /* 锚点：段里有这些词才删（金,考 典 这种写法由 金…考…典 覆盖）。 */
+    private static readonly Regex PromoAnchor = new(
+        @"金[ \t]*[,，、]?[ \t]*考[ \t]*[,，、]?[ \t]*典|j[ \t]*i[ \t]*n[ \t]*k|下载链接|黑钻押题",
+        RegexOptions.Compiled);
+
+    /* 整块括号促销（含防清洗写法）：
+       （新版章节练习，考前压卷，考生笔记分享，实时更新，金,考 典 APP，ww.ji nkaod ian.com）
+       以「新版章节练习/习题，」开头、整段在同一个括号里的，只可能是促销，连括号一起删。 */
+    private static readonly Regex ParenPromo = new(
+        @"[（(][ \t]*新版(?:章节练习|习题)[，,][^）)\n]{0,240}[）)][ \t]*",
+        RegexOptions.Compiled);
+
+    // (jinkdoain.com 金考典题库) —— 老样式，括号里的裸域名 + 题库字样
+    private static readonly Regex ParenDomain = new(
+        @"[（(][ \t]*" + Url + @"[ \t]+金考典题库[ \t]*[）)][ \t]*",
+        RegexOptions.Compiled);
+
+    private static readonly Regex[] BlockPatterns = { ParenPromo, ParenDomain };
 
     // Cosmetic tidy-up, applied ONLY to text an ad was actually removed from, so the blast
     // radius stays exactly at the ad-affected rows.
@@ -64,12 +111,37 @@ public static class AdCleaner
 
         var hits = 0;
         var result = text;
-        foreach (var rx in AdPatterns)
+
+        // 1) 括号整块（含「金,考 典 APP」这类防清洗写法）
+        foreach (var rx in BlockPatterns)
         {
             var matches = rx.Matches(result);
             if (matches.Count == 0) continue;
             hits += matches.Count;
             result = rx.Replace(result, "");
+        }
+
+        // 2) 促销段：段落里出现锚点才整段删；没有锚点的片段原样保留
+        //    （正文里的「实时更新」「考生笔记分享」永远不会被单独删掉）。
+        var runs = PromoRun.Matches(result);
+        if (runs.Count > 0)
+        {
+            var builder = new StringBuilder(result.Length);
+            var cursor = 0;
+            var removed = 0;
+            foreach (Match run in runs)
+            {
+                builder.Append(result, cursor, run.Index - cursor);
+                cursor = run.Index + run.Length;
+                if (PromoAnchor.IsMatch(run.Value)) removed++;
+                else builder.Append(result, run.Index, run.Length);
+            }
+            builder.Append(result, cursor, result.Length - cursor);
+            if (removed > 0)
+            {
+                hits += removed;
+                result = builder.ToString();
+            }
         }
 
         if (hits == 0) return (text, 0);

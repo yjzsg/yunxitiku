@@ -14215,3 +14215,112 @@ textarea,
   }
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   多选题「漏选」：正确答案里用户**没选**的那些，必须和「选了且对」分开
+   ──────────────────────────────────────────────────────────────────────────
+   用户原话：「少选的选项，无法有效区分，与错题本中一样显示不出」。
+   实测（改前，浅色主题）：多选题答案 ABC、只选 A 并确认 →
+     A  `.option.selected.correct` → 填充 rgb(236,253,245)、边框 rgb(134,239,172)
+     B/C `.option.correct`          → 填充 rgb(236,253,245)、边框 rgb(134,239,172)
+   两者 computed 值**完全相同**。根因：`.option.correct` 在文件里写在
+   `.option.selected` 之后，同一元素同时命中时直接覆盖，视觉上塌成一种。
+
+   这里给「漏选」单独一态（app.js 的 renderOptions 会同时挂 .correct 和 .missed）：
+     通道①  填充：漏选不再用实心绿，回到中性底（--surface-2）
+     通道②  边框：2px **虚线**（选中的正确项是 1px 实线）
+     通道③  文字：徽标「漏选」（选中的写「已选」）—— 颜色之外还有字
+   三个通道互相独立，所以四套主题（含只有黑白两色的 ink）都分得开：
+     ink 下 --success-500 = #000000、--surface-2 = #ededed，
+     结果是「白底 + 黑虚线 + 黑字」，而 .option.correct 是「黑底 + 白字」。
+   徽标用 --success-100/--success-800 的淡底深字（ink 下是浅灰底黑字），
+   在「绿底深绿字」的正确选项上、以及 ink 的黑底白字上都读得出来。
+   ⚠️ 选择器用 `.option.correct.missed`（0,3,0）：与 `.option.correct`（0,2,0）
+      以及 `[data-theme="…"] .option.correct`（0,3,0）同权重或更高，
+      且放在文件最后，四个主题都不需要额外覆盖。
+   ⚠️ 单选题不挂 .missed（见 app.js：用户没选就是答错，标「漏选」是误导）。
+   ══════════════════════════════════════════════════════════════════════════ */
+.option.correct.missed {
+  border: 2px dashed var(--success-500);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-weight: 700;
+}
+
+.option.correct.missed b {
+  background: var(--surface-4);
+  color: var(--success-800);
+}
+
+/* 徽标放在选项文字的 <span> 里（它本身是 flex），靠 margin-left:auto 贴右 ——
+   不动 .option 的 grid-template-columns，各主题/各断点下的列布局都不会被带跑。 */
+.option-badge {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 8px;
+  border: 1px solid var(--success-500);
+  border-radius: var(--radius-pill);
+  background: var(--success-100);
+  color: var(--success-800);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+/* 「漏选」徽标：空心虚线，和「已选」的实心药丸形状不同（不只靠颜色）。 */
+.option-badge.is-missed {
+  background: transparent;
+  border-style: dashed;
+  color: var(--success-700);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   错题本：「继续上轮」与「按筛选新建」是两个动作
+   ──────────────────────────────────────────────────────────────────────────
+   旧实现只有一个「开始训练（N 道）」按钮：N 按当前筛选算，点下去却续了旧会话
+   （实测：筛选后列表 4 题、按钮写 4 道，进去仍是 32 题的旧题单）。
+   现在有未完成的一轮时给两个按钮 + 一句说明，说清「题单已冻结、筛选只作用于新建」。
+   ══════════════════════════════════════════════════════════════════════════ */
+.wrong-filter-panel .wrong-filter-hint {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ≤760px 时筛选面板是 2 列 grid（见前面「错题本筛选面板：4 个下拉改 2×2」），
+   提示整行占满，两个按钮沿用已有的 .wrong-start-btn 整行规则。 */
+@media screen and (max-width: 760px) {
+  .wrong-filter-panel .wrong-filter-hint {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   错题本筛选面板会换行，最后一行的 42px 装不下 —— 让它按内容走
+   ──────────────────────────────────────────────────────────────────────────
+   `#wrongFilterPanel` 是 `.question-pane` 的**自动放置**子项：
+   course-head / 上下文条 / 读题区 / 操作行各占了第 1-4 行（都写了显式 grid-row），
+   它落进最后一行。而「答题卡收起」时那一行被写死成 42px
+   （`body.answer-card-collapsed .question-pane { … auto 42px }`，本意是给收起态
+   答题卡留位，可 ≤1440px 时答题卡是 position:fixed，那一行其实是空的）。
+
+   实测（改前，浅色，1220×950，答题卡收起）：
+     面板一行正好 42px，[开始训练] + 4 个下拉 + [导出全部错题] 全在一条线上 → 没事。
+   加上「继续上轮 / 按筛选新建」两个按钮和一句提示之后，1220px 必然换行：
+     panelRect 高 42、scrollHeight 136 → 多出来的两行被 `.question-pane` 的
+     `overflow: hidden` 裁掉，4 个下拉和导出按钮**整行看不见**。
+
+   改法：这一行改回 `auto`（内容多高就多高），读题区是 `minmax(0, 1fr)` 自己让位。
+   ⚠️ 只在「错题本页面板存在 + 答题卡收起 + 761~1440px」这一种组合下生效：
+      >1440px 时答题卡在流内、行数多一行（面板本来就放得下）；
+      ≤760px 时面板落在隐式 auto 行（实测也不裁）。两处都不动。
+   ══════════════════════════════════════════════════════════════════════════ */
+@media screen and (min-width: 761px) and (max-width: 1440px) {
+  body.answer-card-collapsed .question-pane:has(> #wrongFilterPanel) {
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  }
+}
+

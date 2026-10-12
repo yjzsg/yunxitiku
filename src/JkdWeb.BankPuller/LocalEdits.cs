@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -210,9 +211,10 @@ public static class LocalEdits
                         /* ⚠️ ianswercount 必须跟文本一起回写，否则「贴回 ≠ 恢复」：
                            贴回的是本地改过的题干，而 ianswercount 还停在这次拉取写进来的
                            「上游那份」上。学员端用 ExtractOptions(题干, ianswercount) 解析选项，
-                           解析出的标签数 > ianswercount 时会被截短（Take(ianswercount)）——
-                           本地那条编辑把选项从 3 个改成 4 个，贴回后第 4 个（D）就消失。
-                           口径与保存路径一致：CountOptions(title + "\n" + question)，
+                           库里那个数偏小时会把真实选项截短 —— 本地那条编辑把选项从 2 个改成 4 个，
+                           贴回后 C/D 就消失。口径与保存路径一致：
+                           CountOptions(title + "\n" + question) = 同一份规范解析的选项个数
+                           （行首标签 + 行内标签，标签唯一；见本文件下方的 ParseOptions），
                            见 src/YunxiTiku.Web/Program.cs 的 SaveEditorQuestion /
                            RecomputeAnswerCount（拉取工程不能引用网站工程，故这里重写一份算法）。 */
                         cmd.CommandText = """
@@ -344,20 +346,81 @@ public static class LocalEdits
         return value is null || value is DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
     }
 
-    /* 行首标签：换行后（或串首）A-H + 「.、．:：」之一。与网站保存路径的
-       QuestionBank.CountOptions 逐字一致 —— 口径不同会出现「保存一次 / 贴回一次
-       ianswercount 来回跳」。改了一边必须改另一边，没有共享工程可放（拉取层要能独立发布）。 */
-    private static readonly Regex OptionLabelRegex =
+    /* ---- 选项解析：与网站保存 / 还原路径 QuestionBank.CountOptions 逐字同一口径 --------------
+       行首标签 + 行内标签（行内标签必须「不是任何行首标签、且还没出现过」），标签唯一。
+       ⚠️ 口径不同会出现「保存一次 / 贴回一次 ianswercount 来回跳」：
+       老实现只数行首标签，「A. one B. two / C. three D. four」这种同行写法会数成 2
+       （真实选项 4 个）→ 贴回后学员端 Take(2) 把 C/D 直接截掉，正确答案的按钮不存在。
+       改了一边必须改另一边，没有共享工程可放（拉取层要能独立发布）。
+       scripts/verify-puller-sync.ps1 只保证两个仓库副本逐字节一致，管不了这两份镜像的算法一致性。 */
+    private static readonly Regex OptionLineLabelRegex =
         new(@"(?m)(?:^|\n)\s*([A-H])[\.\u3001\uff0e:：]\s*", RegexOptions.Compiled);
 
-    /// <summary>题干里能数出几个选项标签；2..8 之外一律当"不是选择题"记 0（同保存路径）。</summary>
-    private static int CountOptions(string text)
+    /* 行内标签前的边界：空白（会被当分隔符吃掉）或一个汉字（零宽，必须保留）。
+       分隔符后不加空白要求 —— 实测 1509100 的「132 D、66; 99」在 D 后面直接跟内容。 */
+    private static readonly Regex OptionInlineLabelRegex =
+        new(@"(?:\s|(?<=[\u4e00-\u9fff]))([A-H])[\.\u3001\uff0e:：]\s*", RegexOptions.Compiled);
+
+    /// <summary>题干里能数出几个选项；2..8 之外一律当"不是选择题"记 0（与网站保存路径同口径）。</summary>
+    private static int CountOptions(string? text)
     {
-        var labels = OptionLabelRegex.Matches(text ?? "")
-            .Select(match => match.Groups[1].Value)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count();
-        return labels is >= 2 and <= 8 ? labels : 0;
+        var count = ParseOptions(text).Count;
+        return count is >= 2 and <= 8 ? count : 0;
+    }
+
+    /// <summary>
+    /// 与网站 ParseOptions 逐字等价的解析（只取标签个数，正文不在这里用）。
+    /// 网站那份见 src/YunxiTiku.Web/Program.cs 的 QuestionBank.ParseOptions。
+    /// </summary>
+    private static List<(string Label, string Text)> ParseOptions(string? html)
+    {
+        var text = StripHtml(html).Replace("\r", "\n");
+        var lineLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var heads = new List<Match>();
+        foreach (Match match in OptionLineLabelRegex.Matches(text))
+        {
+            var label = match.Groups[1].Value.ToUpperInvariant();
+            if (!lineLabels.Add(label)) continue;   // 同标签重复出现：只有第一次算选项
+            heads.Add(match);
+        }
+
+        var options = new List<(string Label, string Text)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < heads.Count; i++)
+        {
+            var start = heads[i].Index + heads[i].Length;
+            var end = i + 1 < heads.Count ? heads[i + 1].Index : text.Length;
+            var pendingLabel = heads[i].Groups[1].Value;
+            var rest = text.Substring(start, Math.Max(0, end - start));
+            while (true)
+            {
+                Match? cut = null;
+                for (var match = OptionInlineLabelRegex.Match(rest); match.Success; match = match.NextMatch())
+                {
+                    var label = match.Groups[1].Value.ToUpperInvariant();
+                    if (lineLabels.Contains(label)) continue;                        // 正文里的标签引用
+                    if (seen.Contains(label)) continue;
+                    if (label.Equals(pendingLabel, StringComparison.OrdinalIgnoreCase)) continue;
+                    cut = match;
+                    break;
+                }
+                var head = (cut is null ? rest : rest[..cut.Index]).Trim();
+                if (head.Length > 0) options.Add((pendingLabel, head));
+                seen.Add(pendingLabel);
+                if (cut is null) break;
+                pendingLabel = cut.Groups[1].Value;
+                rest = rest[(cut.Index + cut.Length)..];
+            }
+        }
+        return options;
+    }
+
+    private static string StripHtml(string? html)
+    {
+        if (string.IsNullOrEmpty(html)) return "";
+        var text = Regex.Replace(html, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, "<.*?>", "");
+        return WebUtility.HtmlDecode(text).Trim();
     }
 
     private static Dictionary<string, CourseEdits> Load(string bankPath)

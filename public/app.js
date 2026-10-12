@@ -3265,7 +3265,10 @@ async function loadQuestions() {
   rememberQuestionChapters(items, state.currentCourse.id);
   // 老用户的映射是空的，异步补一次（不阻塞渲染）；题库版本变了也会在这里重拉
   backfillQuestionChapters(state.currentCourse.id).catch(() => { /* 补不上就算了，翻题也会慢慢攒 */ });
-  if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
+  /* 题单由会话冻结时（智能训练 / 错题训练）按**冻结顺序**排：ids 就是这一轮
+     的出题顺序，而服务端会按章节/题序重排；错题训练旧实现只冻结了「取哪些题」，
+     顺序仍是服务端顺序，续做时上次那题会跳到别的页码。 */
+  if (mergedIds && frozenSessionIdsForCurrentMode().length) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
   /* ⚠️ shuffleKey 里**没有**搜索词：搜索只做本地匹配，不再参与取题
      （上面 `q` 那条注释）。旧实现在这里带 `q`，等于每敲一个字就换一次洗牌种子、
@@ -3402,19 +3405,36 @@ function orderItemsByIds(items, ids) {
   return items.slice().sort((a, b) => (order.get(Number(a.id)) ?? Number.MAX_SAFE_INTEGER) - (order.get(Number(b.id)) ?? Number.MAX_SAFE_INTEGER));
 }
 
+/* 当前题单是不是「会话冻结」的，冻结的 ids 原样返回（按冻结顺序）。
+   smart（智能训练）与 wrong（错题训练）都在内 —— 取题路径与排序必须同判据，
+   否则会出现「取的是冻结 ids、排的是别处算出来的顺序」。纯读，不写数据。 */
+function frozenSessionIdsForCurrentMode() {
+  if (state.mode === "smart") return getSmartPracticeIds();
+  if (state.mode === "wrong") {
+    const session = activeTrainingSession();
+    if (session?.mode === "wrong") return normalizeSessionIds(session.ids);
+  }
+  return [];
+}
+
 function getModeQuestionIds(courseStore) {
   if (state.mode === "smart") return getSmartPracticeIds();
   if (state.mode === "wrong") {
-    let ids = getWrongRecordsForCurrentCourse(courseStore)
+    /* 正在一轮错题训练里（指针指着一条 mode === "wrong" 的会话）：
+       题单就是这条会话启动时冻结的 ids，**按冻结顺序**原样发下去，
+       不再和「错题页当前筛选」求交集。
+       旧实现两条都做，于是：答对一道 stage4 的题（毕业、courseStore.wrong 被删）
+       之后刷新，实际题单从 32 掉到 31，而会话里 total 还是 32；
+       切到「错误次数≥3」（列表剩 4 题）更会直接把这一轮砍成 4 题。
+       冻结的必须同时是统计分母**和**取题范围。
+       浏览错题本（指针为空，进错题本时会 clear）仍按筛选实时算 ——
+       「我现在的错题还剩哪些」要如实反映已解决，那是另一种状态（见 UI-01 的取舍）。 */
+    const frozen = frozenSessionIdsForCurrentMode();
+    if (frozen.length) return frozen;
+    return getWrongRecordsForCurrentCourse(courseStore)
       .filter(([id, item]) => wrongRecordMatchesFilter(id, item, courseStore))
       .map(([id]) => Number(id))
       .filter(Boolean);
-    const session = activeTrainingSession();
-    if (session?.mode === "wrong" && Array.isArray(session.ids) && session.ids.length) {
-      const allowed = new Set(session.ids.map(Number));
-      ids = ids.filter((id) => allowed.has(Number(id)));
-    }
-    return ids;
   }
   if (state.mode === "favorite") {
     /* 与 renderProgress 的「收藏题（本科目）」KPI / buildFavoriteGroupRows 同口径。 */
@@ -4026,15 +4046,18 @@ function syncTrainingSessionStats(session = activeTrainingSession()) {
   const done = ids.filter((id) => batchScoped
     ? normalizeAnswer(answerStore[id]).length > 0
     : courseStore.done?.[id] || normalizeAnswer(answerStore[id]).length > 0).length;
-  const verified = ids.filter((id) => {
+  const verifiedIds = new Set(ids.filter((id) => {
     const record = verifiedStore[id];
     if (!record) return false;
     return record === true || typeof record !== "object" || !("answer" in record)
       || record.answer === normalizeAnswer(answerStore[id]);
-  }).length;
-  const correct = ids.filter((id) => batchScoped
+  }).map(String));
+  const verified = verifiedIds.size;
+  /* 分子必须落在分母里：本轮的 confirmed 记录会被 resetQuestionVerification 删掉
+     （改了答案），而 results 里的判定还在 —— 各数各的会算出 >100% 的「平均正确率」。 */
+  const correct = ids.filter((id) => verifiedIds.has(String(id)) && (batchScoped
     ? resultStore[id] === true || resultStore[id]?.correct === true
-    : courseStore.correct?.[id]).length;
+    : courseStore.correct?.[id])).length;
   const wrong = ids.filter((id) => batchScoped
     ? resultStore[id] === false || resultStore[id]?.correct === false
     : courseStore.wrong?.[id] || state.storage.wrong?.[id]).length;
@@ -4827,12 +4850,31 @@ function renderWrongFilters() {
     .filter(([id]) => Number(id));
   const poolNotDue = pool.filter(([, item]) => !isReviewDue(item)).length;
   const startLabel = `开始训练（${pool.length} 道${poolNotDue ? "·含未到期" : ""}）`;
-  panel.innerHTML = `
-    <button type="button" id="wrongStartBtn" class="wrong-start-btn primary-action"
+  /* 还有没做完的一轮时，「继续上轮」和「按筛选新建」必须是**两个按钮、两个动作**。
+     旧实现只有一个按钮，数量按当前筛选算、点下去却续了旧会话 ——
+     实测：切到「错误次数≥3」（列表 4 题）后按钮写「开始训练 4 道」，
+     点进去仍是那条 32 题的旧题单。两个数字说的是两件事，只能由两个入口承担。 */
+  const openSession = wrongBookSessionForCourse();
+  const newBatchLabel = `按筛选新建（${pool.length} 道${poolNotDue ? "·含未到期" : ""}）`;
+  const newBatchTitle = pool.length
+    ? `按当前筛选冻结一轮新的 ${pool.length} 道错题（上一轮的记录会保留在训练记录里）`
+    : "当前筛选没有错题，换个筛选条件再试";
+  const startButtons = openSession
+    ? `<button type="button" id="wrongResumeBtn" class="wrong-start-btn primary-action"
+            title="继续上轮错题训练：${openSession.total} 题，已答 ${openSession.done} 题（题单在启动时冻结，不随筛选变化）">继续上轮（已答 ${openSession.done}/${openSession.total}）</button>
+    <button type="button" id="wrongStartBtn" class="wrong-start-btn primary-action secondary"
+            ${pool.length ? "" : "disabled aria-disabled=\"true\""}
+            title="${escapeHtml(newBatchTitle)}">${escapeHtml(newBatchLabel)}</button>`
+    : `<button type="button" id="wrongStartBtn" class="wrong-start-btn primary-action"
             ${pool.length ? "" : "disabled aria-disabled=\"true\""}
             title="${pool.length
               ? `把当前筛选出的 ${pool.length} 道错题全部练一遍（${poolNotDue ? `含 ${poolNotDue} 道还没到复习周期的，` : ""}单选/判断题点了选项立即出对错）`
-              : "当前筛选没有错题，换个筛选条件再试"}">${escapeHtml(startLabel)}</button>
+              : "当前筛选没有错题，换个筛选条件再试"}">${escapeHtml(startLabel)}</button>`;
+  panel.innerHTML = `
+    ${startButtons}
+    ${openSession
+      ? `<p class="wrong-filter-hint">本轮题单已冻结（${openSession.total} 题，已答 ${openSession.done} 题）· 下面这些筛选只作用于「按筛选新建」</p>`
+      : ""}
     <label>
       <span>复习</span>
       <select id="wrongReviewFilter">
@@ -4882,7 +4924,15 @@ function renderWrongFilters() {
   $("wrongCountFilter").onchange = reload;
   $("wrongPeriodFilter").onchange = reload;
   const startBtn = $("wrongStartBtn");
-  if (startBtn) startBtn.onclick = () => startWrongBookPractice().catch((err) => toast(err.message));
+  if (startBtn) {
+    /* 有旧会话时这个按钮是「按筛选新建」：走 options.newBatch，**不复用**旧会话。 */
+    startBtn.onclick = () => startWrongBookPractice(openSession ? { newBatch: true } : {})
+      .catch((err) => toast(err.message));
+  }
+  const resumeBtn = $("wrongResumeBtn");
+  if (resumeBtn && openSession) {
+    resumeBtn.onclick = () => continueTrainingSession(openSession.id).catch((err) => toast(err.message));
+  }
   const exportBtn = $("exportWrongBtn");
   if (exportBtn) exportBtn.onclick = () => exportAllWrongQuestions().catch((err) => toast(err.message));
 }
@@ -5059,16 +5109,37 @@ function renderOptions(q) {
     return;
   }
   const selected = new Set((state.answers[q.id] || "").split("").filter(Boolean));
+  const answerText = String(q.answer || "");
+  const revealed = shouldRevealCurrentAnswer(q);
+  /* 「漏选」只在**多选题**上标，而且要求这一轮真的作答过：
+     · 单选题只有一个正确答案，用户没选它就是「答错」—— 把那个正确答案标成
+       「漏选」等于说「你漏了一个」，是误导（用户点名不要）。
+     · 一个选项都没选（背题模式 / 交卷时这题空着）时也谈不上「漏」，
+       全标上漏选会让人以为答错了。 */
+  const multi = isMultiChoice(q);
+  const attempted = selected.size > 0;
   for (const option of q.options || []) {
     const el = document.createElement("button");
     el.className = "option";
     el.dataset.label = option.label;
-    if (selected.has(option.label)) el.classList.add("selected");
-    if (shouldRevealCurrentAnswer(q)) {
-      if ((q.answer || "").includes(option.label)) el.classList.add("correct");
-      if (selected.has(option.label) && !(q.answer || "").includes(option.label)) el.classList.add("wrong");
-    }
-    el.innerHTML = `<b>${escapeHtml(option.label)}</b><span>${escapeHtml(option.text)}</span>`;
+    const chosen = selected.has(option.label);
+    const isAnswer = revealed && answerText.includes(option.label);
+    if (chosen) el.classList.add("selected");
+    if (isAnswer) el.classList.add("correct");
+    if (chosen && revealed && !answerText.includes(option.label)) el.classList.add("wrong");
+    /* 正确答案里用户没选的那些：.correct 之外再挂一个 .missed。
+       改前 `.option.correct` 写在 `.option.selected` 之后，两者同时存在时
+       视觉完全一样 —— 多选答案 ABC、用户只选 A，B/C（漏选）和 A（选对）
+       都是同一块绿，用户看不出漏了哪几个（错题本共用这个 renderOptions，
+       所以那里也一样看不出来）。 */
+    if (isAnswer && !chosen && multi && attempted) el.classList.add("missed");
+    /* 文字徽标：墨水屏主题靠边框/填充区分状态，颜色不可靠，必须有一句话说得清
+       「已选」还是「漏选」。只给多选题挂（见上）。 */
+    const badge = revealed && multi && isAnswer
+      ? (chosen ? "已选" : (attempted ? "漏选" : ""))
+      : "";
+    el.innerHTML = `<b>${escapeHtml(option.label)}</b><span>${escapeHtml(option.text)}`
+      + `${badge ? `<em class="option-badge${badge === "漏选" ? " is-missed" : ""}">${badge}</em>` : ""}</span>`;
     el.onclick = () => chooseOption(q, option.label);
     $("options").appendChild(el);
   }
@@ -5231,7 +5302,10 @@ function saveSubjectiveAnswer(q, answer) {
   answerStore[q.id] = answer;
   courseStore.answers ||= {};
   courseStore.answers[q.id] = answer;
-  resetQuestionVerification(q.id);
+  /* 只有答案**真的变了**才撤销上一次的确认判定。
+     旧实现无条件撤销：立即反馈下再点一次同一个选项（答案没变）也会先删掉
+     verified 再重新判定 —— 于是「一次复习」被记成两次，stage 连跳两档。 */
+  if (answer !== previous) resetQuestionVerification(q.id);
   if (normalizeAnswer(answer)) courseStore.done[q.id] = true;
   else delete courseStore.done[q.id];
   if (wasFilled !== isFilled) state.lastMarkedQuestionId = q.id;
@@ -5273,7 +5347,9 @@ function chooseOption(q, label) {
   answerStore[q.id] = answer;
   courseStore.answers ||= {};
   courseStore.answers[q.id] = answer;
-  resetQuestionVerification(q.id);
+  /* 同 saveSubjectiveAnswer：答案没变就不撤销确认（多选题取消再选回同一个、
+     或单选重复点同一项都会被当成「没变」）—— 否则同一份答案会被判两次。 */
+  if (answer !== previous) resetQuestionVerification(q.id);
   if (answer) courseStore.done[q.id] = true;
   else delete courseStore.done[q.id];
   if (answer !== previous) state.lastMarkedQuestionId = q.id;
@@ -5288,9 +5364,68 @@ function chooseOption(q, label) {
   renderQuestion();
 }
 
+/* ── 判定记账表：SRS 的幂等键 ────────────────────────────────────────────
+   markResult 会推进 SRS（stage±1 / count±1），而它被三条入口反复调到：
+   「点选项 → 立即反馈自动判定」「点确认答案」「提交答卷」。同一次判定被记
+   多遍，一次复习就能跨好几档、甚至直接毕业。实测（改前）：
+     · 立即反馈里连点两次同一个 A（答案没变）→ stage 0→1→2、count 3→2→1
+     · 练习交卷后改选错项 → chooseOption 里两次 markResult → count 4→6
+     · 练习交卷后再点一次「提交答卷」→ stage 3→4、history 1→2
+
+   幂等键 = {scopeId, qid, answerSnapshot}：
+     · scopeId —— 「本轮作答作用域」。有训练会话（智能训练 / 错题训练）时是
+       `session:<会话 id>`（续做、刷新都还在同一轮）；没有会话（练习 / 收藏 /
+       错题本浏览 / 考场）时是 `round:<模式>:<科目>:<日期>`。
+       为什么要带它：SRS 的档位间隔是 [1,2,4,7,15,30] 天，**同一天里**对同一道题
+       重复同一个答案不构成新的复习事件；跨天（或换到另一轮训练）再答对才算。
+       不带 scope 的话「一道题一辈子只推进一次」，SRS 就等于废掉。
+     · qid —— 每题只留**最近一次已记账**的判定。
+     · answerSnapshot —— 改选 = 新快照 = **新的练习事件**（用户确实重新作答了，
+       对错与 SRS 都该跟着变）；同一个快照在同一轮里判定多少次都只记一次。
+
+   为什么落盘（courseStore.resultLog）而不是只放内存：练习交卷 → 刷新 → 再交卷
+   这条路径上内存表已经没了，而 verified 记录会被 resetQuestionVerification 删掉，
+   靠它当账本挡不住重复交卷。 */
+const RESULT_LOG_LIMIT = 2000;
+
+function currentAnswerScopeId(courseId = state.currentCourse?.id) {
+  const session = activeScopedAnswerSession();
+  if (session?.id) return `session:${session.id}`;
+  return `round:${state.mode || "practice"}:${Number(courseId || 0)}:${todayKey()}`;
+}
+
+/* 这个 {scope, 题号, 答案快照} 是不是已经记过账了（记过就不再推进 SRS）。 */
+function resultAlreadyRecorded(courseStore, q, scopeId) {
+  const entry = courseStore?.resultLog?.[q.id];
+  if (!entry) return false;
+  return entry.scope === scopeId && entry.answer === currentAnswerSnapshot(q.id);
+}
+
+function recordResultEntry(courseStore, q, scopeId) {
+  if (!courseStore) return;
+  courseStore.resultLog ||= {};
+  courseStore.resultLog[q.id] = { scope: scopeId, answer: currentAnswerSnapshot(q.id), at: nowText() };
+  trimResultLog(courseStore);
+}
+
+/* 账本每题一条，正常上限就是科目题量；但 round scope 里带日期，换天/换模式会
+   不断产生新条目，所以还是设个上限：超了就把最老的裁掉（单轮训练远达不到这个量级，
+   被裁掉的只会是很久以前、不会再被判定的轮次）。 */
+function trimResultLog(courseStore) {
+  const log = courseStore?.resultLog;
+  if (!log) return;
+  const keys = Object.keys(log);
+  if (keys.length <= RESULT_LOG_LIMIT) return;
+  keys.sort((a, b) => String(log[a]?.at || "").localeCompare(String(log[b]?.at || "")));
+  keys.slice(0, keys.length - RESULT_LOG_LIMIT).forEach((id) => delete log[id]);
+}
+
 function markResult(q) {
   const courseStore = userCourseStore();
   const isRight = isAnswerCorrect(q);
+  /* 幂等：本轮（scopeId）里这道题的这个答案快照只记一次账（见上面的注释）。 */
+  const scopeId = currentAnswerScopeId();
+  const logged = resultAlreadyRecorded(courseStore, q, scopeId);
   /* 会话作用域的题单（智能训练 / 错题训练）：对错记进会话自己的 results，
      否则 syncTrainingSessionStats 从会话里数不到正确率（错题训练会恒显示 0%）。 */
   const session = activeScopedAnswerSession();
@@ -5308,19 +5443,27 @@ function markResult(q) {
     const wasWrongTracked = !!courseStore.wrong?.[q.id];
     courseStore.correct[q.id] = true;
     delete courseStore.wrong[q.id];
+    /* `logged` = 本轮这道题的这个答案快照**已经推进过 SRS** 了：
+       下面的「在不在错题本里」照旧同步（那是幂等的），但复习档位不再推第二次。 */
     if (state.mode === "wrong") {
-      const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
-      record.courseId ||= state.currentCourse?.id;
-      record.lastReviewAt = nowText();
-      record.stage = Math.min(REVIEW_INTERVAL_DAYS.length - 1, reviewStage(record) + 1);
-      record.resolved = record.stage >= REVIEW_INTERVAL_DAYS.length - 1;
-      record.resolvedAt = record.resolved ? nowText() : "";
-      /* 答对一次就减一次「错了几次」的计数。count 只增不减的话 count≥2 会永久成立，
-         选题时永远把它当反复错处理。 */
-      record.count = record.resolved ? 1 : Math.max(1, Number(record.count || 1) - 1);
-      state.storage.wrong[q.id] = record;
-      if (record.resolved) delete courseStore.wrong[q.id];
-      else courseStore.wrong[q.id] = true;
+      if (logged) {
+        /* 已记账：只把归属摆正（courseStore.wrong 上面已经删过了），不动 stage/count。 */
+        if (state.storage.wrong[q.id]?.resolved) delete courseStore.wrong[q.id];
+        else if (state.storage.wrong[q.id]) courseStore.wrong[q.id] = true;
+      } else {
+        const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
+        record.courseId ||= state.currentCourse?.id;
+        record.lastReviewAt = nowText();
+        record.stage = Math.min(REVIEW_INTERVAL_DAYS.length - 1, reviewStage(record) + 1);
+        record.resolved = record.stage >= REVIEW_INTERVAL_DAYS.length - 1;
+        record.resolvedAt = record.resolved ? nowText() : "";
+        /* 答对一次就减一次「错了几次」的计数。count 只增不减的话 count≥2 会永久成立，
+           选题时永远把它当反复错处理。 */
+        record.count = record.resolved ? 1 : Math.max(1, Number(record.count || 1) - 1);
+        state.storage.wrong[q.id] = record;
+        if (record.resolved) delete courseStore.wrong[q.id];
+        else courseStore.wrong[q.id] = true;
+      }
     } else if (wasWrongTracked || state.storage.wrong[q.id]) {
       /* 练习 / 智能训练 / 考场答对**错题本里的题**：与错题训练走同一套 SRS 推进
          （stage+1、练满 5 档才 resolved、count 递减、lastReviewAt 刷新）。
@@ -5331,17 +5474,25 @@ function markResult(q) {
          必须留这个例外 —— 旧数据里大量存在 resolved=true 但 stage<5 的记录
          （正是旧版这条分支写出来的：毕业时不动 stage），直接套 SRS 会把它们全部打回错题本。 */
       const record = ensureWrongReviewFields(state.storage.wrong[q.id] || {}, q);
-      record.courseId ||= state.currentCourse?.id;
-      const alreadyResolved = !!record.resolved;
-      record.lastReviewAt = nowText();
-      record.stage = Math.min(REVIEW_INTERVAL_DAYS.length - 1, reviewStage(record) + 1);
-      record.resolved = alreadyResolved || record.stage >= REVIEW_INTERVAL_DAYS.length - 1;
-      record.resolvedAt = record.resolved ? (record.resolvedAt || nowText()) : "";
-      /* 同错题训练：答对一次减一次「错了几次」。 */
-      record.count = record.resolved ? 1 : Math.max(1, Number(record.count || 1) - 1);
-      state.storage.wrong[q.id] = record;
-      if (record.resolved) delete courseStore.wrong[q.id];
-      else courseStore.wrong[q.id] = true;
+      if (logged) {
+        /* 已记账：不改档位/计数，只补 courseId（老记录缺它会被错题本丢掉）。 */
+        record.courseId ||= state.currentCourse?.id;
+        state.storage.wrong[q.id] = record;
+        if (record.resolved) delete courseStore.wrong[q.id];
+        else courseStore.wrong[q.id] = true;
+      } else {
+        record.courseId ||= state.currentCourse?.id;
+        const alreadyResolved = !!record.resolved;
+        record.lastReviewAt = nowText();
+        record.stage = Math.min(REVIEW_INTERVAL_DAYS.length - 1, reviewStage(record) + 1);
+        record.resolved = alreadyResolved || record.stage >= REVIEW_INTERVAL_DAYS.length - 1;
+        record.resolvedAt = record.resolved ? (record.resolvedAt || nowText()) : "";
+        /* 同错题训练：答对一次减一次「错了几次」。 */
+        record.count = record.resolved ? 1 : Math.max(1, Number(record.count || 1) - 1);
+        state.storage.wrong[q.id] = record;
+        if (record.resolved) delete courseStore.wrong[q.id];
+        else courseStore.wrong[q.id] = true;
+      }
     } else {
       /* 从来没错过的题：答对只是「答对」，不产生错题记录。 */
       delete courseStore.wrong[q.id];
@@ -5353,18 +5504,25 @@ function markResult(q) {
     /* 落盘前补上 courseId：缺了它，下一次读错题本时这条记录会被旧版的严格相等过滤丢掉，
        只能从 courseStore.wrong 合成 stub，stage/count/lastReviewAt 全丢 → 永远不到期。 */
     record.courseId ||= state.currentCourse?.id;
-    const wasResolved = !!record.resolved;
-    record.at = nowText();
-    record.wrongAt = nowText();
-    record.lastReviewAt = nowText();
-    /* 答错回退一档，不清零：旧实现 stage = 0 会把已经练到 15 天间隔的题一次手滑打回
-       1 天间隔，等于前面的复习全部作废。真正「毕业」过的题（resolved）才重新从 0 开始。 */
-    record.stage = wasResolved ? 0 : Math.max(0, reviewStage(record) - 1);
-    record.count = Number(record.count || 0) + 1;
-    record.resolved = false;
-    record.resolvedAt = "";
-    state.storage.wrong[q.id] = record;
+    if (logged) {
+      /* 已记账：同一个答案快照不再加一次「错了几次」。 */
+      state.storage.wrong[q.id] = record;
+    } else {
+      const wasResolved = !!record.resolved;
+      record.at = nowText();
+      record.wrongAt = nowText();
+      record.lastReviewAt = nowText();
+      /* 答错回退一档，不清零：旧实现 stage = 0 会把已经练到 15 天间隔的题一次手滑打回
+         1 天间隔，等于前面的复习全部作废。真正「毕业」过的题（resolved）才重新从 0 开始。 */
+      record.stage = wasResolved ? 0 : Math.max(0, reviewStage(record) - 1);
+      record.count = Number(record.count || 0) + 1;
+      record.resolved = false;
+      record.resolvedAt = "";
+      state.storage.wrong[q.id] = record;
+    }
   }
+  /* 记账：只有真的推进过（或本来就没记过）才写 ---- 写进去的是这一轮的幂等依据。 */
+  if (!logged) recordResultEntry(courseStore, q, scopeId);
   syncCurrentTrainingSession(q.id);
 }
 
@@ -5846,6 +6004,9 @@ function markQuestionVerified(q) {
   const record = {
     answer: currentAnswerSnapshot(q.id),
     at: nowText(),
+    /* 主观题标记：累计正确率只算客观题，主观题单列（见 confirmedSets）。
+       老记录没有这个字段，读的时候按「判过客观题必然落 correct/wrong」兜底。 */
+    subjective: isSubjective(q),
   };
   const verifiedStore = currentPracticeVerifiedStore();
   verifiedStore[q.id] = record;
@@ -5924,7 +6085,7 @@ function renderProgress() {
       ${renderStudyDashboard(courseStore, stats, analysisItems)}
       <div class="analysis-grid">
         <div><b>${stats.done}</b><span>已做试题</span></div>
-        <div title="${escapeHtml(rateKpiTitle(stats))}"><b>${rate}%</b><span>正确率（已确认）</span></div>
+        <div title="${escapeHtml(rateKpiTitle(stats))}"><b>${rate}%</b><span>客观题正确率（已确认）</span></div>
         <div><b>${wrongTotal}</b><span>待解决错题</span></div>
         <div title="${escapeHtml(`当前科目 ${state.currentCourse?.name || ""} 的收藏；全部科目共 ${favAllCourses} 题`)}"><b>${favTotal}</b><span>收藏题（本科目）</span></div>
         ${/* 笔记记录里**没有** courseId（加字段要迁移，见产品决策），所以这一格
@@ -6380,11 +6541,14 @@ function buildStudyReportSummary(courseStore, stats, items) {
     done: stats.done,
     correct: stats.correct,
     verified: stats.verified,
+    /* 主观题单列：日报的 rate 与 KPI 现在是同一个客观题集合，主观题只报数不参与除法。 */
+    subjective: Number(stats.subjective || 0),
     wrong: stats.wrong,
     rate,
     due,
     focus,
-    summary: `当前进度快照：累计已做 ${stats.done} 题 · 确认正确率 ${rate}%（答对 ${stats.correct} / 已确认 ${stats.verified}） · ${focus}`,
+    summary: `当前进度快照：累计已做 ${stats.done} 题 · 客观题确认正确率 ${rate}%（答对 ${stats.correct} / 已确认 ${stats.verified}）`
+      + `${Number(stats.subjective || 0) ? ` · 主观题 ${stats.subjective} 道单列` : ""} · ${focus}`,
   };
 }
 
@@ -6426,8 +6590,10 @@ function getWeakChapterRows(courseStore, items) {
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
   /* 分母只算「已确认」（与 confirmedRate 同一口径）。
      旧实现拿「已做」当分母 —— 这一屏同时出现三处分母不同的百分比
-     （本题 1/2=50%、今日卡片 1/1=100%、会话 1/1=100%）。 */
-  const verifiedIds = new Set(Object.keys(courseStore.verified || {}).map(Number));
+     （本题 1/2=50%、今日卡片 1/1=100%、会话 1/1=100%）。
+     现在取**客观题确认集合**（confirmedSets，与 KPI / 按章节表同一集合）：
+     主观题确认不进客观正确率，也不会把薄弱章节的分母稀释掉。 */
+  const verifiedIds = new Set(Array.from(confirmedSets(courseStore).objective).map(Number));
   const byChapter = new Map();
   items.forEach((item) => {
     if (!isQuestionDone(courseStore, item.id)) return;
@@ -6662,9 +6828,38 @@ async function continueSmartPractice() {
 function wrongBookSessionId(courseId = state.currentCourse?.id) {
   /* 稳定 id。进错题本会 clearActiveTrainingSession()，如果用 trainingSessionId()
      的时间戳+随机串，退出再进就是全新的一轮、进度看着丢了。
-     稳定 id 让同一科目同一天的错题训练始终是同一条记录 → 再点「开始训练」走的是
-     continueTrainingSession（题单不缩水、跳到上次那一题）。 */
+     稳定 id 让同一科目同一天的**第一批**错题训练是同一条记录 → 再点「继续上轮」
+     续的就是它（题单不缩水、跳到上次那一题）。 */
   return `wrong-${Number(courseId || 0)}-${todayKey()}`;
+}
+
+/* 「按筛选新建」用的 id：**不复用**已有 id。
+   旧实现无论如何都用那个稳定 id，于是「新建」会把上一批的题单/作答整批覆盖 ——
+   用户点「按筛选新建 4 题」时，上一轮 32 题的记录就没了。新批次另起一个 id，
+   旧记录原样留在训练记录里（可回看、可继续）。 */
+function nextWrongBookSessionId(courseId = state.currentCourse?.id) {
+  const base = wrongBookSessionId(courseId);
+  const used = new Set((state.storage.trainingSessions || []).map((item) => item.id));
+  if (!used.has(base)) return base;
+  for (let n = 2; n < 100; n += 1) {
+    const id = `${base}-${n}`;
+    if (!used.has(id)) return id;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+/* 本科目下**未完成**的错题训练（最近更新的一条）。判据与
+   resumableTrainingSession 一致：不限于今天 —— 昨天没做完的一轮照样该能续。
+   用途：错题本面板分「继续上轮」/「按筛选新建」两个动作、以及 startWrongBookPractice
+   在没显式要求新建时续上它。**不用于取题**：取题只看指针（见 getModeQuestionIds）。 */
+function wrongBookSessionForCourse(courseId = state.currentCourse?.id) {
+  for (const session of getTrainingSessionsForCourse(courseId)) {
+    if (session.mode !== "wrong") continue;
+    if (!normalizeSessionIds(session.ids).length) continue;
+    syncTrainingSessionStats(session);
+    if (isTrainingSessionOpen(session)) return session;
+  }
+  return null;
 }
 
 /* 题池 = 当前筛选结果（复用 wrongRecordMatchesFilter，与错题本列表同一套口径）。
@@ -6728,27 +6923,39 @@ async function startWrongBookPractice(options = {}) {
   if (!state.currentCourse) return;
   /* 空态里的「立即训练全部 N 道」= 忽略「复习」这一项开练。页面筛选也必须一起回到
      「全部」：只把题池放宽而列表仍被「到期」滤着的话，题确实发下去了，界面还是空的
-     （列表 = 错题 ∩ session.ids，而筛选后一道都不剩）—— 文案承诺了多少道就该看到多少道。 */
+     —— 文案承诺了多少道就该看到多少道。 */
   if (options.ignoreReview) {
     state.wrongFilters = { ...(state.wrongFilters || {}), review: "all" };
   }
-  const sessionId = wrongBookSessionId();
-  /* 同一天同一科目的错题训练只有一条记录：上一次没做完就接着做（题单是启动时冻结的
-     快照，不会因为「刚答对的题变成已复习」而在中途缩水）。做完了才重新冻结一批。 */
-  if (!options.restart) {
-    const existing = (state.storage.trainingSessions || []).find((item) => item.id === sessionId);
-    if (existing && isTrainingSessionOpen(existing)) {
-      await continueTrainingSession(sessionId);
+  /* 两个动作必须分开（见 renderWrongFilters）：
+     · 默认 → 本科目还有没做完的一轮就**续**它（保护进度，不重复冻结题单）；
+     · options.newBatch（按钮上的「按筛选新建 N 道」）→ 明确要求按当前筛选开新的一批：
+       先确认「离开旧批次」，旧记录**保留**（见 nextWrongBookSessionId）。
+     旧实现只有一个入口：按钮按当前筛选写「开始训练 N 道」，点下去却续了旧会话 ——
+     实测切到「错误次数≥3」（列表 4 题）后点它，进去仍是那 32 题的旧题单。 */
+  if (!options.newBatch) {
+    const openSession = wrongBookSessionForCourse();
+    if (openSession) {
+      await continueTrainingSession(openSession.id);
+      return;
+    }
+  } else {
+    /* 「按筛选新建」是**不可逆的上下文切换**（虽然旧记录保留），所以显式确认一次。
+       按钮上写着两件事（继续上轮 N/M、按筛选新建 K 道），别让用户点错了才发现。 */
+    const openSession = wrongBookSessionForCourse();
+    if (openSession && !confirm(`按当前筛选新建一轮错题训练？\n\n上一轮还没做完（已答 ${openSession.done}/${openSession.total} 题）。它的记录会保留在训练记录里，随时可以继续。`)) {
       return;
     }
   }
   /* 题池 = 当前筛选结果的**全部**，不截断（旧实现的 .slice(0, 20) 已去掉）。
-     按钮上的 N 就是这里的 ids.length：筛出 8 道就练 8 道，筛出 200 道就练 200 道。 */
+     按钮上的 N 就是这里的 ids.length：筛出 8 道就练 8 道，筛出 200 道就练 200 道。
+     ⚠️ 筛选只作用于**新建批次**：正在训练时取题只看会话冻结的 ids（getModeQuestionIds）。 */
   const ids = buildWrongBookPracticeIds(userCourseStore(), { ignoreReview: !!options.ignoreReview });
   if (!ids.length) {
     toast(options.ignoreReview ? "错题本里还没有错题" : "当前筛选没有错题，换个筛选条件试试");
     return;
   }
+  const sessionId = nextWrongBookSessionId();
   resetGeneratedPracticeFilters();
   upsertTrainingSession({
     id: sessionId,
@@ -6820,9 +7027,10 @@ async function startDueWrongReview() {
      「到期」，今天刚错的题（stage 0 的到期日是次日）在错题本里全都不见 ——
      用户点「错题本」却看不到自己刚做错的题。
      而且这一写本来就是多余的：本次复习的题池由上面的 session.ids 冻结，
-     getModeQuestionIds 的 wrong 分支已经做了「错题 ∩ session.ids」。
-     只保留 status="active"：会话进行中列表按「未解决」看更稳（用户之前若把状态
-     切到「已解决」，due 会话的 ids ∩ 已解决 = 空集，会看到一面空列表）。 */
+     getModeQuestionIds 在「指针指着一条 wrong 会话」时直接发 session.ids
+     （不再和页面筛选求交集），筛选只作用于「按筛选新建」。
+     只保留 status="active"：中途去错题本浏览时「状态」还是默认的「未解决」，
+     不会停在上一次选的「已解决」上。 */
   state.wrongFilters = { ...(state.wrongFilters || {}), status: "active" };
   setCoursePicker(false);
   await loadQuestions();
@@ -7044,9 +7252,10 @@ function buildSprintPracticeIds(courseStore = userCourseStore()) {
 function renderDeepAnalysis(courseStore, items = state.questions) {
   const answeredIds = new Set(Object.keys(courseStore.done || {}).map(Number));
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
-  /* 分母取「已确认」，与 confirmedRate / KPI 同一口径；
-     「已做」仍然单独统计并显示（它是有用的另一件事：做过多少题）。 */
-  const verifiedIds = new Set(Object.keys(courseStore.verified || {}).map(Number));
+  /* 分母取「客观题确认集合」，与 KPI 同一口径（confirmedSets）：
+     确认记录必须还对得上当前答案，主观题不进客观正确率表 —— 否则同一屏里
+     按章节表的分母会和 KPI 的分母对不上。 */
+  const verifiedIds = new Set(Array.from(confirmedSets(courseStore).objective).map(Number));
   const byChapter = new Map();
   const byType = new Map();
   const ensureChapterRow = (node, depth) => {
@@ -9669,17 +9878,86 @@ function confirmedRate(correct, verified) {
   return v ? Math.round((Number(correct || 0) / v) * 100) : 0;
 }
 
+/* 一条确认记录对「这题当前的作答」还成不成立（快照校验）。
+   · true（无快照时代的老记录）→ 成立
+   · 带 answer 的对象 → 必须等于这题当前的答案快照
+     当前答案为空按「没有反证」处理：考场交卷旧版只写判定不写科目作答，
+     而「答案真的被清掉」的路径都会一并删掉确认记录（resetQuestionVerification /
+     resetPractice），所以这里不会把改过的答案误判成有效。
+   · 其它形状 → 不成立 */
+function verificationRecordApplies(record, currentAnswer) {
+  if (record === true) return true;
+  if (!record || typeof record !== "object") return false;
+  if (!("answer" in record)) return true;
+  const current = normalizeAnswer(currentAnswer);
+  if (!current) return true;
+  return String(record.answer || "") === current;
+}
+
+/* 把一条确认记录分类：'objective' | 'subjective' | ''（没确认 / 快照已失效）。
+   老记录没有 subjective 标记：客观题判过必然落 correct 或 wrong 之一，
+   两边都不在的按主观题确认处理（旧数据里主观题确认就是这么进来的）。 */
+function classifyVerification(record, currentAnswer, hasVerdict) {
+  if (!verificationRecordApplies(record, currentAnswer)) return "";
+  if (!record || typeof record !== "object") return "objective";
+  if (record.subjective === true) return "subjective";
+  if (record.subjective === undefined && !hasVerdict) return "subjective";
+  return "objective";
+}
+
+/* 「累计确认正确率」的**唯一分子分母来源**：客观题确认集合 + 主观题确认集合。
+   为什么必须重做：旧口径分子取 Object.keys(correct).length、
+   分母取 Object.keys(verified).length —— 两个集合可以毫不相干。实测（改前）：
+     · 新账号考场两题全对（只写 correct、不写 verified）→ 2 / 0 = 0%
+     · 再确认一道主观题（只写 verified）→ 2 / 1 = **200%**
+   规则（分子 ⊆ 分母，主观题不进分母）：
+     ① 有确认记录、记录里的答案快照和当前作答一致、且不是主观题 → 计入客观题集合；
+     ② 老记录没有 subjective 标记时按「有没有对错判定」兜底分类（见上）；
+     ③ 旧数据里 `correct` 有、确认记录**从来没有过**的题 → 按**历史判定**计入客观集合：
+        考场交卷在旧版只写 correct/wrong、从不写 verified，只认 verified 的话
+        老账号会整片显示 0%（把「历史口径不同」当成「一道都没答对」）。
+     ④ resultLog 里记过账（新口径判定过）的题**不享受 ③** —— 那说明确认记录是被
+        resetQuestionVerification 清掉的（答案已经改了），不能算「已确认」。
+   不做 clamp：0% / 200% 是集合不一致的症状，压到 100% 只是把症状盖住。 */
+function confirmedSets(data) {
+  const objective = new Set();
+  const subjective = new Set();
+  if (data) {
+    const answers = data.answers || {};
+    const verified = data.verified || {};
+    const resultLog = data.resultLog || {};
+    Object.entries(verified).forEach(([id, record]) => {
+      const kind = classifyVerification(record, answers[id], !!(data.correct?.[id] || data.wrong?.[id]));
+      if (!kind) return;
+      (kind === "subjective" ? subjective : objective).add(String(id));
+    });
+    Object.keys(data.correct || {}).forEach((id) => {
+      if (verified[id] || resultLog[id]) return;
+      objective.add(String(id));
+    });
+  }
+  return { objective, subjective };
+}
+
 function getCourseStats(courseId = state.currentCourse?.id) {
   const data = peekCourseStore(courseId);
+  /* 分子分母取**同一个集合**：客观题确认集合（见 confirmedSets）。
+     分子只数这个集合里 correct 的题 —— correct 只会被非主观题的 markResult 写，
+     所以天然不含主观题，也不可能超过分母。主观题单独给一个数（subjective），
+     不混进正确率。 */
+  const sets = confirmedSets(data);
+  const confirmedCorrect = Array.from(sets.objective).filter((id) => !!data.correct?.[id]).length;
   return {
     /* 「已做」= done ∪ correct ∪ wrong（见 isQuestionDone）。
        只数 done 的话，旧版考场交卷 / 导入的老数据会显示「已做 0」，
        和练习页顶部、章节树的口径又对不上 —— 这次一并统一。 */
     done: doneQuestionIds(data).size,
-    correct: Object.keys(data.correct || {}).length,
-    /* verified = 真正的分母。给 KPI 用，顺带让调用方拿到分子分母两个数，
-       不用各自再写一遍除法。 */
-    verified: Object.keys(data.verified || {}).length,
+    correct: confirmedCorrect,
+    /* verified = 真正的分母（客观题确认集合）。给 KPI 用，顺带让调用方拿到
+       分子分母两个数，不用各自再写一遍除法。 */
+    verified: sets.objective.size,
+    /* 主观题单列：已确认的主观题数量，不计入上面的正确率。 */
+    subjective: sets.subjective.size,
     wrong: Object.keys(data.wrong || {}).length,
   };
 }
@@ -9687,9 +9965,13 @@ function getCourseStats(courseId = state.currentCourse?.id) {
 /* 当前科目 KPI 那格的完整口径文案（值 + 分子/分母），
    title 里给鼠标用户 / 读屏一个「这 50% 是怎么算出来的」。 */
 function rateKpiTitle(stats) {
-  const unverified = Math.max(0, Number(stats.done || 0) - Number(stats.verified || 0));
-  return `答对 ${stats.correct} ÷ 已确认 ${stats.verified} = ${confirmedRate(stats.correct, stats.verified)}%`
-    + `（已做 ${stats.done} 题，其中 ${unverified} 题还没点「确认答案」，不计入正确率）`;
+  const unverified = Math.max(0,
+    Number(stats.done || 0) - Number(stats.verified || 0) - Number(stats.subjective || 0));
+  const subjectiveNote = Number(stats.subjective || 0)
+    ? `；主观题 ${stats.subjective} 道已确认，单独人工核对，不计入这个正确率`
+    : "";
+  return `客观题确认正确率：答对 ${stats.correct} ÷ 已确认 ${stats.verified} = ${confirmedRate(stats.correct, stats.verified)}%`
+    + `（已做 ${stats.done} 题，其中 ${unverified} 题还没点「确认答案」，不计入正确率${subjectiveNote}）`;
 }
 
 /* 上一题 / 下一题的可用性。
@@ -9853,6 +10135,17 @@ function confirmExamSubmit() {
   return confirm(`确定交卷吗？\n\n已作答 ${answered} 题，还有 ${todo} 题未作答。交卷后不能再修改答案。`);
 }
 
+/* 本轮答案快照指纹：交卷时记下来，用来分出「重复交卷」和「改了答案再交」。
+   只比内存里的这份快照（刷新之后 state.submitted 本来就没了，不会再走这条路）。 */
+function currentRoundAnswerKey(mode = state.mode, courseId = state.currentCourse?.id) {
+  const store = currentPracticeAnswerStore();
+  return JSON.stringify([
+    Number(courseId || 0),
+    mode,
+    state.questions.map((item) => [Number(item.id || 0), normalizeAnswer(store[item.id])]),
+  ]);
+}
+
 async function submitPaper(autoSubmit = false) {
   if (state.submitting) {
     toast("正在提交，请稍候");
@@ -9878,6 +10171,16 @@ async function submitPaper(autoSubmit = false) {
   const submitCourseId = Number(state.currentCourse?.id || 0);
   const submitQuestions = state.questions;
   const submitExam = state.exam;
+  /* 练习模式原来**没有任何**「已交卷」守卫：再点一次「提交答卷」就再走一遍判定、
+     再记一条 history（实测 stage 3→4、history 1→2）。
+     但练习交卷后**可以**改答案再交 —— 那是新的一轮判定，必须放行。
+     所以判据不是 state.submitted，而是「本轮已交卷 **且** 答案快照没变过」。 */
+  if (submitMode !== "exam" && state.submitted
+    && state.submittedAnswerKey === currentRoundAnswerKey(submitMode, submitCourseId)) {
+    toast("本轮已提交，答案没有变化");
+    if (state.lastSubmitResult) showSubmitResult(state.lastSubmitResult);
+    return;
+  }
   if (submitMode !== "exam" && !submitQuestions.some((item) => hasAnswer(item.id))) {
     toast("请先选择或填写答案");
     return;
@@ -9902,6 +10205,7 @@ async function submitPaper(autoSubmit = false) {
       return;
     }
     state.submitted = true;
+    state.submittedAnswerKey = currentRoundAnswerKey(submitMode, submitCourseId);
     let correct = 0;
     let checked = 0;
     let score = 0;
@@ -9941,8 +10245,19 @@ async function submitPaper(autoSubmit = false) {
          于是同一道题：答题卡上是黄的（有作答）、统计行写「已完成 0 题」、
          「新题」口径（countNeverDone）还把它当从没做过再推一遍、
          「薄弱章节」里也永远看不见 —— 四个口径各说各话。 */
-      if (submitMode === "exam") userCourseStore().done[item.detail.id] = true;
-      if (submitMode !== "exam") markQuestionVerified(item.detail);
+      /* 考场交卷也要落「长期作答 + 长期确认」。
+         旧实现只写 done + markResult（correct/wrong），`verified` 一条都不写 ——
+         于是新账号考场两题全对，累计 KPI 显示「correct 2 / verified 0 = 0%」；
+         再确认一道主观题（只写 verified）就成了 2/1 = 200%（见 getCourseStats）。
+         答案快照必须一起写：确认记录的 answer 要能和「这题当前的作答」对上，
+         否则下次读统计时会被当成失效快照。 */
+      if (submitMode === "exam") {
+        const examStore = userCourseStore();
+        examStore.done[item.detail.id] = true;
+        examStore.answers ||= {};
+        examStore.answers[item.detail.id] = currentAnswerSnapshot(item.detail.id);
+      }
+      markQuestionVerified(item.detail);
       if (!itemSubjective) markResult(item.detail);
       if (submitMode !== "exam") recordPracticeActivity(item.detail, { verified: true });
     }
@@ -9999,11 +10314,14 @@ async function submitPaper(autoSubmit = false) {
     /* 弹出成绩面板。练习模式（真题/章节练习这类纸质卷）原来只弹一个几秒就消失的
        toast，考试模式只有顶栏一行小字 —— 用户要的是「交卷后算出具体得分」，
        所以两种模式都给一个能看清构成的持久面板。 */
-    showSubmitResult({
+    /* 记一份：非考试模式「答案没变又点交卷」时直接把同一份成绩面板再打开，
+       不再重复判分、不再重复记 history。 */
+    state.lastSubmitResult = {
       score, totalScore, correct, checked,
       total: submitQuestions.length,
       rate, subjective, autoSubmit,
-    });
+    };
+    showSubmitResult(state.lastSubmitResult);
   } finally {
     if (state.submitToken === submitToken) {
       state.submitting = false;
@@ -10067,6 +10385,10 @@ function resetPractice() {
     delete courseStore.wrong?.[key];
     delete courseStore.verified?.[id];
     delete courseStore.verified?.[key];
+    /* 本轮判定也一笔勾销：答案都清空了，记账表再留着会让「重新做一遍」推不动 SRS。
+       只清**本轮记账**，SRS 自己的 state.storage.wrong（stage/count）不动。 */
+    delete courseStore.resultLog?.[id];
+    delete courseStore.resultLog?.[key];
   }
   // Keep course-level progress for other chapters intact.
   scheduleSave();
