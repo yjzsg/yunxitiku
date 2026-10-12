@@ -391,8 +391,12 @@ body.is-admin .admin-only {
 
 /* 原来这里是 `.login-check` / `.login-check input` —— 给那个假复选框（checked disabled、
    不参与任何逻辑）做样式。控件本身已删，换成一行说明文字；
-   大字提示搬到 .login-hint 上，保留原来那条说明的视觉重量。 */
-.login-hint {
+   大字提示搬到 .login-hint 上，保留原来那条说明的视觉重量。
+   ⚠️ 全量扫描补的：搬家时把老规则里的 `!important` 丢掉了，而 `.login-panel small`（(0,1,1)，
+   L388）比 `.login-hint`（(0,1,0)）高一级 —— color 一直用不上，实测 computed 是
+   `--muted`(rgb(94,108,130)) 而不是这里的 `--text-4`(#475569)。
+   补父选择器提到 (0,2,0) 解决，不加 !important。 */
+.login-panel .login-hint {
   display: block;
   margin-top: -4px;
   color: var(--text-4);
@@ -2275,8 +2279,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   font-size: 13px;
 }
 
-/* 抽屉：比一般 .modal-panel 宽一点，列表自己滚动，别把整页撑长。 */
-.exam-history-modal {
+/* 抽屉：比一般 .modal-panel 宽一点，列表自己滚动，别把整页撑长。
+   ⚠️ 全量扫描补的：`.exam-history-modal`（(0,1,0)）与 `.modal-panel`（(0,1,0)，L3686）同特异性
+   但写在前面 —— 后写的 `.modal-panel { width: min(520px,100%) }` 一直赢，实测宽 520px，
+   「宽一点」从来没生效（≤760px 时又被 L8541 的 `min(100%, 100vw - 20px)` 赢走）。
+   把类名并进同一个 compound 提到 (0,2,0) 就压得住，桌面端 520→720，手机端宽度不变。 */
+.modal-panel.exam-history-modal {
   width: min(720px, 100%);
   max-height: calc(100dvh - 48px);
 }
@@ -13877,7 +13885,13 @@ textarea,
     min-height: 44px !important;
   }
 
-  .theme-switch button {
+  /* ⚠️ 全量扫描（_cssscan.js）补的：`.theme-switch button`（(0,1,1)）压不过 L11920 的
+     `.main-nav .account-box .account-menu .theme-switch button`（(0,4,1) + !important），
+     账号菜单里那组按钮一直是 34px —— 登录页那组（.theme-switch-login）反而是好的，
+     所以只靠肉眼看首页会漏掉。按本项目的老规矩（同特异性 + 写在后面）补一条同特异性的。
+     L11923 的 `height: 34px !important` 不用动：min-height 在盒模型里压得过 height。 */
+  .theme-switch button,
+  .main-nav .account-box .account-menu .theme-switch button {
     min-height: 44px !important;
   }
 }
@@ -13924,7 +13938,12 @@ textarea,
     overflow-x: visible;
   }
 
-  .admin-view-btn {
+  /* ⚠️ 全量扫描补的：`.admin-view-btn`（(0,1,0)）被 `.admin-toolbar button`（(0,1,1)，
+     见 L4401 / L4616 / L8220）整组压过 —— 6 个页签一直是 54px 的小药丸，不是三列。
+     补一个父选择器提到 (0,2,0)，跨过 L4401/L4616/L8220 那三条。
+     注意 L8220 的 `.admin-toolbar .admin-view-btn[data-admin-view="banks"]`（(0,3,0)）是
+     「更新」页签的既有特例（它要 max-content 宽度），**有意保留**，不在这里跟着改。 */
+  .admin-toolbar .admin-view-btn {
     flex: 1 1 calc(33.333% - 8px);
     min-width: 0;
   }

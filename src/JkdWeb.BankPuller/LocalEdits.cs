@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 namespace JkdWeb.BankPuller;
@@ -161,6 +162,8 @@ public static class LocalEdits
     /// 把某门课的本地改动贴回目标库（拉取、重新导出之后调用）。
     /// 会先读一遍当前库里的值刷新"服务端版本"，所以"还原"始终回到最新的服务端内容。
     /// 题目在新库里已不存在时保留记录（界面显示为"题目已下线"），不静默丢弃。
+    /// 贴回时 <c>ianswercount</c> 跟着本地文本一起重算（口径同保存路径）——
+    /// 否则贴回的题干有 4 个选项、计数还停在上游那份的 3，学员端会把第 4 个选项截掉。
     /// </summary>
     public static ReapplyOutcome Reapply(string bankPath, string targetDb, int courseId)
     {
@@ -194,18 +197,36 @@ public static class LocalEdits
                         orphans++;
                         continue;
                     }
+                    var title = edit.Title ?? server.Value.Title;
+                    var question = edit.Question ?? server.Value.Question;
+                    /* 记录里 Title/Question 都在（编辑器保存时总会写全）→ 贴回来的就是本地明文，
+                       按保存路径同一口径重算；缺任一个（老记录 / 手改过叠层文件）→ 贴回的文本里
+                       混着「服务端原样」那一份（可能是密文），算出来的数不可信，传 NULL 不动它，
+                       绝不写 0 —— 0 会让学员端不过滤，把题干里的假选项也画出来。 */
+                    var localTextComplete = edit.Title is not null && edit.Question is not null;
                     using (var cmd = conn.CreateCommand())
                     {
                         cmd.Transaction = tx;
+                        /* ⚠️ ianswercount 必须跟文本一起回写，否则「贴回 ≠ 恢复」：
+                           贴回的是本地改过的题干，而 ianswercount 还停在这次拉取写进来的
+                           「上游那份」上。学员端用 ExtractOptions(题干, ianswercount) 解析选项，
+                           解析出的标签数 > ianswercount 时会被截短（Take(ianswercount)）——
+                           本地那条编辑把选项从 3 个改成 4 个，贴回后第 4 个（D）就消失。
+                           口径与保存路径一致：CountOptions(title + "\n" + question)，
+                           见 src/YunxiTiku.Web/Program.cs 的 SaveEditorQuestion /
+                           RecomputeAnswerCount（拉取工程不能引用网站工程，故这里重写一份算法）。 */
                         cmd.CommandText = """
                             update coursesubject
-                               set ctitle=@t, cquestion=@q, canswer=@a, cdescription=@d, dupdatedate=@at
+                               set ctitle=@t, cquestion=@q, canswer=@a, cdescription=@d,
+                                   ianswercount=coalesce(@ac, ianswercount), dupdatedate=@at
                              where isubjectid=@id
                             """;
-                        cmd.Parameters.AddWithValue("@t", edit.Title ?? server.Value.Title);
-                        cmd.Parameters.AddWithValue("@q", edit.Question ?? server.Value.Question);
+                        cmd.Parameters.AddWithValue("@t", title);
+                        cmd.Parameters.AddWithValue("@q", question);
                         cmd.Parameters.AddWithValue("@a", edit.Answer ?? server.Value.Answer);
                         cmd.Parameters.AddWithValue("@d", edit.Description ?? server.Value.Description);
+                        cmd.Parameters.AddWithValue("@ac",
+                            localTextComplete ? CountOptions(title + "\n" + question) : DBNull.Value);
                         cmd.Parameters.AddWithValue("@at", edit.EditedAt ?? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
                         cmd.Parameters.AddWithValue("@id", subjectId);
                         cmd.ExecuteNonQuery();
@@ -321,6 +342,22 @@ public static class LocalEdits
         cmd.Parameters.AddWithValue("@id", chapterId);
         var value = cmd.ExecuteScalar();
         return value is null || value is DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
+    }
+
+    /* 行首标签：换行后（或串首）A-H + 「.、．:：」之一。与网站保存路径的
+       QuestionBank.CountOptions 逐字一致 —— 口径不同会出现「保存一次 / 贴回一次
+       ianswercount 来回跳」。改了一边必须改另一边，没有共享工程可放（拉取层要能独立发布）。 */
+    private static readonly Regex OptionLabelRegex =
+        new(@"(?m)(?:^|\n)\s*([A-H])[\.\u3001\uff0e:：]\s*", RegexOptions.Compiled);
+
+    /// <summary>题干里能数出几个选项标签；2..8 之外一律当"不是选择题"记 0（同保存路径）。</summary>
+    private static int CountOptions(string text)
+    {
+        var labels = OptionLabelRegex.Matches(text ?? "")
+            .Select(match => match.Groups[1].Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        return labels is >= 2 and <= 8 ? labels : 0;
     }
 
     private static Dictionary<string, CourseEdits> Load(string bankPath)
