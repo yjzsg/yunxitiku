@@ -12,6 +12,8 @@ const state = {
   analysisLoadingCourseId: 0,
   /* 外挂章节映射：subjectId → 课本章名数组（一题多章）。见 loadChapterMap。 */
   chapterMap: new Map(),
+  /* qid → chapterId 本地缓存的进程内镜像（键是 courseId）。见 questionChapterCache。 */
+  qcMaps: new Map(),
   currentCourse: null,
   currentChapter: null,
   currentIndex: -1,
@@ -1399,6 +1401,10 @@ async function changePassword() {
 async function enterApp(user, options = {}) {
   if (options.rememberSession !== false) localStorage.setItem(SESSION_USER_KEY, user);
   await loadUserData(user);
+  /* 上次关页时没存上的改动（sendBeacon 兜底失败，见 flushPendingSaveBeacon）。
+     必须在 applyQuestionWindow / restoreLastCourse 之前接回来，否则界面先按
+     服务器那份旧数据渲染一遍，再被替换掉。 */
+  applyPendingSaveDraft();
   // 题量/题序是题单窗口的一部分，要在 restoreLastCourse → loadQuestions 之前落位
   applyQuestionWindow();
   $("loginView").classList.add("hidden");
@@ -1416,6 +1422,9 @@ async function enterApp(user, options = {}) {
     state.mode = RESTORABLE_MODES.includes(savedMode) ? savedMode : "training";
   }
   await loadCourses();
+  /* 老包里的 questionChapter（qid→chapterId）摘到本地缓存并置空 ——
+     必须放在 loadCourses 之后：缓存要记题库版本（changedAt），而版本号来自课程列表。 */
+  migrateQuestionChapterToLocalCache();
   // 外挂章节映射是选题逻辑的输入，尽量在进入应用时取好；取不到也不挡进入（回落成空表）。
   await loadChapterMap();
   if (isAdmin()) {
@@ -1428,7 +1437,12 @@ async function enterApp(user, options = {}) {
   } else {
     await restoreLastCourse();
   }
-  scheduleSave();
+  /* ⚠️ 这里**刻意没有** scheduleSave()。
+     旧实现无条件存一次（当时是为了落 profile.lastLoginAt），后果是每次打开/刷新
+     都回写整包：服务器 revision 前进 → 之前打开的标签页保存时 409；
+     而且 326KB 的包（questionChapter 占 99.8%）每次开页都完整 POST 一次。
+     现在只有**真有改动**的流程才 markStorageDirty（lastLoginAt 这类只改内存的
+     字段会随下一次真实改动一起落盘）。 */
 }
 
 async function logout() {
@@ -1535,6 +1549,28 @@ function peekCourseStore(courseId = state.currentCourse?.id) {
   return state.storage.courses[String(courseId || "global")] || { answers: {}, done: {}, correct: {}, wrong: {}, verified: {}, lastSubjectId: 0 };
 }
 
+/* 一道题「累计做过」的判据 = done ∪ correct ∪ wrong。
+   为什么不能只看 done：老数据里大量题目只有 correct/wrong 而没有 done ——
+     · 考场交卷旧实现只写 correct/wrong（本文件 submitPaper 已修）；
+     · 导入 / 从旧版本同步过来的包同样只带 correct/wrong。
+   只认 done 会让这些题在「新题」（countNeverDone）里被当成从没做过再推一遍，
+   在「薄弱章节」里永远不出现。这是**有意的修正**：老用户的薄弱章节会因此变多。 */
+function isQuestionDone(courseStore, id) {
+  if (!courseStore || id == null) return false;
+  return !!(courseStore.done?.[id] || courseStore.correct?.[id] || courseStore.wrong?.[id]);
+}
+
+/* 同一判据的集合版：给需要遍历全部已做题的地方用（章节树的「已做」归集）。 */
+function doneQuestionIds(courseStore) {
+  const ids = new Set();
+  for (const key of ["done", "correct", "wrong"]) {
+    const store = courseStore?.[key];
+    if (!store || typeof store !== "object") continue;
+    for (const id of Object.keys(store)) if (store[id]) ids.add(id);
+  }
+  return ids;
+}
+
 function setSaveStatus(status) {
   state.saveStatus = status || "idle";
   updateSaveStatusUi();
@@ -1573,6 +1609,76 @@ function scheduleSave() {
   }, 450);
 }
 
+/* 隐藏页/关页时兜底保存失败的落点：整包写进 localStorage，
+   下次开页提示并补存（见 applyPendingSaveDraft）。 */
+const PENDING_SAVE_KEY = "yunxi-pending-save";
+
+function stashPendingSaveDraft(reason) {
+  if (!state.user) return false;
+  try {
+    localStorage.setItem(PENDING_SAVE_KEY, JSON.stringify({
+      user: state.user,
+      revision: state.storageRevision || "",
+      reason: reason || "",
+      at: nowText(),
+      storage: state.storage,
+    }));
+    return true;
+  } catch (err) {
+    console.warn("未保存改动落地失败", err);
+    return false;
+  }
+}
+
+function readPendingSaveDraft() {
+  try {
+    const raw = localStorage.getItem(PENDING_SAVE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && parsed.storage ? parsed : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function clearPendingSaveDraft() {
+  try { localStorage.removeItem(PENDING_SAVE_KEY); } catch (_err) { /* 清不掉不影响使用 */ }
+}
+
+/* 开页时把上次没存上的改动接回来。三种情况：
+     ① 草稿内容 = 服务器那份（别的标签页后来存成功了）→ 直接清掉，不打扰用户；
+     ② 服务器还停在同一 revision → 当场补存（数据找回来了）；
+     ③ 服务器已经前进（别的标签页/设备写过）→ 不覆盖，把草稿摆进「数据冲突」
+        对话框让用户自己决定（导出备份 / 加载服务器最新数据）。
+   为什么不无条件覆盖：那会把别人的新改动盖掉。 */
+function applyPendingSaveDraft() {
+  const draft = readPendingSaveDraft();
+  if (!draft) return false;
+  if (String(draft.user || "") !== String(state.user || "")) { clearPendingSaveDraft(); return false; }
+  let same = false;
+  try { same = JSON.stringify(draft.storage) === JSON.stringify(state.storage); } catch (_err) { same = false; }
+  if (same) { clearPendingSaveDraft(); return false; }
+  if (String(draft.revision || "") !== String(state.storageRevision || "")) {
+    openConflictDialog(
+      { message: `上次有未保存的改动（${draft.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。` },
+      { user: draft.user, revision: draft.revision || "", storage: draft.storage, at: draft.at || "" },
+    );
+    return false;
+  }
+  state.storage = normalizeStorage(draft.storage);
+  state.storageDirty = true;
+  setSaveStatus("dirty");
+  toast(`上次有未保存的改动（${draft.at || ""}），正在补存…`);
+  saveUserData().then(() => {
+    clearPendingSaveDraft();
+    toast("上次未保存的改动已补存");
+  }).catch((err) => {
+    /* 补存失败：草稿留着，下次开页再试；冲突照走冲突对话框。 */
+    handleUserSaveError(err);
+  });
+  return true;
+}
+
 function flushPendingSaveBeacon() {
   if (!state.user || !state.storageDirty) return false;
   try {
@@ -1583,9 +1689,17 @@ function flushPendingSaveBeacon() {
     if (ok) {
       state.storageDirty = false;
       setSaveStatus("idle");
+      clearPendingSaveDraft();
+      return true;
     }
-    return ok;
-  } catch (_err) {
+    /* sendBeacon 有 64KB 的 body 上限（超了直接返回 false），页面正在卸载时也可能发不出去。
+       旧实现到这里只返回 false 就完了 —— 保存状态写着「未保存」，可页面已经关了，
+       用户根本看不到，改动就这么无声丢掉。现在把整包落到 localStorage，
+       下次开页提示并补存。 */
+    stashPendingSaveDraft(`beacon_rejected:${blob.size}b`);
+    return false;
+  } catch (err) {
+    stashPendingSaveDraft("beacon_error:" + (err?.message || ""));
     return false;
   }
 }
@@ -1604,6 +1718,8 @@ function saveUserData() {
     state.storageRevision = result.revision || state.storageRevision;
     state.storageDirty = false;
     setSaveStatus("idle");
+    /* 这里**不**清「待保存草稿」：它可能来自另一个标签页（localStorage 是共享的），
+       清掉就等于替那个页面把改动丢了。开页时按内容/revision 判定（见 applyPendingSaveDraft）。 */
     return result;
   };
   state.saveChain = (state.saveChain || Promise.resolve()).catch(() => {}).then(run);
@@ -1633,10 +1749,12 @@ function summarizeStorage(data = {}) {
   return { done, wrong, favorite, notes, examDrafts };
 }
 
-function openConflictDialog(err) {
+function openConflictDialog(err, snapshot = null) {
   if (state.conflictOpen) return;
   state.conflictOpen = true;
-  state.conflictLocalSnapshot = {
+  /* snapshot 给「开页时发现上次没存上的草稿」用：那会儿 state.storage 是服务器那份，
+     本地草稿另有其人（见 applyPendingSaveDraft）。 */
+  state.conflictLocalSnapshot = snapshot || {
     user: state.user,
     revision: state.storageRevision || "",
     storage: JSON.parse(JSON.stringify(state.storage || {})),
@@ -1698,6 +1816,8 @@ async function reloadServerUserDataFromConflict() {
     await loadUserData(state.user);
     state.storageDirty = false;
     setSaveStatus("idle");
+    /* 用户选了「以服务器为准」→ 本地那份待保存草稿也不必再提醒。 */
+    clearPendingSaveDraft();
     closeConflictDialog();
     if (isAdmin()) {
       await renderAdminDashboard();
@@ -1718,6 +1838,9 @@ function keepLocalConflictDraft() {
   closeConflictDialog();
   setSaveStatus("error");
   state.storageDirty = true;
+  /* 用户已经明确「保留本地改动，暂不覆盖服务器」→ 那份待保存草稿（可能来自
+     上次关页的兜底保存）同样按保留处理，不用每次开页再弹一次。 */
+  clearPendingSaveDraft();
   toast("已保留本地改动，暂不覆盖服务器。建议先导出草稿");
 }
 
@@ -1814,6 +1937,13 @@ function renderCourses() {
 }
 
 async function selectCourse(course, options = {}) {
+  /* 末尾那次 scheduleSave 只在**真的有改动**时才做。
+     旧实现无条件存一次，而 selectCourse 在每次开页都会被 restoreLastCourse 调到 ——
+     于是「单纯刷新一下」也会 POST 整包 → 服务器 revision 前进 →
+     之前打开的标签页保存时 409（实测改前 reload 一次 = 1 个 POST、revision 前进）。
+     注意最后一次改动是 profile.lastChapterId 的写回（见下面 restoreChapterId 分支），
+     所以快照必须取在函数开头。 */
+  const storageBefore = JSON.stringify(state.storage);
   const transitionId = (state.modeTransitionId || 0) + 1;
   state.modeTransitionId = transitionId;
   stopExamTimer();
@@ -1875,7 +2005,7 @@ async function selectCourse(course, options = {}) {
   if (transitionId !== state.modeTransitionId) return;
   if (!isAdmin() && options.closePicker) setCoursePicker(false);
   updatePickerHint();
-  scheduleSave();
+  if (JSON.stringify(state.storage) !== storageBefore) scheduleSave();
 }
 
 /* 最近一次**成功**读到章节的科目 id。切科目失败时用它判断
@@ -1924,6 +2054,9 @@ async function loadChapters() {
   state.chapters = chapters;
   state.expandedChapters = new Set();
   state.chapterAutoExpanded = false;
+  /* 题库版本（course.changedAt）和本地映射缓存对不上时重拉 —— 题库更新后
+     学员端的章节映射不刷新就是这个原因。不 await：别挡住章节树渲染。 */
+  backfillQuestionChapters(courseId).catch(() => { /* 补不上就算了，翻题也会慢慢攒 */ });
   renderChapters();
 }
 
@@ -2094,50 +2227,180 @@ function chapterTotalCount(chapter) {
   return Number(chapter.questionCount || 0) + chapter.children.reduce((sum, child) => sum + chapterTotalCount(child), 0);
 }
 
-/* ── 章节树的「已做」统计 ────────────────────────────────────────────────
-   courseStore.done 只记了题目 id，不知道它属于哪一章，所以先建一份
-   qid → chapterId 的映射。列表接口每道题都带 chapterId，顺手存下来即可
-   （纯数字对，几千题也就几十 KB，跟着用户数据一起同步）。 */
-function rememberQuestionChapters(items, courseStore = userCourseStore()) {
+/* ── 章节树的「已做」统计：qid → chapterId 映射（**纯本地缓存**）────────
+   courseStore.done 只记了题目 id，不知道它属于哪一章，所以需要一份
+   qid → chapterId 的映射来把「已做」归到章上。
+
+   ⚠️ 这份映射以前存在 state.storage.courses[cid].questionChapter 里、跟着用户数据
+   同步。2026-10 改成纯本地缓存（localStorage: yunxi-qcmap-<courseId>）。为什么：
+     ① 它是 /api/question-chapters 的**只读派生物**，却占满了同步包 ——
+        实测空账号只碰 2 门课，state.storage 就有 325,833 B，其中 99.8% 是它
+        （course20 163,449 B/9155 条、course21 161,511 B/9035 条）；
+     ② 同步包一大，sendBeacon 的 64KB body 上限永远顶穿（实测 325,877 B → 返回 false），
+        隐藏页兜底保存**永远失败**；
+     ③ 每次开页/翻题都回写整包 → 服务器 revision 前进 → 开第二个标签页必 409。
+   缓存与题库版本挂钩（bankChangedAt ← /api/courses 的 changedAt）：
+   版本不一致就重拉，顺手修掉「题库更新后学员端章节映射不刷新」。 */
+const QC_MAP_VERSION = 1;
+const QC_MAP_PREFIX = "yunxi-qcmap-";
+
+function questionChapterCacheKey(courseId) {
+  return `${QC_MAP_PREFIX}${Number(courseId || 0)}`;
+}
+
+/* 进程内再存一份：章节树每次重绘都要读这个映射，160KB 的 JSON 不能反复 parse。 */
+function questionChapterCache(courseId, options = {}) {
+  const id = Number(courseId || 0);
+  state.qcMaps ||= new Map();
+  if (!id) return { version: QC_MAP_VERSION, bankChangedAt: "", filled: false, map: {} };
+  if (!options.reload && state.qcMaps.has(id)) return state.qcMaps.get(id);
+  let record = null;
+  try {
+    const raw = localStorage.getItem(questionChapterCacheKey(id));
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object" && parsed.map && typeof parsed.map === "object") {
+      record = {
+        version: Number(parsed.version || 0),
+        bankChangedAt: String(parsed.bankChangedAt || ""),
+        filled: !!parsed.filled,
+        map: parsed.map,
+      };
+    }
+  } catch (err) {
+    console.warn("章节映射缓存读取失败，按空表处理", err);
+  }
+  record ||= { version: QC_MAP_VERSION, bankChangedAt: "", filled: false, map: {} };
+  state.qcMaps.set(id, record);
+  return record;
+}
+
+function writeQuestionChapterCache(courseId, record) {
+  const id = Number(courseId || 0);
+  if (!id || !record) return;
+  record.version = QC_MAP_VERSION;
+  state.qcMaps ||= new Map();
+  state.qcMaps.set(id, record);
+  try {
+    localStorage.setItem(questionChapterCacheKey(id), JSON.stringify({
+      version: record.version,
+      bankChangedAt: record.bankChangedAt || "",
+      /* filled 必须跟着缓存走、不能留在同步包里：留在服务器上的话，
+         换一台设备打开时「以为自己已经补过映射了」而本地缓存是空的，
+         章节树的「已做」就永远是 0。 */
+      filled: !!record.filled,
+      map: record.map,
+    }));
+  } catch (err) {
+    /* 配额满 / 隐私模式：退回内存缓存，本次会话照用，只是下次开页要重拉 */
+    console.warn("章节映射缓存写入失败", err);
+  }
+}
+
+function courseBankChangedAt(courseId) {
+  const id = Number(courseId || 0);
+  const course = (state.courses || []).find((item) => Number(item.id) === id);
+  return String(course?.changedAt || "");
+}
+
+/* 题库版本变了 → 缓存作废。
+   任一侧拿不到版本号时**不**判过期：不能因为「暂时读不到」就把用户的映射当废纸重拉。 */
+function questionChapterCacheStale(courseId) {
+  const cache = questionChapterCache(courseId);
+  const current = courseBankChangedAt(courseId);
+  if (!cache.bankChangedAt || !current) return false;
+  return cache.bankChangedAt !== current;
+}
+
+/* 列表接口每道题都带 chapterId，顺手记进本地缓存。
+   只在真有增删时写 localStorage；**不再 scheduleSave()** —— 映射不进同步包了，
+   所以「打开页面就回写整包」这条链在这里断掉。 */
+function rememberQuestionChapters(items, courseId = state.currentCourse?.id) {
   if (!Array.isArray(items) || !items.length) return;
-  const map = (courseStore.questionChapter ||= {});
+  const id = Number(courseId || 0);
+  if (!id) return;
+  const cache = questionChapterCache(id);
   let changed = false;
   for (const item of items) {
     const qid = Number(item?.id || 0);
     const cid = Number(item?.chapterId || 0);
     if (!qid || !cid) continue;
-    if (map[qid] !== cid) { map[qid] = cid; changed = true; }
+    if (cache.map[qid] !== cid) { cache.map[qid] = cid; changed = true; }
   }
-  if (changed) scheduleSave();
+  if (!changed) return;
+  const current = courseBankChangedAt(id);
+  if (current) cache.bankChangedAt = current;
+  writeQuestionChapterCache(id, cache);
 }
 
 /* 一次性把整门课的 qid → chapterId 补全。
    老用户第一次打开时映射是空的，章节树的「已做」会全是 0；
    靠翻题慢慢攒太慢（得一道道点过去）。接口只回 [qid, cid, ...] 的扁平数组，
    一门课几千题也就百来 KB，比拉完整题目列表小一个数量级。
-   每门课只拉一次，用 questionChapterFilled 记住（即使某门课一道题都没有也记，
-   免得每次开都白拉一次）。 */
+   每门课只补一次（缓存里的 filled），题库版本变了再补一次。 */
 async function backfillQuestionChapters(courseId) {
   const id = Number(courseId || 0);
   if (!id) return;
-  const store = userCourseStore(id);
-  if (store.questionChapterFilled) return;
+  const cache = questionChapterCache(id);
+  if (cache.filled && !questionChapterCacheStale(id)) return;
   const res = await api(`/api/question-chapters?courseId=${id}`);
   const pairs = Array.isArray(res?.pairs) ? res.pairs : [];
-  const map = (store.questionChapter ||= {});
-  for (let i = 0; i + 1 < pairs.length; i += 2) map[pairs[i]] = pairs[i + 1];
-  store.questionChapterFilled = true;
-  scheduleSave();
+  /* 拉取期间 rememberQuestionChapters 可能又写了新条目 → 重读一份最新的，别覆盖掉。 */
+  const fresh = questionChapterCache(id, { reload: true });
+  fresh.map = {};
+  for (let i = 0; i + 1 < pairs.length; i += 2) fresh.map[pairs[i]] = pairs[i + 1];
+  fresh.filled = true;
+  fresh.bankChangedAt = courseBankChangedAt(id) || fresh.bankChangedAt || "";
+  writeQuestionChapterCache(id, fresh);
   if (Number(state.currentCourse?.id) === id) renderChapters();
 }
 
-/* 整棵树的「已做」数：把 done 里的题按映射归到章，再逐级累加到父章。
-   一次算完整棵树 —— 每个节点各遍历一遍 done 的话，树一大就明显卡。 */
-function buildChapterDoneIndex(roots, courseStore = userCourseStore()) {
-  const map = courseStore.questionChapter || {};
-  const done = courseStore.done || {};
+/* 老数据迁移：questionChapter 以前跟着用户数据同步，现在改成纯本地缓存。
+   首次加载时把它摘到本地缓存，并把同步包里的字段**置空**（保留字段名，
+   免得还在跑旧版本页面的标签页写回来时结构对不上）；
+   questionChapterFilled 直接从同步包里删掉（理由见 writeQuestionChapterCache）。
+   迁移会标脏一次（必须的：服务器上那份 326KB 的老包得瘦下来），之后不再回写。 */
+function migrateQuestionChapterToLocalCache() {
+  const courses = state.storage?.courses || {};
+  let dirty = false;
+  for (const [key, store] of Object.entries(courses)) {
+    if (!store || typeof store !== "object") continue;
+    const legacy = store.questionChapter;
+    if (legacy && typeof legacy === "object" && Object.keys(legacy).length) {
+      const cache = questionChapterCache(key, { reload: true });
+      if (!Object.keys(cache.map).length) {
+        /* 本地还没有这份映射：整份接过来。
+           filled 一律给 false（不认老包的 questionChapterFilled），理由见下面。 */
+        cache.map = { ...legacy };
+        cache.filled = false;
+      } else {
+        /* 本地已有映射（这台机器上补过）：只补缺，不覆盖 */
+        for (const [qid, cid] of Object.entries(legacy)) if (cache.map[qid] == null) cache.map[qid] = cid;
+      }
+      /* 迁移进来的映射是**旧包的产物**，无从判断它对应哪一版题库 ——
+         统一标成「未补全」，让下一次 backfill 带着当前 changedAt 验证一遍。
+         代价只有升级后首次打开多拉一次 /api/question-chapters（~160KB/门课），
+         换来的是「题库更新后学员端章节映射不刷新」这条老问题对所有老用户也一并修好。 */
+      writeQuestionChapterCache(key, cache);
+      store.questionChapter = {};
+      dirty = true;
+    }
+    if (store.questionChapterFilled !== undefined) {
+      delete store.questionChapterFilled;
+      dirty = true;
+    }
+  }
+  if (dirty) scheduleSave();
+  return dirty;
+}
+
+/* 整棵树的「已做」数：把已做的题按映射归到章，再逐级累加到父章。
+   一次算完整棵树 —— 每个节点各遍历一遍的话，树一大就明显卡。
+   「已做」同样用 done ∪ correct ∪ wrong：只认 done 的话，老数据里
+   「做过但只有 correct/wrong」的题在章节树上一个数都不算。 */
+function buildChapterDoneIndex(roots, courseStore = userCourseStore(), courseId = state.currentCourse?.id) {
+  const map = questionChapterCache(courseId).map;
   const direct = new Map();
-  for (const qid of Object.keys(done)) {
+  for (const qid of doneQuestionIds(courseStore)) {
     const cid = Number(map[qid] || 0);
     if (!cid) continue;
     direct.set(cid, (direct.get(cid) || 0) + 1);
@@ -2324,9 +2587,9 @@ async function loadQuestions() {
   let items = await fetchQuestionsByIds(params, mergedIds, () =>
     requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId);
   if (requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId) return;
-  // 记下 qid → chapterId，章节树的「已做/总数」靠它
-  rememberQuestionChapters(items, courseStore);
-  // 老用户的映射是空的，异步补一次（不阻塞渲染）
+  // 记下 qid → chapterId，章节树的「已做/总数」靠它（纯本地缓存，不进同步包）
+  rememberQuestionChapters(items, state.currentCourse.id);
+  // 老用户的映射是空的，异步补一次（不阻塞渲染）；题库版本变了也会在这里重拉
   backfillQuestionChapters(state.currentCourse.id).catch(() => { /* 补不上就算了，翻题也会慢慢攒 */ });
   if (state.mode === "smart" && mergedIds) items = orderItemsByIds(items, mergedIds);
   const shouldShuffle = orderValue === "random" || state.mode === "exam";
@@ -2596,14 +2859,15 @@ function todayServedIds(courseId = state.currentCourse?.id) {
 
 /* 未做题按二级章节轮转取：每轮每章最多 1 道。
    这是「训练其他」的关键一步——不做的话 24 道新题可能全砸在同一个章节里。
-   排除条件要同时看 done 和 wrong：正常答题路径下错题一定也是 done
-   （记答案时 courseStore.done[id] = true），但导入的旧数据不一定，两边都判才稳。 */
+   排除条件用 isQuestionDone（done ∪ correct ∪ wrong）：正常答题路径下
+   错题/对题一定也是 done，但导入的旧数据和**旧版考场交卷**只写 correct/wrong，
+   三样都判才稳，否则「新题」里会混进早就做过的题。 */
 function takeFreshByChapter(items, courseStore, quota, blocked, seen, randomize = false) {
   if (quota <= 0) return [];
   const groups = new Map();
   items.forEach((item) => {
     const id = Number(item.id);
-    if (!id || blocked.has(id) || courseStore.done?.[id] || courseStore.wrong?.[id]) return;
+    if (!id || blocked.has(id) || isQuestionDone(courseStore, id)) return;
     const path = chapterPathForId(item.chapterId).slice(0, 2);
     const key = Number(path[path.length - 1]?.id || item.chapterId || 0);
     if (!groups.has(key)) groups.set(key, []);
@@ -2718,13 +2982,13 @@ function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
   return { ids: planIds, counts };
 }
 
-/* 「新题」的真实口径 = 累计从没答过（done / wrong 里都没有）。
+/* 「新题」的真实口径 = 累计从没答过（done / correct / wrong 里都没有，见 isQuestionDone）。
    为什么不能用段④的 fresh 当新题数：段①到期、段②反复错都一定是做过的题，
    但段③「薄弱章节」是从「没做对」的题里取的，里面大量是从没答过的 ——
    实测同一轮 60 题里 54 题从没答过，卡片却写「新题42」，用户会低估新题量。
    段④的 fresh 保留原义（只数保底那一段），另给一个 neverDone 专供卡片文案。 */
 function countNeverDone(ids, courseStore) {
-  return (ids || []).filter((id) => !courseStore.done?.[id] && !courseStore.wrong?.[id]).length;
+  return (ids || []).filter((id) => !isQuestionDone(courseStore, id)).length;
 }
 
 function buildSmartPracticeIds(courseStore = userCourseStore(), options = {}) {
@@ -3148,10 +3412,18 @@ async function loadCurrentQuestion() {
   if (!item.detail) return;
   if (mode === "exam") saveExamDraft();
   else {
-    userCourseStore().lastSubjectId = item.id;
+    /* lastSubjectId = 「上次看到哪一题」，只有真的换题才值得回写整包。
+       旧实现在这里无条件 scheduleSave()，而开页路径是
+       restoreLastCourse → selectCourse → loadQuestions → loadCurrentQuestion，
+       于是**单纯刷新一次**就会 POST 整包 → 服务器 revision 前进 →
+       之前打开的标签页保存时 409（实测 reload 一次 = 1 POST、revision 前进）。 */
+    const courseStore = userCourseStore();
+    if (Number(courseStore.lastSubjectId || 0) !== Number(item.id)) {
+      courseStore.lastSubjectId = item.id;
+      scheduleSave();
+    }
     syncCurrentTrainingSession(item.id);
   }
-  scheduleSave();
   state.answerVisible = state.submitted || isQuestionVerified(item.id);
   renderQuestion();
   state.lastLoadedQuestionKey = questionKey;
@@ -4414,6 +4686,47 @@ function addCardPageButton(container, page, label, disabled = false) {
   container.appendChild(btn);
 }
 
+/* 答题卡格子与统计行的**唯一**判据。为什么要有它：
+   格子按「已作答」染色（黄），统计行却数「有对错结果」（correct + wrong）——
+   统一验证 / 模拟考场里答完一题，格子黄了、统计行还写「已完成 0 题」，
+   两个数字当着用户的面打架。现在两处都调它，不可能再分叉。
+
+   返回值 → 格子类名：
+     "correct" 绿（判定过，对）｜ "wrong" 红（判定过，错）
+     "done"    黄（已作答、还没判定：统一验证未交卷 / 考场中）
+     "todo"    中性（交卷了但这题没作答 —— 扫漏题时能和「做错」区分开）
+     "none"    中性（没答过）
+   统计行口径：「已作答」= correct / wrong / done；todo 与 none 都算「未作答」。
+
+   判定**优先用已落盘的记录**，不要靠 item.detail：
+     · courseStore.correct / wrong —— 本课程
+     · state.storage.wrong[qid]    —— 错题本（跨课程，resolved 表示已经练会）
+   item.detail 只有当前题才有，用 isAnswerCorrect(item.detail) 判的话，
+   「已作答但 detail 没加载」的题一个类都拿不到 → 格子上显示成「未做」
+   （用户报的「已做的题在答题卡上全是未做」就是这个原因）。
+
+   ⚠️ 错题训练进行中（wrongSession）例外：「在错题本里」对本轮毫无信息量 ——
+   整份题单都是错题，按它染就是全红。这一轮改看**本轮**的结果：
+   本轮答对=绿、本轮答错=红、本轮没答=中性。 */
+function answerCardCellState(item, courseStore = userCourseStore(), wrongSession = activeWrongPracticeSession()) {
+  const wrongRecord = state.storage.wrong?.[item.id];
+  const roundResult = wrongSession?.results?.[item.id];
+  const roundAnswered = !!normalizeAnswer(wrongSession?.answers?.[item.id]);
+  /* 会话 results 里既有对象 {answer, correct, at}，也可能有迁移期留下的布尔值
+     （口径与 syncTrainingSessionStats 一致，别只认一种）。 */
+  const recordedRight = wrongSession
+    ? (roundResult === true || roundResult?.correct === true)
+    : (!!courseStore.correct?.[item.id] || !!wrongRecord?.resolved);
+  const recordedWrong = wrongSession
+    ? (roundResult === false || roundResult?.correct === false)
+    : (!!courseStore.wrong?.[item.id] || (!!wrongRecord && !wrongRecord.resolved));
+  const answered = wrongSession ? roundAnswered : hasAnswer(item.id);
+  if (state.submitted && !answered) return "todo";
+  if (recordedRight) return "correct";
+  if (recordedWrong) return "wrong";
+  return answered ? "done" : "none";
+}
+
 function renderAnswerCardPage(options = {}) {
   const updateNav = options.updateNav !== false;
   const content = $("cardPageContent");
@@ -4447,52 +4760,10 @@ function renderAnswerCardPage(options = {}) {
     if (index === state.currentIndex) btn.classList.add("current");
     if (Number(item.id) === Number(state.lastMarkedQuestionId)) btn.classList.add("just-marked");
     if (matched.has(index)) btn.classList.add("search-match");
-    /* 答题卡只表达三态：正确 / 错误 / 未做。
-       判定**优先用已落盘的记录**，不要靠 item.detail：
-         · courseStore.correct / wrong —— 本课程
-         · state.storage.wrong[qid]    —— 错题本（跨课程，resolved 表示已经练会）
-       item.detail 只有当前题才有，用 isAnswerCorrect(item.detail) 判的话，
-       「已作答但 detail 没加载」的题一个类都拿不到 → 格子上显示成「未做」。
-       用户报的「已做的题在答题卡上全是未做」就是这个原因。
-
-       只有「交卷了但这题没作答」才单独标 `todo`（沿用 .card-cell 默认中性外观），
-       扫漏题时能和「做错」区分开 —— 以前两者都是红色，根本分不出来。
-
-       ⚠️ 错题训练进行中（wrongSession，见上面 renderAnswerCardPage 里的说明）例外：
-       此时「在错题本里」对本轮毫无信息量 —— 整份题单都是错题，按它染就是全红。
-       这一轮改看**本轮**的结果：本轮答对=绿、本轮答错=红、本轮没答=中性（未做）。 */
-    const wrongRecord = state.storage.wrong?.[item.id];
-    const roundResult = wrongSession?.results?.[item.id];
-    const roundAnswered = !!normalizeAnswer(wrongSession?.answers?.[item.id]);
-    /* 会话 results 里既有对象 {answer, correct, at}，也可能有迁移期留下的布尔值
-       （口径与 syncTrainingSessionStats 一致，别只认一种）。 */
-    const recordedRight = wrongSession
-      ? (roundResult === true || roundResult?.correct === true)
-      : (!!courseStore.correct?.[item.id] || !!wrongRecord?.resolved);
-    const recordedWrong = wrongSession
-      ? (roundResult === false || roundResult?.correct === false)
-      : (!!courseStore.wrong?.[item.id] || (!!wrongRecord && !wrongRecord.resolved));
-    const answered = wrongSession ? roundAnswered : hasAnswer(item.id);
-
-    if (state.submitted && !answered) {
-      btn.classList.add("todo");
-    } else if (recordedRight) {
-      btn.classList.add("correct");
-    } else if (recordedWrong) {
-      btn.classList.add("wrong");
-    } else if (answered) {
-      /* 已作答、但还没判定（练习模式统一验证、或模拟考场）——
-         用中性的「已做」，既不泄露对错，也和其他页同状态的题保持一致。
-
-         原来这里写的是 `item.detail && hasAnswer(...)` 然后按
-         isAnswerCorrect(item.detail) 加 correct/wrong：
-         item.detail **只有当前题（±预取的几道）才有**，所以
-           · 当前格答完立刻变绿/变红 —— 提前泄露对错，
-             而此时 updateStats 还显示「已完成 0 题」；
-           · 翻过页的同状态题却显示「未做」—— 同一个状态两种显示。
-         上面那段注释本来就写着「不要靠 item.detail」，代码没跟上。 */
-      btn.classList.add("done");
-    }
+    /* 染色判据在 answerCardCellState 里，和统计行（updateStats）**同一个函数** ——
+       见那边的注释。这里只负责把状态翻成类名。 */
+    const cellState = answerCardCellState(item, courseStore, wrongSession);
+    if (cellState !== "none") btn.classList.add(cellState);
     btn.onclick = async () => {
       const transitionId = (state.modeTransitionId || 0) + 1;
       state.modeTransitionId = transitionId;
@@ -4517,17 +4788,24 @@ function renderAnswerCardPage(options = {}) {
 function updateStats() {
   const total = state.questions.length;
   const courseStore = userCourseStore();
-  /* 「已完成」= 有对错结果（正确 + 错误），和答题卡的三态保持一致。
-     用户明确要求「已做就是正确+错误」。以前这里数的是「有作答记录」，
-     于是统一验证模式下「答完但还没交卷」的题会被算进已完成，
-     而答题卡上它们显示成「未做」，两边对不上。 */
-  const done = state.questions.filter((q) => courseStore.correct?.[q.id] || courseStore.wrong?.[q.id]).length;
+  /* 口径与答题卡格子完全一致 —— 两边都调 answerCardCellState（见那边的注释）。
+     旧实现数的是「有对错结果」（correct + wrong），而格子按「已作答」染色：
+     统一验证 / 考场里答完一题，格子黄了、这里还写「已完成 0 题」。
+     文案也一起改成「已作答 / 未作答」：旧文案写「已完成」却按「答过」算，
+     用户按字面理解成「做完且判过对错」，怎么数都对不上。 */
+  const wrongSession = activeWrongPracticeSession();
+  const answered = state.questions
+    .filter((q) => {
+      const cell = answerCardCellState(q, courseStore, wrongSession);
+      return cell !== "none" && cell !== "todo";
+    })
+    .length;
   setText("totalCount", total);
-  setText("doneCount", done);
-  setText("todoCount", Math.max(0, total - done));
+  setText("doneCount", answered);
+  setText("todoCount", Math.max(0, total - answered));
   // 答题卡收起时那条细栏显示进度（原先只显示「答题卡已收起」，白占一行高度）
   const card = document.querySelector(".answer-card-wrap");
-  if (card) card.dataset.summary = total ? `已做 ${done} / ${total} 题` : "答题卡";
+  if (card) card.dataset.summary = total ? `已作答 ${answered} / ${total} 题` : "答题卡";
   updateWrongBadge();
 }
 
@@ -5222,11 +5500,13 @@ function buildDailyReport(courseStore, stats, items) {
 
    行的 key 就是课本章名，筛题用 textbookChapterKeys(item).includes(row.key)。 */
 function getWeakChapterRows(courseStore, items) {
-  const answeredIds = new Set(Object.keys(courseStore.done || {}).map(Number));
+  /* 「做过」的判据是 done ∪ correct ∪ wrong（见 isQuestionDone）。
+     旧实现只看 done：老数据（尤其**旧版考场交卷**只写 correct/wrong）里
+     做错过的题一道都进不来，用户看着「薄弱章节」是空的，实际错题一堆。 */
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
   const byChapter = new Map();
   items.forEach((item) => {
-    if (!answeredIds.has(Number(item.id))) return;
+    if (!isQuestionDone(courseStore, item.id)) return;
     const isCorrect = correctIds.has(Number(item.id));
     textbookChapterKeys(item, items).forEach((key) => {
       const row = byChapter.get(key) || { key, name: key.startsWith("#") ? "未分章节" : key, done: 0, correct: 0 };
@@ -8181,7 +8461,10 @@ async function adminCorrectionAction(user, correctionId, action) {
 function getCourseStats(courseId = state.currentCourse?.id) {
   const data = peekCourseStore(courseId);
   return {
-    done: Object.keys(data.done || {}).length,
+    /* 「已做」= done ∪ correct ∪ wrong（见 isQuestionDone）。
+       只数 done 的话，旧版考场交卷 / 导入的老数据会显示「已做 0」，
+       和练习页顶部、章节树的口径又对不上 —— 这次一并统一。 */
+    done: doneQuestionIds(data).size,
     correct: Object.keys(data.correct || {}).length,
     wrong: Object.keys(data.wrong || {}).length,
   };
@@ -8368,6 +8651,11 @@ async function submitPaper(autoSubmit = false) {
       checked++;
       if (itemCorrect) correct++;
       score += earnedScore;
+      /* 考场交卷也要落「已做」。旧实现这里只走 markResult（写 correct/wrong），
+         于是同一道题：答题卡上是黄的（有作答）、统计行写「已完成 0 题」、
+         「新题」口径（countNeverDone）还把它当从没做过再推一遍、
+         「薄弱章节」里也永远看不见 —— 四个口径各说各话。 */
+      if (submitMode === "exam") userCourseStore().done[item.detail.id] = true;
       if (submitMode !== "exam") markQuestionVerified(item.detail);
       if (!itemSubjective) markResult(item.detail);
       if (submitMode !== "exam") recordPracticeActivity(item.detail, { verified: true });
@@ -8541,8 +8829,28 @@ function examDraftAnswerCount(draft = examDraftForCurrentCourse()) {
   return Object.values(draft.answers).filter((answer) => normalizeAnswer(answer).length > 0).length;
 }
 
+/* 草稿里最多存多少道题。
+   真实卷子：内置规则最大 80 题（标准卷 单选 60 + 多选 20；安装计量 40+20+20；
+   案例卷 25），手填题量也只有几百。1000 是一眼能看出「这不是正常卷子」的量级：
+   约 8KB 的 questionIds、恢复时 10 个 100/批的请求。
+   超过就不写草稿 —— 宁可不存，也不静默截断出一张**缺题**的卷子。 */
+const EXAM_DRAFT_MAX_IDS = 1000;
+
 function saveExamDraft() {
-  if (state.mode !== "exam" || !state.exam || state.submitted || !state.currentCourse || !state.questions.length) return;
+  if (state.mode !== "exam" || !state.exam || state.submitted || !state.currentCourse) return;
+  /* 题单只能从 state.exam 取，**不能**读活的 state.questions：
+     切模块时 state.questions 已经换成别的模块的题，而 state.mode 先一步被改成 "exam"，
+     于是「5 题卷答了 2 题 → 切错题本 → 回考场」会把草稿覆盖成错题本那一题
+     （实测：10 题卷/2 个答案 → 被覆盖成 4 题/1 个答案，原卷和答案全丢）。 */
+  const ids = Array.isArray(state.exam.questionIds) ? state.exam.questionIds.map(Number).filter(Boolean) : [];
+  if (!ids.length) return;
+  if (ids.length > EXAM_DRAFT_MAX_IDS) {
+    if (state.exam.draftSkipNotified !== ids.length) {
+      state.exam.draftSkipNotified = ids.length;
+      toast(`本卷共 ${ids.length} 题，超过草稿上限 ${EXAM_DRAFT_MAX_IDS} 题：本次考试不保存草稿（关页后无法续考，交卷不受影响）`);
+    }
+    return;
+  }
   const courseKey = String(state.currentCourse.id);
   state.storage.examDrafts = state.storage.examDrafts && typeof state.storage.examDrafts === "object"
     ? state.storage.examDrafts
@@ -8553,7 +8861,7 @@ function saveExamDraft() {
     courseName: state.currentCourse.name || "",
     rule: state.exam.rule,
     scoreMap: state.exam.scoreMap || {},
-    questionIds: state.questions.map((item) => Number(item.id)).filter(Boolean),
+    questionIds: ids,
     answers: { ...state.answers },
     currentIndex: Math.max(0, state.currentIndex),
     answerCardPage: Math.max(0, state.answerCardPage),
@@ -8636,12 +8944,22 @@ async function resumeExamDraft() {
   state.submitted = false;
   state.answerVisible = false;
   state.answerCardPage = Number(draft.answerCardPage || 0);
+  /* 分批拉题（100/批，见 fetchQuestionsByIds）。
+     旧实现把全部 ids 拼进查询串：4200 题的 URL 37KB+，直接顶穿 Kestrel 的
+     MaxRequestLineSize(32KB) → HTTP 414，草稿**永远恢复不了**，
+     而 414 的响应体是空/HTML，前端拿到的只有一句英文 "URI Too Long"。 */
   const params = new URLSearchParams({
     courseId: String(draft.courseId || state.currentCourse.id),
-    ids: ids.join(","),
     limit: String(ids.length),
   });
-  const items = await api(`/api/questions?${params}`);
+  let items;
+  try {
+    items = await fetchQuestionsByIds(params, ids, () => state.mode !== "exam");
+  } catch (err) {
+    if (err?.status === 414) throw new Error("这份草稿的题号太长，服务器拒绝了这个请求（414）。请放弃这份草稿后重新组卷。");
+    throw err;
+  }
+  if (state.mode !== "exam") return;   // 拉题期间用户切走了，别再改状态
   state.questions = orderItemsByIds(items, ids);
   if (!state.questions.length) {
     clearExamDraft();
@@ -8654,6 +8972,9 @@ async function resumeExamDraft() {
   state.exam = {
     rule: draft.rule || getExamRule(),
     scoreMap: draft.scoreMap || {},
+    /* 题单进 state.exam：saveExamDraft 只认它（见那边的注释），
+       恢复后继续答题/切模块也不会把草稿写坏。 */
+    questionIds: ids,
     startedAt: Number(draft.startedAt || Date.now()),
     endsAt: Date.now() + remaining,
     remainingMs: remaining,
@@ -9006,6 +9327,8 @@ async function startExamPaper() {
   state.exam = {
     rule,
     scoreMap,
+    /* 题单随考试对象一起存：saveExamDraft 只认它（见那边的注释）。 */
+    questionIds: state.questions.map((item) => Number(item.id)).filter(Boolean),
     startedAt: Date.now(),
     endsAt: Date.now() + durationMs,
     remainingMs: durationMs,
@@ -9752,7 +10075,11 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
       return;
     }
     if (state.mode === "exam") {
-      if (state.exam && !state.submitted) saveExamDraft();
+      /* ⚠️ 这里**不能**再 saveExamDraft()。上面（进考场分支之前）已经在
+         state.mode 还是 "exam"、state.questions 还是考卷的时候存过一次草稿；
+         这里是 state.mode 刚被改成 "exam"、但 state.questions 还是**上一个模块**
+         的题 —— 再存一次就会把草稿覆盖成别的模块的题单
+         （实测：10 题卷/2 个答案 → 被覆盖成错题本的 4 题/1 个答案）。 */
       state.questions = [];
       state.currentIndex = -1;
       state.submitted = false;
