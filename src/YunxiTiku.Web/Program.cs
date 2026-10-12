@@ -70,13 +70,41 @@ builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<UserDataStore>();
 builder.Services.AddSingleton<QuestionBank>();
 builder.Services.AddSingleton<ChapterMapStore>();
-// 反代/隧道部署时按真实客户端 IP 计数（否则限流把所有人算成一个 IP）。
-// 注意：这里信任所有代理来源——本机自托管场景够用；对外暴露时应收窄为已知反代地址。
+/* 反代/隧道部署时按真实客户端 IP 计数（否则限流把所有人算成一个 IP）。
+   ⚠️ 默认**只信任回环**，与 docker-compose.yml 默认只把 8787 绑在 127.0.0.1 一致。
+   旧配置把 KnownProxies/KnownNetworks 清空 = 信任任何来源的转发头：谁能直连到应用端口，
+   谁就能用伪造的 X-Forwarded-For 绕过登录限流、污染日志与安全诊断。
+   放在反代/隧道后面时必须把代理地址写进 App:TrustedProxies（逗号分隔，IP 或 CIDR）：
+   Docker 里从宿主机/其它容器过来的连接一般显示为网桥网关（如 172.17.0.1），
+   不确定就在容器里 `ip route` 看默认网关。做法见 README「安全说明 / 部署前必读」。 */
+var trustedProxies = (builder.Configuration["App:TrustedProxies"] ?? "")
+    .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
     options.KnownNetworks.Clear();
     options.KnownProxies.Clear();
+    foreach (var entry in trustedProxies)
+    {
+        // 全限定类型名：System.Net.IPNetwork 与 AspNetCore 的同名类型在本文件里都可见
+        if (Microsoft.AspNetCore.HttpOverrides.IPNetwork.TryParse(entry, out var cidr))
+        {
+            options.KnownNetworks.Add(cidr);
+        }
+        else if (IPAddress.TryParse(entry, out var proxyIp))
+        {
+            options.KnownProxies.Add(proxyIp);
+        }
+        else
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [WARN] App:TrustedProxies 里的「{entry}」不是合法 IP/CIDR，已忽略");
+        }
+    }
+    if (trustedProxies.Length == 0)
+    {
+        options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(IPAddress.Loopback, 8));       // 127.0.0.0/8
+        options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(IPAddress.IPv6Loopback, 128)); // ::1/128
+    }
 });
 builder.Services.AddRateLimiter(options =>
 {
@@ -409,14 +437,17 @@ app.MapPost("/api/auth/change-password", async (HttpContext context, AuthStore a
     if (!oldOk) return Results.Json(new { ok = false, error = "原密码不正确" }, statusCode: 401);
     var next = auth.CreateProfile(newPassword);
     next["mustChangePassword"] = false;
+    /* 换凭据版本：这一步是"吊销的耐久性"来源。就算紧接着 sessions.json 写失败、
+       旧会话记录还留在磁盘上，重启后解析时版本对不上 → 旧令牌一样进不来。 */
+    AuthStore.RotateCredentialVersion(next);
     auth.Set(user, next);
     auth.Save();
     // 管理员口令已不再是初始口令，初始口令文件（若还在）就是过期信息。
     if (user.Equals("admin", StringComparison.OrdinalIgnoreCase)) paths.DeleteInitialAdminPasswordFile();
     // 改密即止损：先吊销该用户全部既有会话，再为本机重新签发一张
-    sessionStore.RevokeUser(user);
+    var revokeOnChange = sessionStore.RevokeUser(user);
     var newToken = sessionStore.SignIn(context, user);
-    return Results.Json(new { ok = true, user, token = newToken });
+    return Results.Json(new { ok = true, user, token = newToken, sessionRevoke = SessionRevokeReport(revokeOnChange) });
 }).RequireRateLimiting("login");
 
 app.MapPost("/api/auth/logout", (HttpContext context, SessionStore sessionStore) =>
@@ -547,10 +578,12 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         profile ??= auth.CreateProfile(paths.DefaultLoginPassword);
         profile["disabled"] = true;
         profile["disabledAt"] = NowText();
+        // 停用也换凭据版本：将来重新启用时，停用前签发的会话不会跟着"复活"
+        AuthStore.RotateCredentialVersion(profile);
         auth.Set(target, profile);
         auth.Save();
-        sessionStore.RevokeUser(target);
-        return Results.Json(new { ok = true, user = target, disabled = true });
+        var revokeOnDisable = sessionStore.RevokeUser(target);
+        return Results.Json(new { ok = true, user = target, disabled = true, sessionRevoke = SessionRevokeReport(revokeOnDisable) });
     }
     if (action == "enable")
     {
@@ -572,6 +605,8 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         profile = auth.CreateProfile(paths.DefaultLoginPassword);
         profile["mustChangePassword"] = true;
         profile["createdAt"] = NowText();
+        // 新账号给一个新凭据版本：重名的旧账号（已删除）留下的会话记录不能因此生效
+        AuthStore.RotateCredentialVersion(profile);
         auth.Set(target, profile);
         auth.Save();
         // 空档案也走同一把用户锁，保持"这个用户的数据文件只由持锁者写"这一不变式
@@ -583,21 +618,24 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         var fresh = auth.CreateProfile(paths.DefaultLoginPassword);
         // 重置口令只该换凭据：把「题库分配」这类设置保留下来，
         // 否则管理员一按重置，这个用户就被改成「可见全部题库」了。
+        // （credentialVersion 必须排除：它是凭据的一部分，下面显式轮换）
         if (profile is not null)
         {
             foreach (var pair in profile)
             {
-                if (pair.Key is "salt" or "hash" or "hashAlgo" or "changedAt") continue;
+                if (pair.Key is "salt" or "hash" or "hashAlgo" or "changedAt" or AuthStore.CredentialVersionKey) continue;
                 fresh[pair.Key] = pair.Value;
             }
         }
         fresh["mustChangePassword"] = true;
         fresh["resetAt"] = NowText();
+        // 重置 = 换凭据：旧令牌的凭据版本必须对不上（sessions.json 写失败也不会复活）
+        AuthStore.RotateCredentialVersion(fresh);
         auth.Set(target, fresh);
         auth.Save();
         // 重置口令必须吊销既有会话，否则旧 cookie 还能继续用
-        sessionStore.RevokeUser(target);
-        return Results.Json(new { ok = true, user = target, resetPassword = true, defaultPassword = paths.DefaultLoginPassword });
+        var revokeOnReset = sessionStore.RevokeUser(target);
+        return Results.Json(new { ok = true, user = target, resetPassword = true, defaultPassword = paths.DefaultLoginPassword, sessionRevoke = SessionRevokeReport(revokeOnReset) });
     }
     if (action == "clear-data")
     {
@@ -613,9 +651,10 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         userData.Delete(target);
         auth.Remove(target);
         auth.Save();
-        // 删号后会话立即失效（否则旧 cookie 还能读写，甚至把数据文件"复活"）
-        sessionStore.RevokeUser(target);
-        return Results.Json(new { ok = true, user = target, deleted = true });
+        // 删号后会话立即失效（否则旧 cookie 还能读写，甚至把数据文件"复活"）；
+        // 会话文件写失败时旧记录会留在磁盘上，但重启后 middleware 按"账号不存在"继续拒
+        var revokeOnDelete = sessionStore.RevokeUser(target);
+        return Results.Json(new { ok = true, user = target, deleted = true, sessionRevoke = SessionRevokeReport(revokeOnDelete) });
     }
     return Results.Json(new { ok = false, error = "unknown action" }, statusCode: 400);
 });
@@ -1419,6 +1458,20 @@ internal static string NowText() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
 /// 编辑同一道题同一秒连存两次会覆盖同一份快照，所以那个纯秒级的实现已删除）。
 /// </summary>
 internal static string TimestampUnique() => DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6];
+
+/// <summary>把会话吊销结果变成接口字段：removed = 吊销了几张会话，persisted = 会话文件写成功没。
+/// 写失败时额外带 warning：那些会话在本进程与**重启后**都已失效（账号状态/凭据版本已经落盘），
+/// 但 sessions.json 还是旧内容 —— 必须让调用方和运维看到，不能静默吞掉。</summary>
+internal static object SessionRevokeReport(SessionStore.SessionRevocation revoke)
+    => revoke.Persisted
+        ? (object)new { removed = revoke.Removed, persisted = true }
+        : new
+        {
+            removed = revoke.Removed,
+            persisted = false,
+            warning = "会话已吊销但持久化失败：" + revoke.PersistError + "；请检查磁盘空间/挂载权限。"
+                    + "旧令牌重启后同样会被拒绝（凭据版本已落盘），但 userdata/sessions.json 仍是旧内容。"
+        };
 
 /// <summary>把凭据/会话/用户数据文件收成 0600（同机其它用户读不到）。非 Linux 或挂载不支持时忽略。</summary>
 internal static void RestrictFilePermissions(string path)
@@ -3498,6 +3551,12 @@ sealed class AuthStoreUnavailableException : Exception
     }
 }
 
+/// <summary>会话存储。两个不变式：
+/// 1) 令牌只以 SHA256 落盘（sessions.json 被读到也拿不到可直接用的 cookie 值）。
+/// 2) 每条会话记录都带**签发时的账号凭据版本**（<see cref="AuthStore.CredentialVersionOf"/>）：
+///    改密/重置/停用/重建账号会换一个新版本，解析时会话版本对不上就作废。
+///    这样"吊销"的耐久性由 accounts.dat（原子写、失败上抛）保证，而不是只靠 sessions.json ——
+///    后者写失败时旧令牌即使留在磁盘上、进程重启后也不会复活。</summary>
 sealed class SessionStore
 {
     public const string UserItemKey = "yunxi.session.user";
@@ -3516,12 +3575,14 @@ sealed class SessionStore
     private static readonly TimeSpan Lifetime = TimeSpan.FromDays(7);
     private readonly ConcurrentDictionary<string, SessionRecord> _sessions = new(StringComparer.Ordinal);
     private readonly AppPaths _paths;
+    private readonly AuthStore _auth;
     private readonly object _fileLock = new();
     private bool _loaded;
 
-    public SessionStore(AppPaths paths)
+    public SessionStore(AppPaths paths, AuthStore auth)
     {
         _paths = paths;
+        _auth = auth;
         EnsureLoaded();
     }
 
@@ -3536,7 +3597,8 @@ sealed class SessionStore
         EnsureLoaded();
         Remove(context.Request);
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-        _sessions[HashToken(token)] = new SessionRecord(CleanUserName(user), DateTimeOffset.UtcNow.Add(Lifetime));
+        var clean = CleanUserName(user);
+        _sessions[HashToken(token)] = new SessionRecord(clean, DateTimeOffset.UtcNow.Add(Lifetime), AuthStore.CredentialVersionOf(_auth.Get(clean)));
         Persist();
         context.Response.Cookies.Append(CookieName, token, new CookieOptions
         {
@@ -3574,6 +3636,15 @@ sealed class SessionStore
             Persist();
             return "";
         }
+        /* 凭据版本对不上 = 这张会话是改密/重置/停用/重建账号之前签发的。
+           正常情况下它早被 RevokeUser 从内存里删掉了；能走到这里说明**磁盘上的旧记录又回来了**
+           （进程重启 + sessions.json 持久化失败），所以必须在这里再拦一次。 */
+        if (!string.Equals(record.CredentialVersion, AuthStore.CredentialVersionOf(_auth.Get(record.User)), StringComparison.Ordinal))
+        {
+            _sessions.TryRemove(key, out _);
+            Persist();
+            return "";
+        }
         return record.User;
     }
 
@@ -3598,8 +3669,9 @@ sealed class SessionStore
         if (removed) Persist();
     }
 
-    /// <summary>吊销某个用户的全部会话（改密/重置/停用/删除时调用）。返回是否真的吊销了会话。</summary>
-    public bool RevokeUser(string user)
+    /// <summary>吊销某个用户的全部会话（改密/重置/停用/删除时调用）。
+    /// 返回值同时报告"腰斩了几张"和"落盘成不成功"——调用方必须把失败透出去，不能吞。</summary>
+    public SessionRevocation RevokeUser(string user)
     {
         EnsureLoaded();
         var clean = CleanUserName(user);
@@ -3607,10 +3679,22 @@ sealed class SessionStore
             .Where(kv => kv.Value.User.Equals(clean, StringComparison.OrdinalIgnoreCase))
             .Select(kv => kv.Key)
             .ToList();
-        var removed = false;
-        foreach (var key in keys) removed |= _sessions.TryRemove(key, out _);
-        if (removed) Persist();
-        return removed;
+        var removed = 0;
+        foreach (var key in keys)
+        {
+            if (_sessions.TryRemove(key, out _)) removed++;
+        }
+        var persistError = removed > 0 ? Persist() : null;
+        return new SessionRevocation(removed, persistError);
+    }
+
+    /// <summary>吊销结果。<see cref="PersistError"/> 非空表示内存里已吊销、sessions.json 没写成：
+    /// 旧令牌在本进程**和**重启后都会被账号状态/凭据版本拒掉（fail closed），
+    /// 但会话文件仍是旧内容，必须让接口与运维看到（磁盘满/只读）。</summary>
+    public readonly record struct SessionRevocation(int Removed, string? PersistError)
+    {
+        public bool RemovedAny => Removed > 0;
+        public bool Persisted => PersistError is null;
     }
 
     /// <summary>会话令牌只以 SHA256 落盘：sessions.json 被读到也拿不到可直接用的 cookie 值。</summary>
@@ -3642,7 +3726,7 @@ sealed class SessionStore
                         if (string.IsNullOrWhiteSpace(row.Token) || string.IsNullOrWhiteSpace(row.User)) continue;
                         if (!DateTimeOffset.TryParse(row.ExpiresAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var expires)) continue;
                         if (expires <= now) continue;
-                        _sessions[row.Token] = new SessionRecord(CleanUserName(row.User), expires);
+                        _sessions[row.Token] = new SessionRecord(CleanUserName(row.User), expires, row.CredentialVersion ?? "");
                     }
                 }
             }
@@ -3654,7 +3738,10 @@ sealed class SessionStore
         }
     }
 
-    private void Persist()
+    /// <summary>把会话表落盘。返回 null = 成功；否则返回失败原因（已同时写日志）。
+    /// 旧实现把所有异常静默吞掉：改密/重置/停用后在内存里吊销了、磁盘没写成功，
+    /// 容器一重启旧会话就从 sessions.json 里"复活"。持久化失败必须留痕且能回传给接口。</summary>
+    private string? Persist()
     {
         lock (_fileLock)
         {
@@ -3668,7 +3755,8 @@ sealed class SessionStore
                     {
                         Token = kv.Key,
                         User = kv.Value.User,
-                        ExpiresAt = kv.Value.ExpiresAt.ToString("O", CultureInfo.InvariantCulture)
+                        ExpiresAt = kv.Value.ExpiresAt.ToString("O", CultureInfo.InvariantCulture),
+                        CredentialVersion = kv.Value.CredentialVersion
                     })
                     .ToList();
                 // prune expired from memory too
@@ -3681,23 +3769,31 @@ sealed class SessionStore
                 File.WriteAllText(temp, json, new UTF8Encoding(false));
                 File.Move(temp, SessionFilePath(), true);
                 RestrictFilePermissions(SessionFilePath());
+                return null;
             }
-            catch
+            catch (Exception ex)
             {
-                // Persistence is best-effort; auth still works for current process lifetime.
+                /* 明确记日志：[session-persist-failed] 是给运维和验证装置搜的稳定标记。
+                   走 Console.WriteLine（与其它日志同一个流）：Windows 下 stderr 被重定向到文件时
+                   中文会退化成 "?"，stdout 不会；docker logs 也只有一个流。 */
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [session-persist-failed] 会话持久化失败（{SessionFilePath()}）：{ex.Message}");
+                return ex.Message;
             }
         }
     }
 
     private string SessionFilePath() => Path.Combine(_paths.UserDataRoot, FileName);
 
-    private sealed record SessionRecord(string User, DateTimeOffset ExpiresAt);
+    private sealed record SessionRecord(string User, DateTimeOffset ExpiresAt, string CredentialVersion);
 
     private sealed class SessionFileRow
     {
         public string Token { get; set; } = "";
         public string User { get; set; } = "";
         public string ExpiresAt { get; set; } = "";
+        /// <summary>签发这张会话时的账号凭据版本。老文件里没有这个字段 → 反序列化为 ""，
+        /// 与"档案没有版本"的旧账号相等，所以升级不会把所有人踢下线。</summary>
+        public string? CredentialVersion { get; set; } = "";
     }
 }
 
@@ -4008,6 +4104,21 @@ sealed class AuthStore
     {
         return profile.TryGetValue(key, out var value) ? ScalarString(value) : "";
     }
+
+    /* ---- 凭据版本（会话耐久性的关键，见 SessionStore） ------------------------------------
+       每次「凭据/账号状态发生必须让旧会话失效的变化」都换一个新随机值：
+       CreateProfile 之后（新建/改密/重置）、disable。会话记录里存的是**签发时**的这个值，
+       解析时会话版本 ≠ 账号当前版本 → 这张会话作废。
+       为什么用随机串而不是自增号：账号被删除后重建时，自增号可能撞上旧会话记录里的号
+       （旧记录只存在于"吊销时 sessions.json 没写成功"的磁盘上），随机串不会。
+       旧档案没有这个字段 → 返回 ""，与会话记录里缺字段的 "" 相等：升级不会踢掉在线用户。 */
+    internal const string CredentialVersionKey = "credentialVersion";
+
+    internal static string CredentialVersionOf(Dictionary<string, object?>? profile)
+        => profile is null ? "" : GetProfileString(profile, CredentialVersionKey);
+
+    internal static void RotateCredentialVersion(Dictionary<string, object?> profile)
+        => profile[CredentialVersionKey] = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
 
     private static string PasswordHash(string password, string salt)
     {

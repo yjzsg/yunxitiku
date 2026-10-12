@@ -8,6 +8,18 @@ on:
       - Dockerfile
       - public/**
       - src/**
+      - deploy/asset-versions.lock.json
+      - deploy/check-asset-versions.mjs
+      - .github/workflows/docker.yml
+  # PR 也要过门禁（DL-06）：镜像只在 push/dispatch 上推，PR 只跑 verify。
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - public/**
+      - src/**
+      - deploy/**
       - .github/workflows/docker.yml
   workflow_dispatch:
 
@@ -17,9 +29,32 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/yjzsg/yunxitiku
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
+  # ── 资源版本门禁（DL-06）────────────────────────────────────────────────
+  # public/index.html 里的 ?v= 是**手工**版本号，而带 ?v= 的静态文件发一年 immutable。
+  # 「内容变了但版本号没抬」在 CI 里直接红，不再靠人记得。
+  # 这一步不依赖 secrets、不推镜像，所以 PR 上也能跑。
+  verify:
+    name: 资源版本门禁
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 校验 ?v= 与文件内容一致
+        run: node deploy/check-asset-versions.mjs
+
   docker:
+    name: 构建并推送镜像
+    needs: verify
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,6 +64,11 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Restore and verify
         run: |
@@ -56,16 +96,40 @@ jobs:
       - name: Compute image tags
         id: tagmeta
         run: |
-          echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          short="${GITHUB_SHA:0:7}"
+          created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "created=$created" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           echo "stamp=$(date -u +%Y-%m-%d-%H%M)" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:latest"
+            echo "${IMAGE_NAME}:${GITHUB_SHA}"
+            echo "${IMAGE_NAME}:sha-${short}"
+            echo "${IMAGE_NAME}:$(date -u +%Y-%m-%d)"
+            echo "${IMAGE_NAME}:$(date -u +%Y-%m-%d-%H%M)"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── build-info（DL-07）──────────────────────────────────────────────
+      # 内容哈希 + commit + 标签 + 平台写成一个可归档、可查的 JSON；
+      # 它的 sha256 会被写进镜像 label（DL-08），于是「镜像 ↔ commit ↔ 前端产物」三方对齐。
+      - name: 生成 build-info.json
+        id: buildinfo
+        env:
+          TAGS: ${{ steps.tagmeta.outputs.tags }}
+        run: |
+          node deploy/build-info.mjs --out build-info.json
+          echo "sha256=$(sha256sum build-info.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ env.PLATFORMS }}
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:latest
@@ -73,5 +137,74 @@ jobs:
             ${{ env.IMAGE_NAME }}:sha-${{ steps.tagmeta.outputs.short }}
             ${{ env.IMAGE_NAME }}:${{ steps.tagmeta.outputs.date }}
             ${{ env.IMAGE_NAME }}:${{ steps.tagmeta.outputs.stamp }}
+          # OCI 标签：镜像自己就能回答「我是哪个 commit、哪份产物构建出来的」
+          labels: |
+            org.opencontainers.image.title=云习题库 Docker 版
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ steps.tagmeta.outputs.short }}
+            org.opencontainers.image.created=${{ steps.tagmeta.outputs.created }}
+            com.yunxitiku.build-info-sha256=${{ steps.buildinfo.outputs.sha256 }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # 镜像 digest 单独落一个文件：build-info.json 一旦被回填就会改哈希，
+      # 而它的 sha256 已经写进镜像 label —— 两者必须能对上，所以 build-info.json 保持只读一次生成。
+      - name: 记录镜像 digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          BI_SHA: ${{ steps.buildinfo.outputs.sha256 }}
+          TAGS: ${{ steps.tagmeta.outputs.tags }}
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "image=${IMAGE_NAME}"
+            echo "platforms=${PLATFORMS}"
+            echo "digest=${DIGEST}"
+            echo "buildInfoSha256=${BI_SHA}"
+            echo "runId=${GITHUB_RUN_ID}"
+            echo "runNumber=${GITHUB_RUN_NUMBER}"
+            echo "generatedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "tags:"
+            echo "${TAGS}" | sed 's/^/  - /'
+          } > image-digest.txt
+          cat image-digest.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 归档 build-info.json 与 image-digest.txt
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: |
+            build-info.json
+            image-digest.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      # ── 发布来源可追溯（DL-08）──────────────────────────────────────────
+      - name: 发布来源摘要
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          BI_SHA: ${{ steps.buildinfo.outputs.sha256 }}
+          TAGS: ${{ steps.tagmeta.outputs.tags }}
+        run: |
+          {
+            echo "## 发布来源"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| commit | \`${GITHUB_SHA}\` (sha-${GITHUB_SHA:0:7}) |"
+            echo "| 镜像 digest | \`${DIGEST}\` |"
+            echo "| build-info sha256 | \`${BI_SHA}\` |"
+            echo "| 平台 | ${PLATFORMS} |"
+            echo "| 触发 | ${GITHUB_EVENT_NAME} / run ${GITHUB_RUN_ID}.${GITHUB_RUN_NUMBER} |"
+            echo ""
+            echo "本次推送的标签："
+            echo ""
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+            echo ""
+            echo "回滚：\`docker pull ${IMAGE_NAME}:sha-${GITHUB_SHA:0:7}\`；"
+            echo "核对来源：\`docker inspect\` 里的 \`org.opencontainers.image.revision\` 必须等于上面的 commit，"
+            echo "\`com.yunxitiku.build-info-sha256\` 必须等于 build-info 产物（同名 artifact）的 sha256。"
+          } >> "$GITHUB_STEP_SUMMARY"

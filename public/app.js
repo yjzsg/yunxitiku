@@ -149,6 +149,22 @@ const state = {
   lastAnimatedQuestionId: 0,
   lastMarkedQuestionId: 0,
   lastActivityAt: 0,   // 上一次答题时间（内存值，算学习时长用，见 recordPracticeActivity）
+  /* ── 题单读取生命周期（UI-05）─────────────────────────────────────────
+     一条主线：**屏上这份 state.questions 到底属于哪个模块/科目**。
+     · questionContext：成功写进 state.questions 的那一次是 mode|courseId；
+       与当前 mode/courseId 不一致 = 屏上是**别的模块**的旧题单，进入新模块时必须
+       先收起来（不给「新页签旧数据」的机会）。
+     · questionListAt / questionListSource：那次成功取数的**时间与条件**
+       （章节/题型/题量），保留旧题单时用它写清「屏上这份是什么、什么时候的」。
+     · questionLoadState：{status: loading|ready|error, mode, courseId, error}，
+       loading 画明确占位、error 画常驻可重试错误态。
+     · questionListStale：同一模块内刷新失败、旧题单被保留时置位，
+       页面顶部常驻横幅 + 收掉按题单生效的写操作。 */
+  questionContext: "",
+  questionListAt: "",
+  questionListSource: null,
+  questionLoadState: null,
+  questionListStale: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -3195,6 +3211,188 @@ function ensureTagFilterControl() {
   $("typeSelect").insertAdjacentElement("afterend", field);
 }
 
+/* ── 题单读取生命周期（UI-05）──────────────────────────────────────────
+   旧实现只有一条线：切 mode → 请求 → 失败就 toast。请求成功前 state.questions 和
+   DOM 全是上一个模块的，于是实测「阻断 /api/questions 后 practice → favorite」
+   会得到：页签写着收藏、屏上还是题库那 80 题和同一道题干，只有一个几秒的 toast。
+   用户完全可能就这么在「收藏」里作答了非收藏题。
+   现在：进入模块先收起旧题单 + 明确加载占位；失败给常驻可重试的错误态；
+   同一模块内刷新失败而保留旧题单时，顶部常驻「上次缓存，非本次结果」横幅，
+   并收掉按题单生效的写操作（见 renderVerifyModeControls / blockWriteOnStaleList）。 */
+
+const QUESTION_PLACEHOLDER_MODES = ["practice", "wrong", "favorite"];
+
+function modeDisplayName(mode = state.mode) {
+  return {
+    practice: "考试题库",
+    wrong: "错题本",
+    favorite: "收藏试题",
+    exam: "模拟考场",
+    smart: "智能训练",
+    training: "智能训练",
+    progress: "学习看板",
+  }[mode] || "当前模块";
+}
+
+function questionContextKey(mode = state.mode, courseId = state.currentCourse?.id) {
+  return `${mode}|${Number(courseId || 0)}`;
+}
+
+/* 题型下拉里的**干净**文案：选项自带题量（如「多选题 (2428)」），
+   写进提示语里太吵（用户不需要在空态里看题库统计）。 */
+function selectedTypeLabel() {
+  const select = $("typeSelect");
+  if (!select) return "";
+  const raw = (select.selectedOptions?.[0]?.textContent || "").trim();
+  return raw.replace(/\s*[（(]\s*\d+\s*[)）]\s*$/, "").trim();
+}
+
+/* 屏上那份 state.questions 和「现在要去的模块/科目」不是一回事。 */
+function questionContextChanged(mode = state.mode, courseId = state.currentCourse?.id) {
+  return !!state.questionContext && state.questionContext !== questionContextKey(mode, courseId);
+}
+
+/* 只记「身份」（模块|科目 + 成功时间 + 取数条件），不动读取状态与陈旧标记。
+   考场的卷子走这一条：它不是 loadQuestions 的结果，没有「读取中/读取失败」可言，
+   但同样需要一份身份，切回「题库」时才会被认成换了模块（见 markQuestionListLoaded）。 */
+function markQuestionListLoadedIdentity() {
+  if (!state.questions.length) {
+    state.questionContext = "";
+    state.questionListAt = "";
+    state.questionListSource = null;
+    return;
+  }
+  state.questionContext = questionContextKey();
+  state.questionListAt = nowText();
+  state.questionListSource = {
+    modeName: modeDisplayName(),
+    courseName: state.currentCourse?.name || "",
+    chapter: state.currentChapter?.name || "全部章节",
+    type: selectedTypeLabel() || "全部题型",
+    count: state.questions.length,
+  };
+}
+
+/* 取数成功：连同「这份题单的身份」（成功时间 + 取数条件）一起记下，
+   失败保留它时才有东西可写。 */
+function markQuestionListLoaded(items) {
+  state.questions = Array.isArray(items) ? items : [];
+  state.questionLoadState = {
+    status: "ready",
+    mode: state.mode,
+    courseId: Number(state.currentCourse?.id || 0),
+    error: "",
+  };
+  state.questionListStale = null;
+  markQuestionListLoadedIdentity();
+  updateQuestionStaleBanner();
+}
+
+/* 请求失败：没旧题单可留 → 常驻错误态；留着旧题单 → 显式标成陈旧。 */
+function failQuestionLoad(err, keptList = false) {
+  state.questionLoadState = {
+    status: "error",
+    mode: state.mode,
+    courseId: Number(state.currentCourse?.id || 0),
+    error: (err && err.message) || "读取失败",
+    at: nowText(),
+  };
+  state.questionListStale = keptList && state.questions.length
+    ? {
+        ...(state.questionListSource || {}),
+        modeName: modeDisplayName(),
+        count: state.questions.length,
+        at: state.questionListAt || "未知时间",
+        reason: state.questionLoadState.error,
+      }
+    : null;
+  updateQuestionStaleBanner();
+}
+
+/* 顶部常驻横幅：写清「这是上次缓存、什么条件、什么时候」。不给关闭按钮 ——
+   这不是「提示一下就好」的状态：屏上的内容可能已经不是当前筛选的结果。 */
+function updateQuestionStaleBanner() {
+  const el = $("questionStaleBanner");
+  if (!el) return;
+  const stale = state.questionListStale;
+  if (!stale) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.innerHTML = `
+    <strong>上面是上次缓存的内容，不是本次「${escapeHtml(stale.modeName || modeDisplayName())}」的读取结果</strong>
+    <span>读取失败：${escapeHtml(stale.reason || "网络错误")}。屏上这 ${Number(stale.count || 0)} 题来自上次成功加载（${escapeHtml(stale.at || "未知时间")} · ${escapeHtml(stale.chapter || "全部章节")} · ${escapeHtml(stale.type || "全部题型")}），当前筛选条件可能已经变了。「提交答卷 / 清空本题单 / 显示答案 / 打印」等按题单生效的操作已暂时停用。</span>
+    <button type="button" id="questionStaleRetryBtn">重试读取</button>
+  `;
+  const btn = $("questionStaleRetryBtn");
+  if (btn) btn.onclick = () => loadQuestions().catch((err) => toast(err.message));
+}
+
+/* 屏上是陈旧题单时，按**整份题单**生效的写操作一律拦掉。
+   单题作答不禁用：答案按题目 id 记录，不依赖题单构成（陈旧只影响「这题在不在
+   当前筛选里」）。批量动作（交卷/清空）才是在猜题单，必须挡住。 */
+function blockWriteOnStaleList() {
+  if (!state.questionListStale) return false;
+  toast("屏上是上次缓存的题单（本次读取失败），先点上方「重试读取」再操作");
+  return true;
+}
+
+/* 读取中 / 读取失败的占位与错误态。返回 true = 已经接管 #emptyState，
+   调用方不要再画 buildEmptyMessage() 那套「当前范围没有题目」。 */
+function renderQuestionLoadState() {
+  const st = state.questionLoadState;
+  if (!st || st.status === "ready") return false;
+  if (!QUESTION_PLACEHOLDER_MODES.includes(state.mode)) return false;
+  const label = modeDisplayName(st.mode);
+  $("questionBody").classList.add("hidden");
+  const empty = $("emptyState");
+  if (!empty) return false;
+  empty.classList.remove("hidden");
+  if (st.status === "loading") {
+    empty.innerHTML = `<strong>正在加载「${escapeHtml(label)}」的题单…</strong>
+      <span>${st.dropped
+        ? `上一个模块（${escapeHtml(st.dropped)}）的内容已收起，避免和本次结果混在一起。`
+        : "正在读取当前科目与筛选条件下的题目。"}</span>`;
+    return true;
+  }
+  empty.innerHTML = `<strong>「${escapeHtml(label)}」的题单没读出来</strong>
+    <span>${escapeHtml(st.error || "网络连接失败")}</span>
+    <span>上一个模块或上一次筛选的题单已经收起，避免你在不确定的题单上作答。</span>
+    <div class="empty-actions">
+      <button type="button" id="questionLoadRetryBtn" class="primary-action">重试读取</button>
+      ${state.mode === "practice" ? "" : '<button type="button" id="emptyBackToPracticeBtn">返回考试题库</button>'}
+    </div>`;
+  const retry = $("questionLoadRetryBtn");
+  if (retry) retry.onclick = () => loadQuestions().catch((err) => toast(err.message));
+  bindEmptyStateActions();
+  return true;
+}
+
+/* 进模块（或换科目）的第一时间就把上一个模块的题单收起来。
+   必须在 loadTypes 之前调用：loadTypes 也是网络请求，等它回来再收就已经把
+   「新页签旧数据」露出来了。已在同一模块内重复点（含再点当前页签）不动。 */
+function beginQuestionModuleEntry() {
+  if (!QUESTION_PLACEHOLDER_MODES.includes(state.mode)) return;
+  if (!questionContextChanged()) return;
+  const dropped = state.questions.length
+    ? `「${modeDisplayName(state.questionContext.split("|")[0])}」的 ${state.questions.length} 题`
+    : "";
+  state.questions = [];
+  state.currentIndex = -1;
+  state.questionListStale = null;
+  state.questionLoadState = {
+    status: "loading",
+    mode: state.mode,
+    courseId: Number(state.currentCourse?.id || 0),
+    startedAt: Date.now(),
+    error: "",
+    dropped,
+  };
+  renderAll();
+}
+
 async function loadQuestions() {
   const requestId = (state.questionRequestId || 0) + 1;
   state.questionRequestId = requestId;
@@ -3205,6 +3403,10 @@ async function loadQuestions() {
     state.currentIndex = -1;
     state.answerVisible = false;
     state.answerCardPage = 0;
+    /* 训练/看板没有「题单」这个对象：陈旧标记与读取状态一并清掉（横幅收起来）。 */
+    state.questionLoadState = null;
+    state.questionListStale = null;
+    updateQuestionStaleBanner();
     ensureAnalysisQuestionsInBackground();
     renderAll();
     return;
@@ -3215,6 +3417,9 @@ async function loadQuestions() {
     state.currentIndex = -1;
     state.answerVisible = false;
     state.answerCardPage = 0;
+    state.questionLoadState = null;
+    state.questionListStale = null;
+    updateQuestionStaleBanner();
     await loadAnalysisQuestions();
     if (requestId !== state.questionRequestId) return;
     renderAll();
@@ -3225,6 +3430,26 @@ async function loadQuestions() {
     renderSearchMatches();
     return;
   }
+  /* 换模块 / 换科目：屏上那份属于别处的题单先收掉，并给加载占位（见上面 UI-05 注释）。
+     同一模块内的刷新（换章节/题型/题量）保留当前题单，失败时由 failQuestionLoad
+     标成「上次缓存」而不是白屏。 */
+  const contextChanged = questionContextChanged();
+  if (contextChanged) {
+    state.questions = [];
+    state.currentIndex = -1;
+    state.questionListStale = null;
+  }
+  const keptList = !contextChanged && state.questions.length > 0;
+  state.questionLoadState = {
+    status: "loading",
+    mode: state.mode,
+    courseId: Number(state.currentCourse?.id || 0),
+    startedAt: Date.now(),
+    error: "",
+    dropped: "",
+  };
+  if (keptList) updateQuestionStaleBanner();   // 重新读取 → 先撤掉旧的陈旧横幅
+  else renderAll();                            // 占位由 renderAll → renderQuestionLoadState 画
   state.answerCardPage = 0;
   const orderValue = $("orderSelect").value;
   const courseStore = userCourseStore();
@@ -3250,9 +3475,11 @@ async function loadQuestions() {
   const mergedIds = intersectIdFilters(idFilter, tagIds);
   if (mergedIds) {
     if (!mergedIds.length) {
-      state.questions = [];
+      /* 「这个集合本来就是空的」（比如 0 收藏、0 道到期错题）：这是一次**成功**的读取，
+         空态由 buildEmptyMessage 按模块讲原因，不当错误处理。 */
       state.currentIndex = -1;
       state.answerCardPage = 0;
+      markQuestionListLoaded([]);
       renderAll();
       return;
     }
@@ -3263,8 +3490,17 @@ async function loadQuestions() {
   /* ids 走查询串，必须分批：URL 一过 Kestrel 的请求行上限（默认 8192 字节，
      约 850 个 8 位 id）服务端直接回 414、响应体为空，而 state.questions 会保留上一次
      的题单、DOM 残留上一页，且没有任何提示。导出路径一直是按 100/批的，这里漏了。 */
-  let items = await fetchQuestionsByIds(params, mergedIds, () =>
-    requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId);
+  let items;
+  try {
+    items = await fetchQuestionsByIds(params, mergedIds, () =>
+      requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId);
+  } catch (err) {
+    /* 迟到的失败不许画到新模块上：这轮请求如果已经被下一次导航/换科目作废，直接退出。 */
+    if (requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId) return;
+    failQuestionLoad(err, keptList);
+    renderAll();          // 常驻错误态（没旧题单）/ 陈旧横幅 + 工具栏收敛（有旧题单）
+    throw err;            // 调用方照旧 toast，但这不再是唯一的提示
+  }
   if (requestId !== state.questionRequestId || Number(state.currentCourse?.id) !== requestedCourseId) return;
   // 记下 qid → chapterId，章节树的「已做/总数」靠它（纯本地缓存，不进同步包）
   rememberQuestionChapters(items, state.currentCourse.id);
@@ -3307,7 +3543,7 @@ async function loadQuestions() {
   }
 
   if (requestId !== state.questionRequestId) return;
-  state.questions = items;
+  markQuestionListLoaded(items);
   const activeSession = activeTrainingSession();
   const sessionMatchesMode = activeSession && (state.mode === "smart" || activeSession.mode === state.mode);
   state.currentIndex = state.mode === "smart" && state.smartPracticeFreshStart
@@ -4330,9 +4566,13 @@ function renderAll() {
   if (!state.questions.length) {
     $("questionBody").classList.add("hidden");
     $("emptyState").classList.remove("hidden");
-    const message = buildEmptyMessage();
-    $("emptyState").innerHTML = `<strong>${message[0]}</strong><span>${message[1]}</span>${message[2] || ""}`;
-    bindEmptyStateActions();
+    /* 读取中 / 读取失败优先：这两种状态下画「当前范围没有题目，可以换章节…」
+       等于把「没读出来」说成「本来就没有」（见 renderQuestionLoadState）。 */
+    if (!renderQuestionLoadState()) {
+      const message = buildEmptyMessage();
+      $("emptyState").innerHTML = `<strong>${message[0]}</strong><span>${message[1]}</span>${message[2] || ""}`;
+      bindEmptyStateActions();
+    }
   }
 }
 
@@ -4343,6 +4583,26 @@ function bindEmptyStateActions() {
   if (wrongBtn) wrongBtn.onclick = () => startWrongBookPractice({ ignoreReview: true }).catch((err) => toast(err.message));
   const smartBtn = $("emptyStartSmartBtn");
   if (smartBtn) smartBtn.onclick = () => startSmartPractice().catch((err) => toast(err.message));
+  /* 收藏空态 / 题单读取失败的错误态共用这个出口：回考试题库（走和训练页
+     「返回考试题库」同一条路径：换 mode → 重新读题单）。 */
+  const backBtn = $("emptyBackToPracticeBtn");
+  if (backBtn) {
+    backBtn.onclick = async () => {
+      state.mode = "practice";
+      setCoursePicker(false);
+      renderMode();
+      await loadQuestions().catch((err) => toast(err.message));
+    };
+  }
+  /* 收藏有内容、但被「题型」筛空时的出口：清掉题型筛选再读一次
+     （收藏是 id 列表模式，章节/标签不参与，能挡住它的只有题型）。 */
+  const clearTypeBtn = $("emptyClearTypeBtn");
+  if (clearTypeBtn) {
+    clearTypeBtn.onclick = async () => {
+      if ($("typeSelect")) $("typeSelect").value = "";
+      await loadQuestions().catch((err) => toast(err.message));
+    };
+  }
 }
 
 /* 空状态文案。错题本里「列表是空的」有四种完全不同的原因，说错一种用户就会以为
@@ -4386,6 +4646,43 @@ function buildEmptyMessage() {
       "本次智能练习没有题目",
       `当前科目（${courseName}）还没有可继续的题单。`,
       `<button type="button" id="emptyStartSmartBtn" class="primary-action">开始「${escapeHtml(courseName)}」的今日强化</button>`,
+    ];
+  }
+  /* ── 收藏夹的空态必须讲收藏自己的两件事（UI-10）─────────────────────
+     旧实现和普通练习共用一句「当前范围没有题目，可以换章节、题型或清空搜索条件」，
+     但收藏**不叠章节**（见 isIdListMode / getTagFilterIds：章节/标签在 id 列表模式下
+     根本不参与取数），题目内搜索也不改题单（搜索只做本地匹配）——让用户去换章节、
+     清搜索只会白忙。实测 fresh 账号 0 收藏时写的正是这一句。
+     能真正把收藏页清空的只有：① 本科目一道收藏都没有；② 题型筛选把收藏挡光了。
+     两句话都要写明**科目范围**，否则用户会以为别科目的收藏丢了。 */
+  if (state.mode === "favorite") {
+    const courseName = state.currentCourse?.name || "当前科目";
+    const favIds = favoriteIdsForCurrentCourse();
+    const typeName = $("typeSelect")?.value ? selectedTypeLabel() : "";
+    if (!favIds.length) {
+      const allCourses = Object.keys(state.storage.favorite || {}).length;
+      return [
+        `「${courseName}」还没有收藏题`,
+        `做题时点题目下方的「收藏本题」，这里就会出现。收藏按科目归档，这一页只列「${courseName}」`
+          + (allCourses ? `；其它科目还有 ${allCourses} 道收藏，切到对应科目才能看到。` : "。"),
+        '<button type="button" id="emptyBackToPracticeBtn" class="primary-action">返回考试题库</button>',
+      ];
+    }
+    if (typeName) {
+      return [
+        `${favIds.length} 道收藏都被题型筛选「${typeName}」挡住了`,
+        `「${courseName}」共有 ${favIds.length} 道收藏，但没有一道属于「${typeName}」。`
+          + `收藏页不叠章节和搜索条件，清掉题型筛选就能看到全部收藏。`,
+        '<button type="button" id="emptyClearTypeBtn" class="primary-action">清空题型筛选</button>',
+      ];
+    }
+    /* 有记录、没筛选，却一道都没取回来：题库更新后题被删除/停用，或服务端返回空。
+       别再让用户去换章节 —— 说清可能的原因和下一步。 */
+    return [
+      `「${courseName}」的 ${favIds.length} 道收藏一道都没取回来`,
+      "这些题可能在题库更新时被删除或停用。可以点工具栏「重新读取题库」再试，"
+        + "或到学习看板确认「收藏题（本科目）」的数字。",
+      '<button type="button" id="emptyBackToPracticeBtn" class="primary-action">返回考试题库</button>',
     ];
   }
   if (state.mode !== "wrong") {
@@ -5982,6 +6279,32 @@ function renderVerifyModeControls() {
       : "仅清空当前题单作答，不影响其他章节";
     resetBtn.disabled = examRunning && state.submitted;
   }
+  /* ── 按「本页有没有题单」收敛工具栏（UI-08）──────────────────────────
+     训练/看板是任务页：state.questions 恒为空，没有「本题单」这个对象。
+     旧实现只按「提交中 / 组卷中」禁用，于是 training 上「显示答案 / 清空本题单 /
+     统一验证 / 提交答卷 / 打印」全都可点（实测 questions=0 时 5 个按钮全亮）——
+     用户很容易把「提交答卷」当成「提交今日训练计划」。
+     现在：
+       · 显示答案 / 清空本题单 / 提交答卷 / 统一验证 / 打印 —— 只对题单有意义，
+         有题单才展示（题单读取失败但留着旧内容时也算「没有可信题单」，见 UI-05）；
+       · 试题筛选 —— 只在列表模式（题库/错题/收藏/考场）展示：收藏页要靠它筛题型；
+         训练/看板点开的是一个和本页无关的面板；
+       · 放大 / 缩小 / 全屏 —— 显示设置，任何页面都保留。
+     用 .hidden 而不是 disabled：一排点不动的按钮同样是噪声，而且读取失败时
+     该点的是顶部横幅的「重试读取」，不是交卷。
+     取舍：没有给训练/看板**新加**工具栏动作 —— 这两页自己的动作已经在 hero、
+     任务卡和 .training-tools 里，工具栏再放一套只会出现两个入口。 */
+  const listMode = ["practice", "wrong", "favorite", "exam"].includes(state.mode) && !isAdmin();
+  const hasList = listMode
+    && (state.questions.length > 0 || (state.mode === "exam" && !!state.exam))
+    && !state.questionListStale;
+  ["answerToggleBtn", "resetBtn", "submitBtn", "verifyModeBtn", "printBtn"].forEach((id) => {
+    $(id)?.classList.toggle("hidden", !hasList);
+  });
+  $("filterBtn")?.classList.toggle("hidden", !listMode);
+  /* 筛选面板只由这个按钮开合：按钮在训练/看板被收起来时，面板也必须一起关，
+     否则会留一个「打不开也关不掉」的面板在任务页上。 */
+  if (!listMode) $("searchPanel")?.classList.add("hidden");
 }
 
 function toggleVerifyMode() {
@@ -8110,11 +8433,23 @@ function renderAdminRows(rows, failedCount = 0) {
   `;
   $("adminAddUserBtn").onclick = openAdminUserDialog;
   if ($("adminRefreshBtn")) {
-    $("adminRefreshBtn").onclick = () => renderAdminDashboard().catch((err) => toast(err.message));
+    $("adminRefreshBtn").onclick = async () => {
+      /* 刷新看板会整块重绘，编辑区的草稿只活在 DOM 里（UI-06）。 */
+      if (!await confirmBankEditorLeave("刷新管理看板")) return;
+      renderAdminDashboard().catch((err) => toast(err.message));
+    };
   }
   document.querySelectorAll("[data-admin-view]").forEach((btn) => {
-    btn.onclick = () => {
-      state.adminView = btn.dataset.adminView;
+    btn.onclick = async () => {
+      const nextView = btn.dataset.adminView;
+      /* 切管理页签也是重绘编辑区 —— 有草稿先给保存/放弃/取消。
+         同页签再点一次同样会重建输入框，所以也走这一道（没草稿就直接返回，不重绘）。 */
+      if (state.adminView === "bankEditor") {
+        const reason = nextView === "bankEditor" ? "刷新编辑页" : "切换到其它管理页签";
+        if (!await confirmBankEditorLeave(reason)) return;
+        if (nextView === state.adminView && !isBankEditorDirty()) return;
+      }
+      state.adminView = nextView;
       renderAdminRows(state.adminRows, state.adminFailedCount);
     };
   });
@@ -9268,7 +9603,12 @@ async function ensureAdminEditorChapters(courseId) {
   state.adminEditorChapters = [];
   const chapters = await api(`/api/chapters?courseId=${courseId}`);
   state.adminEditorChapters = Array.isArray(chapters) ? chapters : [];
-  if (state.adminView === "bankEditor") renderAdminRows(state.adminRows, state.adminFailedCount);
+  /* 章节表回来时**不要**在有未保存草稿的情况下重绘编辑页：重绘会用 detail 重建输入框，
+     等于绕过「保存/放弃/取消」把草稿丢掉（UI-06）。下拉里的章节列表会在下一次
+     显式动作时刷新，不差这一下。 */
+  if (state.adminView === "bankEditor" && !isBankEditorDirty()) {
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
 }
 
 function renderBankEditorResults() {
@@ -9313,13 +9653,18 @@ function renderBankEditorDetail() {
     </div>
     <div class="bank-editor-form">
       <div class="bank-editor-chapter-fields">
-        ${path.map((chapter, index) => `
+        ${path.map((chapter, index) => {
+          /* UI-07：这一格原来写「该章 N 题」，N 是**直挂**题量 —— 父章上会显示 0，
+             而它下面明明有题（实测直挂 0、子树 1305）。这里直接说清直挂多少、含子章共多少。 */
+          const scopeText = editorChapterScopeText(chapter.id);
+          return `
           <label>
-            <span>${["一级标题", "二级标题", "三级标题", "四级标题"][index] || `第 ${index + 1} 级标题`} · ID ${chapter.id} · 该章 ${Number(chapter.questionCount || 0)} 题</span>
+            <span>${["一级标题", "二级标题", "三级标题", "四级标题"][index] || `第 ${index + 1} 级标题`} · ID ${chapter.id} · ${scopeText}</span>
             <input data-editor-chapter-id="${chapter.id}" value="${escapeHtml(chapter.name || "")}"
-                   title="章节名是整章共用的：改这里会同时改掉该章全部 ${Number(chapter.questionCount || 0)} 道题的章节名，保存时会再确认一次">
+                   title="章节名是整章共用的：改这里会同时改掉该章${scopeText}的章节名（新名称会出现在全部后代题的章节路径里），保存时会再确认一次">
           </label>
-        `).join("") || `<div class="admin-empty">未找到章节路径</div>`}
+        `;
+        }).join("") || `<div class="admin-empty">未找到章节路径</div>`}
       </div>
       <label>
         <span>题目 / 选项</span>
@@ -9379,7 +9724,14 @@ function bindAdminBankEditorActions() {
   });
   const courseSelect = $("bankEditorCourseSelect");
   if (courseSelect) {
-    courseSelect.onchange = () => {
+    courseSelect.onchange = async () => {
+      /* 切科目会把编辑区清空（detail=null）—— 有草稿先问三选一，取消则把下拉拨回去，
+         不能出现「界面显示科目 B、状态还停在科目 A」的错位。 */
+      const nextName = (courseSelect.selectedOptions?.[0]?.textContent || "").trim() || "另一个题库";
+      if (!await confirmBankEditorLeave(`切换到「${nextName}」`)) {
+        courseSelect.value = String(state.adminEditorCourseId || "");
+        return;
+      }
       state.adminEditorCourseId = Number(courseSelect.value || 0);
       state.adminEditorChapterId = 0;
       state.adminEditorResults = [];
@@ -9397,7 +9749,14 @@ function bindAdminBankEditorActions() {
   const correctionOnly = $("bankEditorCorrectionOnly");
   if (correctionOnly) correctionOnly.onchange = () => { state.adminEditorCorrectionOnly = correctionOnly.checked; };
   const searchBtn = $("bankEditorSearchBtn");
-  if (searchBtn) searchBtn.onclick = () => loadBankEditorQuestions().catch((err) => toast(err.message));
+  if (searchBtn) {
+    /* 「搜索」本身不改 detail，但它会把不在结果集里的题从列表里摘掉、并顺手把 detail 置空
+       —— 未保存的草稿就是这么没的。有草稿时同样先问。 */
+    searchBtn.onclick = async () => {
+      if (!await confirmBankEditorLeave("重新搜索题目")) return;
+      loadBankEditorQuestions().catch((err) => toast(err.message));
+    };
+  }
   const saveBtn = $("bankEditorSaveBtn");
   if (saveBtn) saveBtn.onclick = () => saveBankEditorQuestion().catch((err) => toast(err.message));
   const restoreBtn = $("bankEditorRestoreBtn");
@@ -9484,8 +9843,96 @@ async function loadBankEditorQuestions() {
   }
 }
 
-async function openBankEditorQuestion(questionId, courseId = 0) {
+/* ── 编辑区未保存草稿（UI-06）──────────────────────────────────────────
+   实测：给题干追加一个标记，然后打开另一道题 —— 标记消失，一句提示都没有
+   （编辑区是整块重绘的，输入框里的东西只活在 DOM 里）。丢弃草稿的路径有四条：
+   切题、切科目、切管理页签、离开页面；另外「搜索」会换掉结果集并把 detail 置空。
+   这里给三选一（保存 / 放弃 / 取消），并且**只在字段真的变了时**才拦 ——
+   单纯点开、浏览各题不弹任何东西（dirty 是拿 DOM 当前值和已加载的 detail 比出来的，
+   没有监听器、没有「碰过就算脏」）。 */
+
+/* 章节名的波及范围（UI-07）：服务端给的 questionCount 是**直挂**题量
+   （SQL 里 `s.ichapterid=ch.ichapterid`，不含子章）。旧提示直接拿它当影响面，
+   于是父章「2025年章节练习~基础」弹出「影响该章全部 0 道题」，而它下面实际有题
+   （实测该父章直挂 0、子树 1305）。改名影响的是**整棵子树**：新名字会出现在
+   全部后代题的章节路径里，所有按章节分组/筛选的地方都会跟着变。
+   子树判定与「章节」下拉的过滤口径一致：同 itype 且 code 前缀匹配（见
+   selectedEditorChapterIds）。 */
+function editorChapterScope(chapterId) {
+  const chapters = state.adminEditorChapters || [];
+  const target = chapters.find((chapter) => Number(chapter.id) === Number(chapterId));
+  const direct = Number(target?.questionCount || 0);
+  if (!target) return { direct, children: 0, childQuestions: 0, total: direct, known: false };
+  const code = String(target.code || "");
+  const type = Number(target.type || 0);
+  const kids = code
+    ? chapters.filter((chapter) => Number(chapter.id) !== Number(chapterId)
+        && Number(chapter.type || 0) === type
+        && String(chapter.code || "").startsWith(code))
+    : [];
+  const childQuestions = kids.reduce((sum, chapter) => sum + Number(chapter.questionCount || 0), 0);
+  return { direct, children: kids.length, childQuestions, total: direct + childQuestions, known: true };
+}
+
+/* 一句人能读懂的影响面：直挂多少、含子章共多少。 */
+function editorChapterScopeText(chapterId) {
+  const scope = editorChapterScope(chapterId);
+  if (!scope.children) return `直挂 ${scope.direct} 道题（无子章）`;
+  return `直挂 ${scope.direct} 道题，含 ${scope.children} 个子章共 ${scope.total} 道题`;
+}
+
+/* 编辑区当前的内容和「已加载的那份 detail」比：只有真的不一样才算 dirty。 */
+function isBankEditorDirty() {
+  const detail = state.adminEditorDetail;
+  if (!detail || !$("bankEditorTitleInput")) return false;
+  const norm = (value) => String(value ?? "").replace(/\r\n/g, "\n");
+  if (norm($("bankEditorTitleInput").value) !== norm(detail.title)) return true;
+  if (norm($("bankEditorQuestionInput")?.value) !== norm(detail.question)) return true;
+  if (norm($("bankEditorAnswerInput")?.value) !== norm(detail.answer)) return true;
+  if (norm($("bankEditorDescriptionInput")?.value) !== norm(detail.description)) return true;
+  const pathById = new Map((detail.chapterPath || []).map((chapter) => [Number(chapter.id), chapter]));
+  for (const input of document.querySelectorAll("[data-editor-chapter-id]")) {
+    const before = pathById.get(Number(input.dataset.editorChapterId || 0));
+    if (before && String(input.value).trim() !== String(before.name || "").trim()) return true;
+  }
+  return false;
+}
+
+let bankEditorLeaveResolver = null;
+
+/* 三个出口都走这里：resolve(true) = 可以继续（已保存或用户放弃），false = 留在原地。 */
+function resolveBankEditorLeave(ok) {
+  $("bankEditorDirtyDialog")?.classList.add("hidden");
+  const resolve = bankEditorLeaveResolver;
+  bankEditorLeaveResolver = null;
+  if (resolve) resolve(!!ok);
+}
+
+/* 有草稿就先问一句；没草稿直接放行（浏览不该被打扰）。 */
+function confirmBankEditorLeave(reason = "离开这道题") {
+  if (!isBankEditorDirty()) return Promise.resolve(true);
+  const dialog = $("bankEditorDirtyDialog");
+  const detailId = Number(state.adminEditorDetail?.id || 0);
+  if (!dialog) return Promise.resolve(true);
+  setText("bankEditorDirtyMessage",
+    `${reason}前，题目 #${detailId} 还有未保存的修改。可以「保存后继续」，或放弃这次修改。`);
+  dialog.classList.remove("hidden");
+  $("bkeCancelBtn").onclick = () => resolveBankEditorLeave(false);
+  $("bkeDiscardBtn").onclick = () => resolveBankEditorLeave(true);
+  $("bkeSaveBtn").onclick = async () => {
+    /* 保存走既有入口（含章节改名确认 + 保存确认）：用户在那一层点「取消」等于没保存，
+       这张对话框就不该放行 —— 否则又是一次静默丢稿。 */
+    const saved = await saveBankEditorQuestion().catch((err) => { toast(err.message); return false; });
+    if (saved) resolveBankEditorLeave(true);
+  };
+  return new Promise((resolve) => { bankEditorLeaveResolver = resolve; });
+}
+
+async function openBankEditorQuestion(questionId, courseId = 0, options = {}) {
   if (!questionId) return;
+  if (!options.skipLeaveCheck && Number(state.adminEditorDetail?.id || 0) !== Number(questionId)) {
+    if (!await confirmBankEditorLeave("打开另一道题")) return;
+  }
   if (courseId) state.adminEditorCourseId = Number(courseId);
   state.adminView = "bankEditor";
   state.adminEditorSelectedId = Number(questionId);
@@ -9513,7 +9960,7 @@ async function openBankEditorQuestion(questionId, courseId = 0) {
 
 async function saveBankEditorQuestion() {
   const detail = state.adminEditorDetail;
-  if (!detail?.id) return;
+  if (!detail?.id) return false;
   const chapters = [...document.querySelectorAll("[data-editor-chapter-id]")].map((input) => ({
     id: Number(input.dataset.editorChapterId || 0),
     name: input.value.trim(),
@@ -9528,25 +9975,31 @@ async function saveBankEditorQuestion() {
   };
   if (!payload.title.trim()) {
     toast("题目内容不能为空");
-    return;
+    return false;
   }
   /* ⚠️ 章节名是「一章一份」的：改一个字，这一章下**全部**题的 chapterName 都跟着变
      （实测把章节 20173 改名后，同章 96 道题的 chapterName 全变）。
      以前只有和「保存题干」共用的那一句通用 confirm，管理员根本看不出这次改的是整章；
-     这里对**真的改动了名字**的每一级标题单独再确认一次，并报出影响面。 */
+     这里对**真的改动了名字**的每一级标题单独再确认一次，并报出影响面。
+     ⚠️ 影响面必须算**整棵子树**（UI-07）：服务端的 questionCount 只数直挂，
+     旧提示对父章写「影响该章全部 0 道题」，而该父章下实际有题（实测直挂 0、子树 1305）
+     —— 这个 0 会让管理员以为改名无风险。 */
   const pathById = new Map((detail.chapterPath || []).map((chapter) => [Number(chapter.id), chapter]));
   const chapterRenames = chapters
     .map((chapter) => {
       const before = pathById.get(Number(chapter.id));
       if (!before) return null;
       if (String(before.name || "") === String(chapter.name || "")) return null;
-      return { from: before.name || "（空）", to: chapter.name || "（空）", count: Number(before.questionCount || 0) };
+      return { id: Number(chapter.id), from: before.name || "（空）", to: chapter.name || "（空）" };
     })
     .filter(Boolean);
   for (const rename of chapterRenames) {
-    if (!confirm(`章节「${rename.from}」将改名为「${rename.to}」，影响该章全部 ${rename.count} 道题。\n\n确定要改这一章的标题吗？`)) return;
+    const scopeText = editorChapterScopeText(rename.id);
+    if (!confirm(`章节「${rename.from}」将改名为「${rename.to}」。\n\n影响面：${scopeText}。`
+      + `\n章节名是整章共用的：新名称会出现在这些题（含全部子章）的章节路径里，`
+      + `所有按章节分组、筛选、打印的地方都会跟着变。\n\n确定要改这一章的标题吗？`)) return false;
   }
-  if (!confirm("确定保存题库修改吗？系统会先自动备份当前数据库。")) return;
+  if (!confirm("确定保存题库修改吗？系统会先自动备份当前数据库。")) return false;
   state.adminEditorBusy = "save";
   renderAdminRows(state.adminRows, state.adminFailedCount);
   try {
@@ -9562,6 +10015,7 @@ async function saveBankEditorQuestion() {
     await ensureAdminEditorChapters(state.adminEditorCourseId).catch(() => {});
     await loadBankEditorQuestions().catch(() => {});
     toast("题库修改已保存");
+    return true;
   } finally {
     state.adminEditorBusy = "";
     renderAdminRows(state.adminRows, state.adminFailedCount);
@@ -10171,6 +10625,10 @@ async function submitPaper(autoSubmit = false) {
     toast("正在提交，请稍候");
     return;
   }
+  /* 屏上是「上次缓存的题单」时不交卷：这一批的构成可能已经不是用户看到的筛选结果
+     （超时自动交卷除外 —— 那一刻没有用户在场，题单也确实是他那份）。
+     按钮侧已经收起来了（见 renderVerifyModeControls），这里是给快捷键等入口兜底。 */
+  if (!autoSubmit && state.mode !== "exam" && blockWriteOnStaleList()) return;
   if (state.mode === "exam" && state.submitted && state.exam?.result) {
     toast("已经交卷");
     return;
@@ -10376,6 +10834,8 @@ function resetPractice() {
     toast("当前没有可重置的题目");
     return;
   }
+  /* 屏上是陈旧题单时不碰写入：清的是「上次缓存的那一份」，和用户以为的题单可能不是一回事。 */
+  if (blockWriteOnStaleList()) return;
   const scopeLabel = state.currentChapter
     ? `当前章节「${state.currentChapter.name}」共 ${ids.length} 题`
     : `当前题单共 ${ids.length} 题`;
@@ -10824,6 +11284,9 @@ async function resumeExamDraft() {
     ? Math.max(0, Number(draft.remainingMs || 0))
     : Math.max(0, Number(draft.endsAt || 0) - Date.now());
   state.questions = loaded;
+  /* 卷子也是「题单」的一种：记下它的模块身份（UI-05）。否则切回「题库」时
+     屏上的考卷会被当成同一个模块的旧题单继续留着。 */
+  markQuestionListLoadedIdentity();
   state.answers = { ...(draft.answers || {}) };
   state.submitted = false;
   state.answerVisible = false;
@@ -11442,6 +11905,8 @@ async function generateExamPaper(rule, parts, flow = null) {
   if (!examFlowStillCurrent(activeFlow)) return abortExamFlow(activeFlow);
   const questions = generated.slice(0);
   state.questions = questions;
+  /* 卷子也是「题单」的一种：记下它的模块身份（UI-05），切回题库时才会被当成换模块。 */
+  markQuestionListLoadedIdentity();
   state.answers = {};
   state.submitted = false;
   state.answerVisible = false;
@@ -12264,6 +12729,10 @@ document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
         : `<strong>正在生成学习看板</strong><span>正在读取当前科目的进度、训练记录和学习信号。</span>`;
     }
     if (!["exam", "progress", "training"].includes(state.mode)) {
+      /* UI-05：切模块的**第一时刻**就收掉上一个模块的题单并给加载占位。
+         不能等 loadQuestions（它排在 loadTypes 之后）——期间屏上会一直挂着
+         别的模块的题目。 */
+      beginQuestionModuleEntry();
       await loadTypes();
       if (transitionId !== state.modeTransitionId) return;
     }
@@ -12448,7 +12917,13 @@ $("typeSelect").addEventListener("change", loadQuestions);
 $("orderSelect").addEventListener("change", () => { persistQuestionWindow(); loadQuestions(); });
 $("limitSelect").addEventListener("change", () => { persistQuestionWindow(); loadQuestions(); });
 
-window.addEventListener("beforeunload", () => {
+window.addEventListener("beforeunload", (event) => {
+  /* 管理题库编辑区有未保存草稿时，刷新/关页也要拦一次（UI-06）：
+     这段草稿只在 DOM 里，页面一走就没了。浏览（没改过字段）不会触发。 */
+  if (typeof isBankEditorDirty === "function" && isBankEditorDirty()) {
+    event.preventDefault();
+    event.returnValue = "题库编辑区还有未保存的修改";
+  }
   syncCurrentTrainingSession();
   if (state.mode === "exam" && state.exam && !state.submitted) {
     /* 刷新/关页默认不暂停（时间照走，草稿按 endsAt 续），勾了选项才暂停。 */

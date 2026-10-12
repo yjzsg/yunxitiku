@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261013-cs4"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261013-cs5"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -127,6 +127,14 @@
       <strong>数据读取失败，本次改动不会保存，请刷新重试</strong>
       <span>服务端没有读到你的学习数据，为避免覆盖真实进度，本页已自动进入只读模式。刷新（F5）可重试。</span>
     </div>
+
+    <!-- 题单读取失败（但屏上还留着上一次成功的结果）时的常驻横幅（UI-05）。
+         旧实现只弹一个几秒就消失的 toast，然后继续把**上一个模块**的题单留在屏上：
+         实测阻断 /api/questions 后从「题库」点「收藏」，页签写着收藏、屏上还是题库的
+         80 题和同一道题干 —— toast 消失后这个误导会一直留着。
+         这里写清「这是上次缓存、什么条件、什么时候」，并给重试入口；
+         同时按钮侧（renderVerifyModeControls）把按题单生效的写操作收起来。 -->
+    <div id="questionStaleBanner" class="stale-banner hidden" role="alert"></div>
 
     <!-- 手机端底部悬浮标签栏（只在 ≤760px 显示；桌面端仍是顶栏导航）。
          按钮沿用 .nav-item[data-mode]：点击切页、选中态（renderMode 切 .active）、
@@ -318,6 +326,23 @@
   </div>
   <section id="printView" class="print-view hidden"></section>
 
+  <!-- 管理题库编辑的未保存草稿确认（UI-06）。原生 confirm 只有两项，而这里的
+       正确答案必须三选一：保存 / 放弃 / 取消（回编辑区继续改）。
+       旧实现点另一题直接重绘编辑区，草稿静默消失（实测题干预标记无提示丢失）。 -->
+  <div id="bankEditorDirtyDialog" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="bankEditorDirtyTitle">
+    <div class="modal-panel">
+      <div class="modal-head">
+        <strong id="bankEditorDirtyTitle">当前题目有未保存的修改</strong>
+      </div>
+      <p id="bankEditorDirtyMessage" class="conflict-message"></p>
+      <div class="modal-actions">
+        <button id="bkeCancelBtn" type="button">取消（留在本题）</button>
+        <button id="bkeDiscardBtn" type="button">放弃修改</button>
+        <button id="bkeSaveBtn" class="primary-action" type="button">保存后继续</button>
+      </div>
+      <small class="conflict-hint">放弃的修改不会进数据库历史，也无法找回。</small>
+    </div>
+  </div>
   <div id="conflictModal" class="modal-backdrop hidden">
     <div class="modal-panel conflict-modal">
       <div class="modal-head">
@@ -378,12 +403,15 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261013-sd4"></script>
+  <script src="/app.js?v=20261013-sd5"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
+    // `?v=` 跟着 public/sw.js 的 CACHE 版本走（v2 = 白名单缓存 + 不再缓存 /assets/）：
+    // 改了 sw.js 的缓存策略就抬这个串，浏览器会当成新脚本 URL 立刻回源并重新 install/activate，
+    // 老 cache（可能含受保护题图）由新 SW 的 activate 清掉。
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
-        navigator.serviceWorker.register("/sw.js").catch(function (err) {
+        navigator.serviceWorker.register("/sw.js?v=20261013-sw2").catch(function (err) {
           console.warn("service worker 注册失败", err);
         });
       });

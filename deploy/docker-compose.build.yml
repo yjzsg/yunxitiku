@@ -5,7 +5,10 @@ services:
       dockerfile: Dockerfile
     container_name: yunxi-tiku
     ports:
-      - "8787:8787"
+      # 默认只绑回环（与 docker-compose.yml 口径一致）。
+      # 要让局域网其它机器访问，显式写本机 IP，例如：- "192.168.1.10:8787:8787"
+      # 不要写 0.0.0.0 —— 本镜像没有 TLS，管理口令与上游账号都是明文传输。
+      - "127.0.0.1:8787:8787"
     volumes:
       - ../data:/app/data
       - ../userdata:/app/userdata
@@ -15,8 +18,11 @@ services:
       App__UserDataRoot: /app/userdata
       # 容器时区（不设则 UTC，落盘时间戳比本地早 8 小时）
       TZ: Asia/Shanghai
-      # 初始登录口令（公开默认值，靠首次登录强制改密兜底）
-      App__DefaultLoginPassword: "123456"
+      # 初始登录口令：这里**不设公开默认值**（与 docker-compose.yml 口径一致）。
+      # 不配置时，后端启动会随机生成一次性口令，只在「管理员账号还不存在」时
+      # 写进 userdata/admin-init-password.txt 并打印到启动日志。
+      # 要固定口令就取消下面这行注释并改成强口令（或放 docker-compose.override.yml）。
+      # App__DefaultLoginPassword: "改成你自己的强口令"
     healthcheck:
       test: ["CMD-SHELL", "DOTNET_CLI_TELEMETRY_OPTOUT=1 dotnet exec /app/YunxiTiku.Web.dll --healthcheck http://127.0.0.1:8787/api/health"]
       interval: 30s

@@ -600,6 +600,39 @@ body.is-admin .admin-only {
   opacity: 0.85;
 }
 
+/* 题单陈旧横幅（UI-05）：请求失败但屏上留着的还是**上一次**的结果。
+   与只读横幅同样常驻、同样不给关闭按钮 —— 这条信息说的是「你看到的不是本次结果」，
+   不能靠几秒的 toast。用 warning 档而不是 danger：内容还能看、还能重试。
+   布局上它和 .read-only-banner 一样是 .app-shell 的直接子项，workspace 自然被挤小。 */
+.stale-banner {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--warning-200);
+  background: var(--warning-50);
+  color: var(--warning-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.stale-banner strong {
+  font-weight: 700;
+}
+
+.stale-banner span {
+  flex: 1 1 320px;
+  min-width: 0;
+  opacity: 0.9;
+}
+
+.stale-banner button {
+  flex: 0 0 auto;
+  min-height: 32px;
+}
+
 .account-box {
   margin-left: auto;
   display: flex;
@@ -6409,9 +6442,38 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     font-size: 24px;
   }
 
-  .training-summary-grid,
+  /* UI-09：KPI 是**低信息密度**的统计块，390 宽下按 2×2 紧凑排，不再一条一行。
+     实测（390×844，标签栏上沿 780）：单列时 summary-grid 高 382px、第 4 格底边
+     803px 已经被底部标签栏盖住，「今日强化 / 今日错题复习」这些任务卡 top=815
+     整屏都看不到 —— 结论是首屏只剩「有多少」，看不到「做什么」。
+     复杂训练卡该占的宽度不动：.training-card-grid 仍是 1 列（不主张把带描述和
+     按钮的任务卡挤成两列）。 */
+  .training-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .training-summary-grid > div {
+    gap: 2px;
+    padding: 10px 12px;
+  }
+
+  .training-summary-grid b {
+    font-size: 22px;
+  }
+
   .training-card-grid {
     grid-template-columns: 1fr;
+  }
+
+  /* 任务优先：KPI 排到任务卡之后（grid 容器的 order 生效），
+     「现在做什么」先于「练了多少」。DOM 顺序不动，读屏/键盘顺序仍是原样。 */
+  .training-summary-grid {
+    order: 5;
+  }
+
+  .training-tools {
+    order: 6;
   }
 
   .training-card {
@@ -10659,6 +10721,17 @@ body.answer-card-collapsed .answer-card-collapse-btn::before {
   background: var(--ink-l0);
   border-bottom: 2px solid var(--ink-l5);
   color: var(--ink-l5);
+}
+
+/* 陈旧横幅同上：墨水屏上靠**边框**区分，不靠底色浓淡。 */
+[data-theme="ink"] .stale-banner {
+  background: var(--ink-l0);
+  border-bottom: 2px solid var(--ink-l5);
+  color: var(--ink-l5);
+}
+
+[data-theme="ink"] .stale-banner button {
+  border-color: var(--ink-l5);
 }
 
 /* ── 题库对比 chip：新增实心 / 删除虚线 ── */
