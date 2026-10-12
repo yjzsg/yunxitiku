@@ -11003,11 +11003,69 @@ body.answer-card-collapsed .answer-card-collapse-btn::before {
   opacity: 0.8;
 }
 
+/* 多门课同时更新：一门课一行，各占一条，互不覆盖 */
+.bank-progress-list {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.bank-progress-list .bank-progress {
+  margin: 0;
+}
+
+/* 排队中（还没拿到写闸）：别装成在下载，用等待色调 */
+.bank-progress.queued {
+  border-color: var(--warning-200);
+  background: var(--warning-50);
+}
+
+.bank-progress.queued .bank-progress-head span {
+  color: var(--warning-text);
+}
+
+/* 完成 */
+.bank-progress.done {
+  border-color: var(--success-200);
+  background: var(--success-50);
+}
+
+.bank-progress.done .bank-progress-head span {
+  color: var(--success-700);
+}
+
+.bank-progress.done .bank-progress-track i {
+  background: linear-gradient(90deg, var(--success-500), var(--success-700));
+}
+
+/* 失败：原因直接写在 meta 行里 */
+.bank-progress.failed {
+  border-color: var(--danger-200);
+  background: var(--danger-50);
+}
+
+.bank-progress.failed .bank-progress-head span {
+  color: var(--danger-700);
+}
+
+.bank-progress.failed .bank-progress-track i {
+  background: var(--danger-500);
+}
+
+.bank-progress.failed .bank-progress-meta span:first-child {
+  color: var(--danger-700);
+}
+
 /* 不确定态（服务端还没上报进度）：来回滚动的光带 */
 .bank-progress.indeterminate .bank-progress-track i {
   width: 40% !important;
   background: linear-gradient(90deg, transparent, var(--primary), transparent);
   animation: bank-progress-slide 1.2s linear infinite;
+}
+
+/* 排队中光带用等待色（放在 .indeterminate 之后：两者特异性相同，靠顺序覆盖背景色） */
+.bank-progress.queued .bank-progress-track i {
+  background: linear-gradient(90deg, transparent, var(--warning-500), transparent);
 }
 
 @keyframes bank-progress-slide {
@@ -11022,7 +11080,8 @@ body.answer-card-collapsed .answer-card-collapse-btn::before {
 }
 
 @media print {
-  .bank-progress {
+  .bank-progress,
+  .bank-progress-list {
     display: none !important;
   }
 }

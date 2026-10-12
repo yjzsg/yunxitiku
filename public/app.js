@@ -39,6 +39,23 @@ const state = {
   saveErrorShownAt: 0,
   storageDirty: false,
   saveStatus: "idle",
+  /* storage 的**变更代际**。saveChain 只串行化网络请求，不跟踪「请求发出去之后
+     storage 又被改过」；没有这个计数，v1 的响应回来时会把 v2 标成已同步
+     （关页即丢，见 saveUserData / ST-05）。每次 markStorageDirty 自增。 */
+  mutationVersion: 0,
+  /* 上下文**世代**：每次 loadUserData / enterApp / logout 自增，
+     用来隔离上一个账号（或上一次读数据）的在途保存响应。 */
+  loadGeneration: 0,
+  /* 冲突弹窗打开时记录「是哪一次 storage 变更触发的」，用来判断恢复后
+     storage 是否已经变了（见 applyPendingSaveDraft / keepLocalConflictDraft）。 */
+  conflictGeneration: -1,
+  conflictDraft: null,
+  conflictDraftId: "",
+  /* 允许删除**已确认内容**对应的草稿：loadUserData 确认了服务端就是这份内容之后，
+     才准把对应 draftId 定向删掉（「已确认」的显式凭证）。 */
+  draftConfirmations: [],
+  /* 补存定时器只能有一个；冲突保留后排队的那次不能把当前 storage 整包覆盖掉。 */
+  deferredSaveTimer: null,
   conflictOpen: false,
   conflictLocalSnapshot: null,
   pendingPasswordUser: "",
@@ -83,8 +100,9 @@ const state = {
   adminBankUpdateModePromise: null,
   adminBankLastReport: null,
   adminBankLastReportAt: "",
-  // 正在进行的拉取：{courseId, courseName, startedAtLocal, stageLabel, current, total, detail, percent, indeterminate}
-  adminBankPull: null,
+  // 正在进行的拉取（可同时多门课）：courseId -> {courseId, courseName, startedAtLocal, stageLabel,
+  // current, total, detail, percent, queued, unknown, elapsedSeconds, done, ok, error, finishedAtLocal}
+  adminBankPulls: {},
   adminDataStatus: null,
   adminCleanAdsResult: "",
   adminEditorCourseId: 0,
@@ -129,6 +147,9 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+/* 本标签页的随机身份。草稿按「账号 + 标签页 + 草稿ID」分别落盘，
+   同账号两个标签页各存一份草稿时互不覆盖（见 stashPendingSaveDraft / ST-03）。 */
+const TAB_ID = Math.random().toString(36).slice(2, 10);
 const SESSION_USER_KEY = "yunxi-session-user";
 const LAST_USER_KEY = "yunxi-current-user";
 /* 会话令牌的本地副本。服务端登录时会同时下发 cookie 与 body 里的 token：
@@ -1578,9 +1599,20 @@ async function logout() {
   localStorage.removeItem(SESSION_TOKEN_KEY);
   clearTimeout(state.saveTimer);
   state.saveTimer = null;
+  clearTimeout(state.deferredSaveTimer);
+  state.deferredSaveTimer = null;
   state.storageDirty = false;
   setSaveStatus("idle");
   state.user = "";
+  /* 换账号：在途保存的响应不能落到下一个账号头上（世代比对里 user 那一项也管这事）。 */
+  state.loadGeneration = (state.loadGeneration || 0) + 1;
+  state.mutationVersion = 0;
+  state.saveChain = null;
+  state.storageInheritedDraft = null;
+  state.conflictLocalSnapshot = null;
+  state.conflictDraft = null;
+  state.conflictDraftId = "";
+  state.conflictDrafts = null;
   state.questionRequestId = (state.questionRequestId || 0) + 1;
   state.typeRequestId = (state.typeRequestId || 0) + 1;
   state.modeTransitionId = (state.modeTransitionId || 0) + 1;
@@ -1600,6 +1632,16 @@ async function logout() {
    下一次保存把用户真实进度整包覆盖（实测 supa.json 2651 → 700 字节）。
    现在：只在 tolerateFailure 时进**只读态**（能看、能导出，但不保存）；其它错误照旧上抛。 */
 async function loadUserData(user, options = {}) {
+  /* 换代：这次读数据之后回来的、上一次读数据之前发出的保存响应，一律按过期处理
+     （它们带的 revision/账号上下文已经不对了，命中由 saveUserData 的世代比对完成）。 */
+  state.loadGeneration = (state.loadGeneration || 0) + 1;
+  state.mutationVersion = 0;
+  state.saveChain = null;
+  state.storageInheritedDraft = null;
+  state.draftConfirmations = [];
+  state.conflictDraftId = "";
+  state.conflictDrafts = null;
+  const generation = state.loadGeneration;
   let res;
   try {
     res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
@@ -1620,6 +1662,7 @@ async function loadUserData(user, options = {}) {
     }
     throw err;
   }
+  if (generation !== state.loadGeneration) return res;   // 期间又 load 过（切账号/恢复冲突）
   setStorageReadFailed(false, "");
   state.user = res.user;
   state.storage = normalizeStorage(res.data || {});
@@ -1628,11 +1671,16 @@ async function loadUserData(user, options = {}) {
   setSaveStatus("idle");
   state.zoom = normalizeZoom(state.storage.settings?.zoom);
   localStorage.setItem(LAST_USER_KEY, state.user);
+  /* 数据取回来了，这正是判定「上次 beacon/补存到底成没成」的时机：
+     内容与服务端一致的那条草稿才算确认，然后**按 ID** 定向删（ST-02）。
+     别的账号的草稿这里一概不读、不动。 */
+  migrateAndReconcileDrafts();
   if (refreshDailyTrainingState()) {
     // Day rolled over while data was offline: keep local dirty so today's clean slate persists.
     scheduleSave();
   }
   renderUsers();
+  return res;
 }
 
 /* 只读态的开关 + 顶部横幅。横幅是**常驻**的（不是 toast）：
@@ -1773,6 +1821,9 @@ function updateSaveStatusUi() {
 }
 
 function markStorageDirty() {
+  /* 代际自增必须在**每一次** storage 变更时发生：在途保存靠它判断
+     「响应回来时 storage 是否又变过」（ST-05）。 */
+  state.mutationVersion = (state.mutationVersion || 0) + 1;
   state.storageDirty = true;
   if (state.saveStatus !== "saving") setSaveStatus("dirty");
 }
@@ -1791,70 +1842,325 @@ function scheduleSave() {
 }
 
 /* 隐藏页/关页时兜底保存失败的落点：整包写进 localStorage，
-   下次开页提示并补存（见 applyPendingSaveDraft）。 */
-const PENDING_SAVE_KEY = "yunxi-pending-save";
+   下次开页提示并补存（见 applyPendingSaveDraft）。
 
-function stashPendingSaveDraft(reason) {
-  if (!state.user) return false;
+   ── 为什么是「集合」而不是一个键 ──────────────────────────────
+   旧实现只有一个 `yunxi-pending-save` 槽，谁后写谁覆盖：
+     · alpha 的未存笔记被 beta 登录时的 apply 直接 clear（删别人的数据）；
+     · 同账号标签页 A 存了 notes101=tabA，B 一存 tabB 就把 A 盖掉；
+     · 补存成功的回调无条件 clear，会把期间别的标签页写进来的新草稿一起删。
+   现在每个草稿占**独立键** `yunxi-save-draft:<账号>:<标签页>:<草稿ID>`，
+   索引键只存 ID 列表；清理一律按 DraftId 定向删（compare-and-delete），
+   别人的账号一律**跳过不删**（ST-02/03/04 的公共地基）。 */
+const PENDING_SAVE_KEY = "yunxi-pending-save";        // 旧单槽：只读，用来迁移
+const DRAFT_INDEX_KEY = "yunxi-save-drafts";
+const DRAFT_PREFIX = "yunxi-save-draft:";
+/* localStorage 的配额通常 ~5MB，而整包 storage 在重题库上能到 300KB+。
+   配额满了 setItem 会抛 → 新草稿写不进去。清理顺序：
+   ① 「已确认」的（服务端就是这份内容，见 markDraftConfirmed）；② 同一个 tab 自己的旧草稿。
+   绝不动别的账号、别的标签页的草稿 —— 那些是它们唯一的恢复点。 */
+const DRAFT_INDEX_MAX = 8;
+
+function normalizeDraftUser(user) {
+  return String(user || "").trim().toLowerCase();
+}
+
+/* 草稿 ID = user + tab + 随机。TAB_ID 是页面级随机值，
+   所以同账号两个标签页各自的草稿天然是两条独立条目。 */
+function makeDraftId(user) {
+  return [
+    encodeURIComponent(normalizeDraftUser(user) || "anon"),
+    TAB_ID,
+    Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4),
+  ].join(".");
+}
+
+function draftKeyFor(id) {
+  return DRAFT_PREFIX + String(id);
+}
+
+function readDraftIndex() {
   try {
-    localStorage.setItem(PENDING_SAVE_KEY, JSON.stringify({
-      user: state.user,
-      revision: state.storageRevision || "",
-      reason: reason || "",
-      at: nowText(),
-      storage: state.storage,
-    }));
-    return true;
-  } catch (err) {
-    console.warn("未保存改动落地失败", err);
-    return false;
+    const raw = localStorage.getItem(DRAFT_INDEX_KEY);
+    const list = raw ? JSON.parse(raw) : null;
+    return Array.isArray(list) ? list.filter((row) => row && typeof row.id === "string") : [];
+  } catch (_err) {
+    return [];
   }
 }
 
-function readPendingSaveDraft() {
+function writeDraftIndex(list) {
+  try { localStorage.setItem(DRAFT_INDEX_KEY, JSON.stringify(list)); } catch (_err) { /* 索引丢了草稿仍在 */ }
+}
+
+function readDraftRecord(id) {
   try {
-    const raw = localStorage.getItem(PENDING_SAVE_KEY);
+    const raw = localStorage.getItem(draftKeyFor(id));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" && parsed.storage ? parsed : null;
-  } catch (err) {
+  } catch (_err) {
     return null;
   }
 }
 
-function clearPendingSaveDraft() {
-  try { localStorage.removeItem(PENDING_SAVE_KEY); } catch (_err) { /* 清不掉不影响使用 */ }
+/* 定向清理：只删「这次明确要删的那一条」。
+   期间别的标签页/别的账号写进来的新草稿不受影响（旧实现的整槽 removeItem 会连坐）。 */
+function removeDraftById(id) {
+  if (!id) return false;
+  try { localStorage.removeItem(draftKeyFor(id)); } catch (_err) { /* 删不掉不影响使用 */ }
+  writeDraftIndex(readDraftIndex().filter((row) => row.id !== id));
+  return true;
+}
+
+/* 删掉**本标签页**所有草稿（只在确认服务端已收下本页这份内容后调用）。 */
+function removeOwnDrafts(user) {
+  const me = normalizeDraftUser(user || state.user);
+  for (const row of readDraftIndex()) {
+    if (normalizeDraftUser(row.user) === me && row.tab === TAB_ID) removeDraftById(row.id);
+  }
+}
+
+function draftSummaryFor(entry) {
+  return { id: entry.id, user: entry.user, tab: entry.tab, at: entry.at, reason: entry.reason, revision: entry.revision };
+}
+
+/* 写一份草稿。user 默认当前账号；只读态写草稿是安全的
+   （基线本就空着，落盘只是留个恢复点，不会被当成「已同步」）。 */
+function stashPendingSaveDraft(reason, options = {}) {
+  const user = options.user || state.user;
+  if (!user) return false;
+  const id = options.id || makeDraftId(user);
+  const record = {
+    id,
+    user,
+    tab: TAB_ID,
+    dirty: options.dirty !== false,
+    revision: options.revision !== undefined ? (options.revision || "") : (state.storageRevision || ""),
+    reason: reason || "",
+    at: nowText(),
+    storage: options.storage || state.storage,
+  };
+  // 最多保留 8 条：① 已确认的 ② 本标签页自己的旧草稿，之后才轮到别的标签页/账号的旧草稿
+  //   （那条只可能删到 7 条以前写下的、既没确认也没同步的，概率极低；这条注释就是它的说明）。
+  let index = readDraftIndex().filter((row) => row.id !== id);
+  while (index.length >= DRAFT_INDEX_MAX) {
+    index = dropOneDraftForSpace(index);
+    if (index === null) return false;
+  }
+  index.push(draftSummaryFor(record));
+  writeDraftIndex(index);
+  try {
+    localStorage.setItem(draftKeyFor(id), JSON.stringify(record));
+  } catch (err) {
+    // 写正文失败 → 刚挂上的索引条目要摘掉，否则索引指向空条目
+    writeDraftIndex(readDraftIndex().filter((row) => row.id !== id));
+    console.warn("未保存改动落地失败", err);
+    return false;
+  }
+  return id;
+}
+
+/* 返回去掉一个之后的索引；无可删则返回 null。 */
+function dropOneDraftForSpace(index) {
+  const next = [...index];
+  const take = (pick) => {
+    const at = next.findIndex(pick);
+    if (at < 0) return null;
+    const [row] = next.splice(at, 1);
+    return row;
+  };
+  const drop = (row) => {
+    try { localStorage.removeItem(draftKeyFor(row.id)); } catch (_err) { /* 忽略 */ }
+  };
+  const confirmed = take((row) => isDraftConfirmed(row.id, row.user));
+  if (confirmed) { drop(confirmed); return next; }
+  const mine = take((row) => row.tab === TAB_ID);
+  if (mine) { drop(mine); return next; }
+  const me = normalizeDraftUser(state.user);
+  const stale = take((row) => normalizeDraftUser(row.user) === me);
+  if (stale) { drop(stale); return next; }
+  // 全是别的账号的：宁可写不下这一份，也不删别人的未保存数据
+  return null;
+}
+
+/* 读草稿：默认只读**当前账号**的，按写入时间倒序（最新的先拿来补存）。
+   includeOtherUsers 走导出/清理入口。 */
+function readPendingSaveDrafts(options = {}) {
+  const me = normalizeDraftUser(state.user);
+  /* 默认**只**读当前账号的：草稿隔离的第一道闸就是这里 ——
+     别的账号的条目连读都不读，后面的清理自然碰不到它们。 */
+  const includeAll = !!options.includeOtherUsers;
+  const rows = [];
+  const index = readDraftIndex();
+  for (const row of index) {
+    if (!includeAll && normalizeDraftUser(row.user) !== me) continue;
+    const record = readDraftRecord(row.id);
+    if (!record) continue;   // 索引有、正文没了：跳过（索引会在下次写入时收敛）
+    rows.push(record);
+  }
+  const ordered = rows.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+  return options.order === "oldest" ? ordered.reverse() : ordered;
+}
+
+/* 旧单槽迁移：读出来当一条草稿，正文转写到新键，然后**按 ID 定向**删掉旧槽。
+   迁移只认「当前账号」的那条：槽里是别人的账号就原样留着，等他自己登回来。 */
+function migrateLegacyPendingDraft() {
+  let legacy = null;
+  try {
+    const raw = localStorage.getItem(PENDING_SAVE_KEY);
+    if (!raw) return false;
+    legacy = JSON.parse(raw);
+  } catch (_err) {
+    try { localStorage.removeItem(PENDING_SAVE_KEY); } catch (_e2) { /* 损坏的旧槽 */ }
+    return false;
+  }
+  if (!legacy || typeof legacy !== "object" || !legacy.storage) {
+    try { localStorage.removeItem(PENDING_SAVE_KEY); } catch (_e3) { /* 损坏的旧槽 */ }
+    return false;
+  }
+  const me = normalizeDraftUser(state.user);
+  if (normalizeDraftUser(legacy.user) !== me) return false;   // 别人的草稿：留着
+  const id = stashPendingSaveDraft(legacy.reason || "migrated", {
+    user: legacy.user, revision: legacy.revision, storage: legacy.storage,
+  });
+  if (id) {
+    try { localStorage.removeItem(PENDING_SAVE_KEY); } catch (_err) { /* 下次再迁 */ }
+  }
+  return !!id;
+}
+
+/* ⚠️ 兼容壳：老探针/老代码可能还在找「那一个」草稿。
+   只回答**当前账号 + 本标签页**最新的一条，别的账号一概不回。 */
+function readPendingSaveDraft() {
+  const mine = readPendingSaveDrafts().filter((draft) => draft.tab === TAB_ID);
+  return mine.length ? mine[0] : null;
+}
+
+/* ⚠️ 兼容壳：**只给当前探针/内联调用用**。
+   传 draftId 才是定向删（生产路径一律走 removeDraftById）；
+   不传就当作「明确放弃本页当前账号的草稿」，且**不碰别的账号**。 */
+function clearPendingSaveDraft(draftId) {
+  if (draftId) return removeDraftById(draftId);
+  for (const draft of readPendingSaveDrafts()) removeDraftById(draft.id);
+  return true;
+}
+
+/* 拿「已确认」清单去对草稿：内容与服务端**完全一致**的那条才算确认，
+   然后按 ID 定向删。这就是「beacon 只算排队，成功与否由下次 load 判定」的落点
+   （ST-02）。没有凭证就什么都不删。 */
+function reconcileConfirmedDrafts() {
+  if (!state.user || state.storageReadFailed) return false;
+  const json = JSON.stringify(state.storage);
+  let changed = false;
+  const additions = [];
+  for (const record of readPendingSaveDrafts()) {
+    let same = false;
+    try { same = JSON.stringify(record.storage) === json; } catch (_err) { same = false; }
+    if (!same) continue;
+    if (!getDraftConfirmations().some((item) => item.id === record.id)) additions.push(draftSummaryFor(record));
+    removeDraftById(record.id);
+    changed = true;
+  }
+  if (additions.length) pushDraftConfirmations(additions);
+  return changed;
+}
+
+/* 数据已经取回来了 → 把旧槽迁进集合，再对一遍「已确认」清单。 */
+function migrateAndReconcileDrafts() {
+  migrateLegacyPendingDraft();
+  reconcileConfirmedDrafts();
+}
+
+function getDraftConfirmations() {
+  return Array.isArray(state.draftConfirmations) ? state.draftConfirmations : [];
+}
+
+function pushDraftConfirmations(list) {
+  state.draftConfirmations = getDraftConfirmations().concat(list).slice(-16);
+}
+
+/* 「这份内容服务端已经收下了」的凭据：记 ID（给草稿反查用）+ 内容哈希（给导入去重/兼容用）。 */
+function markDraftConfirmed(ids, storages) {
+  const additions = [];
+  (ids || []).forEach((id, i) => {
+    if (!id) return;
+    additions.push({ id, user: state.user, digest: storageDigest((storages || [])[i]), at: nowText() });
+    removeDraftById(id);
+  });
+  if (additions.length) pushDraftConfirmations(additions);
+  return additions;
+}
+
+function isDraftConfirmed(id, user) {
+  const me = normalizeDraftUser(user || state.user);
+  return getDraftConfirmations().some((item) => item.id === id && normalizeDraftUser(item.user) === me);
+}
+
+function storageDigest(storage) {
+  try { return digestText(JSON.stringify(storage)); } catch (_err) { return ""; }
+}
+
+function digestText(text) {
+  const str = String(text || "");
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < str.length; i += 1) {
+    const code = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ code, 16777619) >>> 0;
+    h2 = Math.imul(h2 + code, 2246822519) >>> 0;
+  }
+  return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+}
+
+/* 补存时**只贴**当次那份草稿的内容。
+   旧实现 `state.storage = draft.storage` 会把用户此刻正在编辑的（可能更新的）
+   storage 换回旧草稿，等于把编辑动作抹掉。 */
+function pickDraftContent(record) {
+  if (!record) return;
+  state.storage = normalizeStorage(record.storage);
+  state.storageDirty = true;
+  state.storageInheritedDraft = { id: record.id, at: record.at || "", user: record.user || "" };
+  setSaveStatus("dirty");
 }
 
 /* 开页时把上次没存上的改动接回来。三种情况：
-     ① 草稿内容 = 服务器那份（别的标签页后来存成功了）→ 直接清掉，不打扰用户；
-     ② 服务器还停在同一 revision → 当场补存（数据找回来了）；
+     ① 草稿内容 = 服务器那份（别的标签页后来存成功了）→ 直接删掉这条，不打扰用户；
+     ② 服务器还停在同一 revision → 当场补存（数据找回来了，按 ID 定向删）；
      ③ 服务器已经前进（别的标签页/设备写过）→ 不覆盖，把草稿摆进「数据冲突」
-        对话框让用户自己决定（导出备份 / 加载服务器最新数据）。
-   为什么不无条件覆盖：那会把别人的新改动盖掉。 */
+        对话框让用户自己决定（导出备份 / 保留本地 / 加载服务器最新数据）。
+   为什么不无条件覆盖：那会把别人的新改动盖掉。
+   为什么跳过别的账号而不是清掉：隔离身份时删掉的是**别人唯一的未保存数据**。 */
 function applyPendingSaveDraft() {
-  const draft = readPendingSaveDraft();
-  if (!draft) return false;
   /* 只读态：基线是空的，把草稿贴上来也存不下去，只会让用户以为改动还在。
      草稿**留着**（不清），下次读成功时再走正常补存。 */
   if (state.storageReadFailed) return false;
-  if (String(draft.user || "") !== String(state.user || "")) { clearPendingSaveDraft(); return false; }
+  migrateLegacyPendingDraft();
+  const drafts = readPendingSaveDrafts().filter((row) => row.dirty);
+  if (!drafts.length) return false;
+  const newest = drafts[0];
   let same = false;
-  try { same = JSON.stringify(draft.storage) === JSON.stringify(state.storage); } catch (_err) { same = false; }
-  if (same) { clearPendingSaveDraft(); return false; }
-  if (String(draft.revision || "") !== String(state.storageRevision || "")) {
+  try { same = JSON.stringify(newest.storage) === JSON.stringify(state.storage); } catch (_err) { same = false; }
+  if (same) {
+    markDraftConfirmed([newest.id], [newest.storage]);
+    return false;
+  }
+  if (String(newest.revision || "") !== String(state.storageRevision || "")) {
     openConflictDialog(
-      { message: `上次有未保存的改动（${draft.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。` },
-      { user: draft.user, revision: draft.revision || "", storage: draft.storage, at: draft.at || "" },
+      {
+        message: drafts.length > 1
+          ? `本机有 ${drafts.length} 份未保存的改动（最新一份在 ${newest.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。`
+          : `上次有未保存的改动（${newest.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。`,
+      },
+      { user: newest.user, revision: newest.revision || "", storage: newest.storage, at: newest.at || "" },
+      { draftId: newest.id, count: drafts.length, drafts },
     );
     return false;
   }
-  state.storage = normalizeStorage(draft.storage);
-  state.storageDirty = true;
-  setSaveStatus("dirty");
-  toast(`上次有未保存的改动（${draft.at || ""}），正在补存…`);
+  pickDraftContent(newest);
+  toast(`上次有未保存的改动（${newest.at || ""}），正在补存…`);
   saveUserData().then(() => {
-    clearPendingSaveDraft();
+    /* 草稿的删除在 saveUserData 成功分支里按 ID 定向做（那里才知道这次发的是哪一份）。 */
     toast("上次未保存的改动已补存");
   }).catch((err) => {
     /* 补存失败：草稿留着，下次开页再试；冲突照走冲突对话框。 */
@@ -1867,6 +2173,21 @@ function flushPendingSaveBeacon() {
   if (!state.user || !state.storageDirty) return false;
   /* 只读态下 sendBeacon 更危险：它不看响应，发出去就当作已保存。 */
   if (state.storageReadFailed) return false;
+  /* ⚠️ sendBeacon 返回 true **只表示浏览器把请求排进了队列**，既不代表服务端
+     提交成功，也拿不到新 revision。旧实现在 ok 为真时立刻
+     dirty=false / status=idle / 清掉草稿 —— 隐藏页最常见的链路正是
+     「普通保存 409 → 再发一个带同样旧 revision 的 beacon」，
+     于是即便随后 409/401/500，本机一个恢复点都不剩（ST-02）。
+     现在的顺序：先落草稿（带唯一 ID）再发；ok 为真也不清草稿、不认定同步，
+     成功与否由下一次 load / save 的结果判定（见 reconcileConfirmedDrafts）。 */
+  let draftId = "";
+  let body = "";
+  try {
+    body = JSON.stringify(state.storage);
+    draftId = stashPendingSaveDraft("beacon");   // 先落盘，再排队
+  } catch (err) {
+    console.warn("未保存改动落地失败", err);
+  }
   try {
     /* revision 为空时**不能**省掉前置条件：服务端会把「无前置条件」当成放行，
        于是空基线直接盖掉真实数据。空 revision 用标准 HTTP 的「只在不存在时创建」
@@ -1874,23 +2195,21 @@ function flushPendingSaveBeacon() {
     const revision = state.storageRevision
       ? `&revision=${encodeURIComponent(state.storageRevision)}`
       : "&expectEmpty=1";
-    const body = JSON.stringify(state.storage);
     const blob = new Blob([body], { type: "application/json; charset=utf-8" });
     const ok = navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}${revision}`, blob);
     if (ok) {
-      state.storageDirty = false;
-      setSaveStatus("idle");
-      clearPendingSaveDraft();
+      /* 草稿**留着**、dirty 字段**留着**：这份草稿是「已排队未确认」，
+         下次开页按内容/revision 确认后再定向清理。 */
+      if (draftId) state.pendingBeaconDraftId = draftId;
       return true;
     }
     /* sendBeacon 有 64KB 的 body 上限（超了直接返回 false），页面正在卸载时也可能发不出去。
        旧实现到这里只返回 false 就完了 —— 保存状态写着「未保存」，可页面已经关了，
-       用户根本看不到，改动就这么无声丢掉。现在把整包落到 localStorage，
-       下次开页提示并补存。 */
-    stashPendingSaveDraft(`beacon_rejected:${blob.size}b`);
+       用户根本看不到，改动就这么无声丢掉。草稿已经在上面落好了，这里只补上原因。 */
+    if (draftId) stashPendingSaveDraft(`beacon_rejected:${blob.size}b`, { id: draftId });
     return false;
   } catch (err) {
-    stashPendingSaveDraft("beacon_error:" + (err?.message || ""));
+    if (draftId) stashPendingSaveDraft("beacon_error:" + (err?.message || ""), { id: draftId });
     return false;
   }
 }
@@ -1903,6 +2222,15 @@ function saveUserData() {
   }
   const run = async () => {
     setSaveStatus("saving");
+    /* 发送时就把这次请求的「上下文」钉死：账号、加载世代、变更代际、payload。
+       响应回来时先比对 —— 对不上说明这段时间里 storage 又变过（ST-05）。 */
+    const context = {
+      user: state.user,
+      generation: state.loadGeneration,
+      mutation: state.mutationVersion,
+      payload: state.storage,
+      inherited: state.storageInheritedDraft || null,
+    };
     const headers = { "Content-Type": "application/json; charset=utf-8" };
     /* 前置条件**始终**带：revision 为空时用 If-None-Match: *（「只在服务端还没有数据时创建」），
        不能再省成「无前置条件」—— 服务端在「文件非空但客户端 revision 为空」时按 409 处理，
@@ -1912,13 +2240,32 @@ function saveUserData() {
     const result = await api(`/api/user/save?user=${encodeURIComponent(state.user)}`, {
       method: "POST",
       headers,
-      body: JSON.stringify(state.storage),
+      body: JSON.stringify(context.payload),
     });
     state.storageRevision = result.revision || state.storageRevision;
+    /* 这次请求确实被服务端收下了 —— 它发出去的那份内容（= 某条草稿的内容）
+       现在可以按 ID 定向删；导入去重也认这个凭据。 */
+    markDraftConfirmed([context.inherited?.id], [context.payload]);
+    if (context.inherited?.id) state.storageInheritedDraft = null;
+    /* ⚠️ 「请求发出之后」storage 又变过（mutationVersion 前进）或换了账号/重载过
+       （loadGeneration 前进）→ **不能**把这个响应当成本次内容的同步结果：
+       旧实现无条件 dirty=false / status=idle，于是 v2 被标成已同步，
+       此刻关页 beforeunload 清掉 450ms 定时器、beacon 又因 dirty=false 直接 return
+       → v2 没有任何请求也没有草稿（ST-05）。现在保持 dirty 并排队补存。 */
+    const stale = context.generation !== state.loadGeneration
+      || context.user !== state.user
+      || context.mutation !== state.mutationVersion;
+    if (stale) {
+      state.storageDirty = true;
+      setSaveStatus("dirty");
+      scheduleSave();
+      return result;
+    }
     state.storageDirty = false;
     setSaveStatus("idle");
-    /* 这里**不**清「待保存草稿」：它可能来自另一个标签页（localStorage 是共享的），
-       清掉就等于替那个页面把改动丢了。开页时按内容/revision 判定（见 applyPendingSaveDraft）。 */
+    /* 本页唯一一份草稿对应的内容刚刚被服务端收下 → 定向删掉它（compare-and-delete）。
+       别的标签页/别的账号的草稿一律不动：它们可能这期间又写过新内容。 */
+    if (context.inherited?.id) removeDraftById(context.inherited.id);
     return result;
   };
   state.saveChain = (state.saveChain || Promise.resolve()).catch(() => {}).then(run);
@@ -1930,7 +2277,9 @@ function handleUserSaveError(err) {
   state.storageDirty = true;
   const now = Date.now();
   if (err?.status === 409 || err?.code === "user_data_conflict") {
-    openConflictDialog(err);
+    /* 普通 409 的本地改动此前只活在内存里（旧实现），关页/刷新就没了。
+       openConflictDialog 会在这一支顺手把它落成一条**独立持久草稿**（ST-04）。 */
+    openConflictDialog(err, null, { reason: "save_conflict" });
     return;
   }
   if (now - Number(state.saveErrorShownAt || 0) < 5000) return;
@@ -1948,17 +2297,40 @@ function summarizeStorage(data = {}) {
   return { done, wrong, favorite, notes, examDrafts };
 }
 
-function openConflictDialog(err, snapshot = null) {
-  if (state.conflictOpen) return;
+function openConflictDialog(err, snapshot = null, options = {}) {
+  if (state.conflictOpen) {
+    /* 已经有一次没处理完的冲突。**不能**就这么 return：这次的新本地数据（普通 409 时
+       它就只在内存里）会连草稿都没落下。至少把它落成独立草稿，用户不会两头都丢。 */
+    if (!options.draftId) stashPendingSaveDraft(options.reason || "conflict_while_open");
+    return;
+  }
   state.conflictOpen = true;
   /* snapshot 给「开页时发现上次没存上的草稿」用：那会儿 state.storage 是服务器那份，
      本地草稿另有其人（见 applyPendingSaveDraft）。 */
-  state.conflictLocalSnapshot = snapshot || {
+  const source = snapshot || {
     user: state.user,
     revision: state.storageRevision || "",
     storage: JSON.parse(JSON.stringify(state.storage || {})),
     at: nowText(),
   };
+  state.conflictLocalSnapshot = source;
+  /* 「保留本地」要能落到持久草稿上（ST-04），所以这里先记住：
+     这份本地数据该以哪条草稿的形式留在本机、以及它的 baseRevision。
+     - 有 draftId（开页时恢复的草稿/在途保存的草稿）→ 就直接用那条草稿的 ID，不另起一份；
+     - 没有（普通 409，本地改动只在内存里）→ 立刻现写一条草稿，别等着用户点「保留」时才发现丢。 */
+  const draftId = options.draftId
+    || source.draftId
+    || stashPendingSaveDraft(options.reason || "conflict", {
+      user: source.user,
+      revision: source.revision,
+      storage: source.storage,
+    })
+    || "";
+  state.conflictDraftId = draftId;
+  state.conflictDraft = { baseRevision: source.revision || "", source: options.reason || "conflict" };
+  state.conflictGeneration = state.mutationVersion;
+  if (options.count) state.conflictDraftCount = options.count;
+  if (options.drafts) state.conflictDrafts = options.drafts;
   const modal = $("conflictModal");
   if (!modal) {
     toast("数据已在其他页面更新，请刷新后继续");
@@ -1979,7 +2351,26 @@ function openConflictDialog(err, snapshot = null) {
 
 function closeConflictDialog() {
   state.conflictOpen = false;
+  /* ⚠️ 必须连冲突上下文一起清：`conflictDraftId` 是「这次弹窗对应哪条草稿」的口径，
+     留着上一次的 ID 会让下一次「保留本地」把别的账号/别的标签页的草稿当成自己的
+     （实测：alpha 的草稿被 inktop 的 keepLocalConflictDraft 接管并改写成 alpha 的内容）。 */
+  state.conflictLocalSnapshot = null;
+  state.conflictDraft = null;
+  state.conflictDraftId = "";
+  state.conflictDrafts = null;
   $("conflictModal")?.classList.add("hidden");
+}
+
+/* 导出/恢复入口共用一个「当前这份本地草稿是哪一条」的口径（ST-03/04 的共同地基）。 */
+function currentConflictDraftRecords() {
+  if (Array.isArray(state.conflictDrafts) && state.conflictDrafts.length) {
+    const live = state.conflictDrafts.filter((draft) => readDraftRecord(draft.id));
+    if (live.length) return live;
+    return state.conflictDrafts;
+  }
+  const one = state.conflictDraftId ? readDraftRecord(state.conflictDraftId) : null;
+  if (one) return [one];
+  return [];
 }
 
 function exportConflictLocalDraft() {
@@ -1988,12 +2379,25 @@ function exportConflictLocalDraft() {
     toast("没有可导出的本地草稿");
     return;
   }
+  /* 把本机**所有**当前账号的未保存草稿一起导出（不只是弹窗里这一条）：
+     「保留本地」类的操作要让用户拿得到那份数据，导出是它唯一的出口。 */
+  const drafts = currentConflictDraftRecords().length
+    ? currentConflictDraftRecords()
+    : readPendingSaveDrafts();
   const payload = {
     type: "yunxi-local-draft",
     exportedAt: nowText(),
     user: snapshot.user,
     baseRevision: snapshot.revision,
     storage: snapshot.storage,
+    drafts: drafts.map((draft) => ({
+      id: draft.id,
+      tab: draft.tab,
+      at: draft.at,
+      reason: draft.reason,
+      baseRevision: draft.revision,
+      storage: draft.storage,
+    })),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -2015,9 +2419,12 @@ async function reloadServerUserDataFromConflict() {
     await loadUserData(state.user);
     state.storageDirty = false;
     setSaveStatus("idle");
-    /* 用户选了「以服务器为准」→ 本地那份待保存草稿也不必再提醒。 */
-    clearPendingSaveDraft();
+    /* 用户选了「以服务器为准」→ 这次是**明确放弃**，本页那条草稿可以定向删。
+       别的账号、别的标签页的草稿不碰。 */
+    for (const record of currentConflictDraftRecords()) removeDraftById(record.id);
     closeConflictDialog();
+    state.conflictDrafts = null;
+    state.conflictDraftId = "";
     if (isAdmin()) {
       await renderAdminDashboard();
     } else if (state.currentCourse) {
@@ -2033,14 +2440,60 @@ async function reloadServerUserDataFromConflict() {
   }
 }
 
+/* 「继续编辑本地」：snapshot 必须**成为当前编辑状态**，而不是只躺在内存里。
+   旧实现只 close + dirty=true + 删草稿 —— state.storage 还是服务器那份，
+   弹窗一关（甚至刷个新）「保留的本地」就没了，之后保存保存的也是服务器那份（ST-04）。
+   两条硬性要求：
+     ① 明确保留的 snapshot 写成**独立持久草稿**（留着，不删）；
+     ② 用 snapshot 当编辑状态，并**保留原 baseRevision** —— 不能悄悄换成服务器 revision
+        去覆盖；revision 对不上时保存自然走 409 → 再弹一次冲突，这是有意的。 */
 function keepLocalConflictDraft() {
+  /* ⚠️ 先把要用的东西**全部**取出来再关弹窗：closeConflictDialog 会把
+     conflictLocalSnapshot 一并清掉（那是必须的，见那里的注释），
+     先关再读就会读到「没有 snapshot」→ 回落到 state.storage（= 服务器那份），
+     于是「保留本地」实际保存的是服务器数据（这正是 ST-04 最实质的那个 bug）。 */
+  const draftId = state.conflictDraftId;
+  const snapshot = state.conflictLocalSnapshot;
+  const baseRevision = state.conflictDraft?.baseRevision ?? (snapshot?.revision || "");
+  const conflictGeneration = state.conflictGeneration;
   closeConflictDialog();
-  setSaveStatus("error");
+  /* 保留 = 把 snapshot 落成本页当前编辑状态。用户点完之后紧接着的改动（mutationVersion 前进）
+     说明这份 snapshot 已经被更新了，那就不要再覆盖回去 —— 只把草稿留住。 */
+  const snapshotIsStale = conflictGeneration !== state.mutationVersion;
+  const keptStorage = snapshot ? JSON.parse(JSON.stringify(snapshot.storage)) : null;
+  const keptAt = snapshot?.at || "";
+  if (!snapshotIsStale && keptStorage) {
+    state.storage = keptStorage;
+    state.storageRevision = baseRevision;
+    state.storageInheritedDraft = draftId ? { id: draftId, at: keptAt, user: state.user } : null;
+    /* 草稿正文必须是**被保留的那份本地数据**，不是服务器那份。
+       普通 409 时 openConflictDialog 已经把 state.storage（本地）写进草稿了，
+       但「开页恢复草稿 → 冲突 → 保留」这条路上草稿正文仍是原始草稿内容，
+       这里统一重写一遍，保证「保留的就是草稿里存的那份」。 */
+    if (draftId) {
+      stashPendingSaveDraft(state.conflictDraft?.source || "kept_local", {
+        id: draftId, revision: baseRevision, storage: keptStorage,
+      });
+    }
+  }
   state.storageDirty = true;
-  /* 用户已经明确「保留本地改动，暂不覆盖服务器」→ 那份待保存草稿（可能来自
-     上次关页的兜底保存）同样按保留处理，不用每次开页再弹一次。 */
-  clearPendingSaveDraft();
-  toast("已保留本地改动，暂不覆盖服务器。建议先导出草稿");
+  setSaveStatus("error");
+  /* 草稿**留着**（就是上面那条 draftId）——它是刷新后唯一能把本地改动接回来的东西。 */
+  scheduleDeferredConflictSave();
+  toast("已保留本地改动，暂不覆盖服务器。刷新后仍可恢复，建议先导出草稿");
+}
+
+/* 冲突/补存排队的那次保存：只发 storage，**不**在这里改成「已同步」以外的语义。
+   单独一个定时器，避免 applyPendingSaveDraft 的补存和用户的 scheduleSave 互相顶掉。 */
+function scheduleDeferredConflictSave() {
+  if (!state.user || state.storageReadFailed) return;
+  clearTimeout(state.deferredSaveTimer);
+  state.deferredSaveTimer = setTimeout(() => {
+    state.deferredSaveTimer = null;
+    /* 另写一条草稿、下个 load 再处理：直接 saveUserData 会带着被保留的本地整包
+       去撞 409，弹一个用户刚刚已经处理过的对话框。 */
+    stashPendingSaveDraft("conflict_retry");
+  }, 1200);
 }
 
 /* 死代码清理：这里原来有一个 `switchUser(name)`（189 行前的位置）。
@@ -7497,6 +7950,8 @@ function renderAdminRows(rows, failedCount = 0) {
   }
   bindAdminBankUpdateButtons();
   bindAdminBankEditorActions();
+  // 刷新页面 / 切回「更新」页签时，把服务端正在跑的拉取重新接上（进度记在服务端进程里）
+  resumeBankPullProgress();
   document.querySelectorAll("[data-admin-action]").forEach((btn) => {
     btn.onclick = () => adminUserAction(btn.dataset.user, btn.dataset.adminAction).catch((err) => toast(err.message));
   });
@@ -7545,8 +8000,13 @@ async function ensureAdminBankUpdateMode() {
   if (!sample) return "";
   state.adminBankUpdateModePromise = (async () => {
     const query = new URLSearchParams({ user: state.user, courseId: String(sample.id), dryRun: "true" });
-    const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
-    state.adminBankUpdateMode = result.reserved || result.mode === "upload" ? "upload" : "pull";
+    try {
+      const result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
+      state.adminBankUpdateMode = result.reserved || result.mode === "upload" ? "upload" : "pull";
+    } finally {
+      // 这条只是探测更新方式（dryRun），但往返期间可能有别的课正在拉取：顺手把列表接回来
+      await syncBankPullsFromServer(0).catch(() => {});
+    }
     refreshAdminBankTable();
     return state.adminBankUpdateMode;
   })();
@@ -7955,13 +8415,22 @@ function categorySubOptionsHtml(options, top, selected) {
       .join("")}</optgroup>`).join("");
 }
 
-/* ── 拉取进度条 ───────────────────────────────────────────────────────
+/* ── 拉取进度（可以同时显示多门课）─────────────────────────────────────
    拉取的 POST 本身是同步的（要几分钟），所以进度另走一个只读端点：
-   POST 在飞行中时每 700ms 轮询 /api/admin/update-bank/progress。
+   POST 飞行期间每 700ms 轮询 /api/admin/update-bank/progress（**不带 courseId = 读全部**）。
+   服务端对每门课各记一条，排在写闸门口等的那些也有记录（stage=queued），
+   所以同时更新多门课时，每一门都有自己的位置和阶段，互不覆盖。
    阶段名与计数是服务端上报的精确值；百分比是按阶段权重折算的**估算**
    （题多的课与图多的课，两个大头占比差很多，没法预先算准），界面上如实标注。 */
 const BANK_PULL_POLL_MS = 700;
+// 结束的行还留多久（毫秒）再撤掉：让「完成 · 用时 N 秒」/失败原因看得见，不至于一闪而过
+const BANK_PULL_DONE_DWELL_MS = 8000;
+// 点过按钮但服务端还没登记的宽限时间（毫秒）：POST 会先向上游问一次"有没有更新"，等几秒很正常
+const BANK_PULL_UNKNOWN_GRACE_MS = 8000;
 let bankPullPollTimer = null;
+let bankPullDwellTimer = null;
+let bankPullPollBusy = false;
+let bankPullResumeAt = 0;
 
 function formatElapsed(seconds) {
   const total = Math.max(0, Math.round(Number(seconds) || 0));
@@ -7971,38 +8440,97 @@ function formatElapsed(seconds) {
   return s ? `${m} 分 ${s} 秒` : `${m} 分`;
 }
 
-function renderBankPullProgress() {
-  const pull = state.adminBankPull;
-  if (!pull) return "";
+// 一行 = 一门课。state.adminBankPulls 是 courseId -> 行，不是单槽，多门课同时更新各占一行
+function bankPullRows() {
+  const map = state.adminBankPulls || {};
+  return Object.keys(map)
+    .map((key) => map[key])
+    .filter((pull) => !!pull)
+    // 按发起时间升序（先点的在上面）：位置稳定，别的课结束时不会跳来跳去
+    .sort((a, b) => (a.startedAtLocal || 0) - (b.startedAtLocal || 0)
+      || Number(a.courseId) - Number(b.courseId));
+}
+
+function bankPullCourseName(courseId) {
+  const course = (state.adminCourses || []).find((item) => Number(item.id) === Number(courseId));
+  return course?.name || `课程 ${courseId}`;
+}
+
+/* 这一行的终止态只能由服务端说了算：active=false。
+   ok=true →「完成 · 用时 N 秒」；ok=false → 失败 + 服务端给的中文原因。
+   （旧实现在这里不看 active/ok/error，服务端早就 done 了界面还在写"正在更新"。） */
+function renderBankPullRow(pull) {
+  const name = pull.courseName || bankPullCourseName(pull.courseId);
   const pct = Math.max(0, Math.min(100, Number(pull.percent) || 0));
-  const elapsed = (Date.now() - pull.startedAtLocal) / 1000;
+  /* 进行中按本地时钟算已用（服务端的 elapsedSeconds 是"最后一次上报到现在"，两个阶段之间会停住不动）；
+     结束时用服务端那条记录的总时长（精确的拉取耗时），别把轮询延迟算进去。 */
+  const localElapsed = (Date.now() - (pull.startedAtLocal || Date.now())) / 1000;
+  const serverElapsed = Number.isFinite(Number(pull.elapsedSeconds)) ? Number(pull.elapsedSeconds) : null;
+  const elapsed = pull.done && serverElapsed !== null ? serverElapsed : localElapsed;
+
+  if (pull.done) {
+    const okTitle = pull.ok ? `更新完成：${name}` : `更新失败：${name}`;
+    const okRight = pull.ok ? `完成 · 用时 ${formatElapsed(elapsed)}` : "失败";
+    const bits = pull.ok
+      ? [`完成`, `用时 ${formatElapsed(elapsed)}`]
+      : [`失败`, pull.error || "更新失败（服务端没给出原因）"];
+    bits.push(`已用 ${formatElapsed(elapsed)}`);
+    return `
+      <div class="bank-progress ${pull.ok ? "done" : "failed"}" data-bank-pull="${pull.courseId}">
+        <div class="bank-progress-head">
+          <b>${escapeHtml(okTitle)}</b>
+          <span>${escapeHtml(okRight)}</span>
+        </div>
+        <div class="bank-progress-track"><i style="width:${pull.ok ? 100 : 0}%"></i></div>
+        <div class="bank-progress-meta">
+          <span>${escapeHtml(bits.join(" · "))}</span>
+          <span class="bank-progress-hint">${pull.ok ? "稍后自动从列表移除" : "详情见服务端日志"}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  /* 进行中（含排队）。"排队中"是服务端上报的 stage，跟"服务端没数据"是两回事：
+     前者照实写阶段名，后者才提示进度接口没数据。 */
   const bits = [pull.stageLabel || "准备中"];
-  if (pull.total > 0) bits.push(`${pull.current} / ${pull.total}`);
+  if (!pull.queued && pull.total > 0) bits.push(`${pull.current} / ${pull.total}`);
   if (pull.detail) bits.push(pull.detail);
   bits.push(`已用 ${formatElapsed(elapsed)}`);
-  // 刚发起那 1~2 秒服务端还没登记，属于正常竞态，别说成"接口没数据"吓人
-  const hint = pull.indeterminate
-    ? (elapsed < 4 ? "正在连接服务器…" : "进度接口暂时没数据，正在重试")
+  const unknown = !!pull.unknown;
+  const hint = unknown
+    ? (elapsed * 1000 < BANK_PULL_UNKNOWN_GRACE_MS
+      ? "正在连接服务器…"
+      : "进度接口暂时没数据，正在重试")
     : "百分比为估算，阶段与计数是实际值";
+  const indeterminate = unknown || !!pull.queued;
+  const right = pull.queued ? "排队中" : (unknown ? "等待服务器上报进度…" : `约 ${pct}%`);
+  const head = pull.queued ? "排队中" : "正在更新";
   return `
-    <div class="bank-progress${pull.indeterminate ? " indeterminate" : ""}" id="bankProgress">
+    <div class="bank-progress${indeterminate ? " indeterminate" : ""}${pull.queued ? " queued" : ""}" data-bank-pull="${pull.courseId}">
       <div class="bank-progress-head">
-        <b>正在更新：${escapeHtml(pull.courseName || `课程 ${pull.courseId}`)}</b>
-        <span>${pull.indeterminate ? "等待服务器上报进度…" : `约 ${pct}%`}</span>
+        <b>${escapeHtml(`${head}：${name}`)}</b>
+        <span>${escapeHtml(right)}</span>
       </div>
-      <div class="bank-progress-track"><i style="width:${pull.indeterminate ? 100 : pct}%"></i></div>
+      <div class="bank-progress-track"><i style="width:${indeterminate ? 100 : pct}%"></i></div>
       <div class="bank-progress-meta">
         <span>${escapeHtml(bits.join(" · "))}</span>
-        <span class="bank-progress-hint">${hint}</span>
+        <span class="bank-progress-hint">${escapeHtml(hint)}</span>
       </div>
     </div>
   `;
 }
 
-// 只替换进度条这一个节点，不整块重渲染表格（否则会打断用户的滚动/筛选）
+function renderBankPullProgress() {
+  const rows = bankPullRows();
+  if (!rows.length) return "";
+  return `<div class="bank-progress-list" id="bankProgress">${rows.map(renderBankPullRow).join("")}</div>`;
+}
+
+// 只替换进度块这一个节点，不整块重渲染表格（否则会打断用户的滚动/筛选）
 function refreshBankPullProgressUi() {
   const existing = $("bankProgress");
-  if (!state.adminBankPull) {
+  const rows = bankPullRows();
+  if (!rows.length) {
     if (existing) existing.remove();
     return;
   }
@@ -8015,30 +8543,110 @@ function refreshBankPullProgressUi() {
   if (tools) tools.insertAdjacentHTML("afterend", html);
 }
 
-async function pollBankPullProgress(courseId) {
-  const pull = state.adminBankPull;
-  if (!pull || pull.courseId !== courseId) return;
-  try {
-    const res = await api(`/api/admin/update-bank/progress?user=${encodeURIComponent(state.user)}&courseId=${courseId}`);
-    const snapshot = res && res.snapshot;
-    if (!state.adminBankPull || state.adminBankPull.courseId !== courseId) return;
-    if (snapshot) {
-      state.adminBankPull.stageLabel = snapshot.stageLabel || state.adminBankPull.stageLabel;
-      state.adminBankPull.current = Number(snapshot.current || 0);
-      state.adminBankPull.total = Number(snapshot.total || 0);
-      state.adminBankPull.detail = snapshot.detail || "";
-      state.adminBankPull.percent = Number(snapshot.percent || 0);
-      if (snapshot.label) state.adminBankPull.courseName = snapshot.label;
-      state.adminBankPull.indeterminate = false;
-    } else {
-      // 服务端还没有这门课的记录（刚发起时的竞态，或进程重启过）
-      state.adminBankPull.indeterminate = true;
+/* 「这条快照是不是我这次发起的」：服务端按课程只留一条记录、结束还要留 10 分钟，
+   紧接着再更新同一门课时会先读到上一轮的收尾状态。用服务端量出来的这条记录时长
+   跟本行年龄比：记录时长本身已经超过本行年龄，说明它开始于我这一行之前，是我上一次的。 */
+function bankPullSnapshotIsOurs(pull, snapshot) {
+  if (snapshot.active === true) return true;
+  const durationSec = Number(snapshot.elapsedSeconds || 0);
+  const ageSec = (Date.now() - (pull.startedAtLocal || Date.now())) / 1000;
+  return durationSec <= ageSec + 2;
+}
+
+function applyBankPullSnapshots(snapshots) {
+  const map = state.adminBankPulls || (state.adminBankPulls = {});
+  const seen = new Set();
+  snapshots.forEach((snapshot) => {
+    const courseId = Number(snapshot && snapshot.courseId ? snapshot.courseId : 0);
+    if (!courseId) return;
+    let pull = map[courseId];
+    if (!pull) {
+      // 不是本页发起的（刷新页面后重接、另一个标签页/账号发起的）—— 只接在跑的，
+      // 保留期内的历史记录不该一刷新就冒出来
+      if (snapshot.active !== true) return;
+      const elapsedMs = Math.max(0, Number(snapshot.elapsedSeconds || 0) * 1000);
+      pull = map[courseId] = { courseId, courseName: "", startedAtLocal: Date.now() - elapsedMs, adopted: true };
     }
+    seen.add(courseId);
+    if (!pull.adopted && !pull.done && !bankPullSnapshotIsOurs(pull, snapshot)) return;
+    pull.courseName = snapshot.label || pull.courseName || bankPullCourseName(courseId);
+    pull.stageLabel = snapshot.stageLabel || pull.stageLabel || "准备中";
+    pull.current = Number(snapshot.current || 0);
+    pull.total = Number(snapshot.total || 0);
+    pull.detail = snapshot.detail || "";
+    pull.percent = Number(snapshot.percent || 0);
+    pull.queued = snapshot.active === true && snapshot.stage === "queued";
+    pull.unknown = false;
+    pull.elapsedSeconds = Number(snapshot.elapsedSeconds || 0);
+    if (snapshot.active !== true) {
+      pull.done = true;
+      pull.ok = snapshot.ok === true;
+      pull.error = snapshot.error || "";
+      if (!pull.finishedAtLocal) pull.finishedAtLocal = Date.now();
+    }
+  });
+  // 本页有、这一轮服务端没有的：刚发起时服务端还没登记（它得先向上游问一次有没有更新）
+  Object.keys(map).forEach((key) => {
+    const pull = map[key];
+    if (!pull || pull.done || seen.has(Number(key))) return;
+    pull.unknown = true;
+    pull.queued = false;
+    pull.elapsedSeconds = null;
+  });
+  scheduleBankPullDwell();
+}
+
+// 一次请求读全部：一个定时器轮所有未结束的条目，不为每条起一个定时器
+async function pollBankPulls() {
+  if (bankPullPollBusy) return;             // 上一轮还没回来就跳过，别把请求叠起来
+  const rows = bankPullRows();
+  if (!rows.length) {
+    stopBankPullPolling();
+    return;
+  }
+  bankPullPollBusy = true;
+  let snapshots = null;
+  try {
+    const res = await api(`/api/admin/update-bank/progress?user=${encodeURIComponent(state.user)}`);
+    snapshots = Array.isArray(res && res.snapshots) ? res.snapshots : [];
   } catch (err) {
     // 轮询失败不该打断拉取：标成不确定态，下个周期再试
-    if (state.adminBankPull) state.adminBankPull.indeterminate = true;
+    rows.forEach((pull) => { if (!pull.done) pull.unknown = true; });
+  } finally {
+    bankPullPollBusy = false;
   }
+  if (snapshots) applyBankPullSnapshots(snapshots);
+  pruneBankPullRows();
   refreshBankPullProgressUi();
+  // 全部结束就停轮询：还留着的那些只是"展示期"，不需要再问了
+  if (!bankPullRows().some((pull) => !pull.done)) stopBankPullPolling();
+}
+
+function scheduleBankPullDwell() {
+  if (bankPullDwellTimer) {
+    clearTimeout(bankPullDwellTimer);
+    bankPullDwellTimer = null;
+  }
+  const done = bankPullRows().filter((pull) => pull.done && pull.finishedAtLocal);
+  if (!done.length) return;
+  const due = Math.min(...done.map((pull) => pull.finishedAtLocal + BANK_PULL_DONE_DWELL_MS));
+  bankPullDwellTimer = setTimeout(() => {
+    bankPullDwellTimer = null;
+    pruneBankPullRows();
+    refreshBankPullProgressUi();
+    scheduleBankPullDwell();          // 还有别的行在展示期内就接着排
+  }, Math.max(120, due - Date.now()));
+}
+
+// 展示期到了才撤行：终止态先让人看见，再消失
+function pruneBankPullRows() {
+  const map = state.adminBankPulls || {};
+  const now = Date.now();
+  Object.keys(map).forEach((key) => {
+    const pull = map[key];
+    if (!pull) { delete map[key]; return; }
+    if (pull.done && pull.finishedAtLocal && now - pull.finishedAtLocal >= BANK_PULL_DONE_DWELL_MS) delete map[key];
+  });
 }
 
 function stopBankPullPolling() {
@@ -8048,29 +8656,64 @@ function stopBankPullPolling() {
   }
 }
 
+function ensureBankPullPolling() {
+  if (bankPullPollTimer) return;
+  bankPullPollTimer = setInterval(() => pollBankPulls(), BANK_PULL_POLL_MS);
+}
+
+// 本页点「更新」时先占一行；服务端一登记就切到它的真实阶段（含"排队中"）
 function startBankPullProgress(courseId) {
-  const course = (state.adminCourses || []).find((item) => Number(item.id) === Number(courseId));
-  state.adminBankPull = {
-    courseId,
-    courseName: course?.name || `课程 ${courseId}`,
+  const id = Number(courseId || 0);
+  if (!id) return;
+  const map = state.adminBankPulls || (state.adminBankPulls = {});
+  map[id] = {
+    courseId: id,
+    courseName: bankPullCourseName(id),
     startedAtLocal: Date.now(),
     stageLabel: "准备中",
     current: 0,
     total: 0,
     detail: "",
     percent: 0,
-    indeterminate: true,
+    queued: false,
+    unknown: true,
+    elapsedSeconds: null,
+    done: false,
+    ok: false,
+    error: "",
+    finishedAtLocal: 0,
   };
   refreshBankPullProgressUi();
-  stopBankPullPolling();
-  bankPullPollTimer = setInterval(() => pollBankPullProgress(courseId), BANK_PULL_POLL_MS);
-  pollBankPullProgress(courseId);   // 立刻先探一次，别干等一个周期
+  ensureBankPullPolling();
+  pollBankPulls();   // 立刻先探一次，别干等一个周期
 }
 
-function stopBankPullProgress() {
-  stopBankPullPolling();
-  state.adminBankPull = null;
+/* POST 回来了（成功 / 报错 / 抛异常都要走这里）：重新读一遍全部快照收敛。
+   不能直接清空 —— 同一页可能还有别的课在跑，它们得留在列表里；
+   也不能不管 —— 服务端连记录都没有的（409 被拒 / 已是最新没拉 / 进程重启过）就得把行收掉。 */
+async function syncBankPullsFromServer(finishedCourseId = 0) {
+  try {
+    const res = await api(`/api/admin/update-bank/progress?user=${encodeURIComponent(state.user)}`);
+    applyBankPullSnapshots(Array.isArray(res && res.snapshots) ? res.snapshots : []);
+  } catch (err) {
+    console.warn("读取拉取进度失败", err);
+  }
+  const map = state.adminBankPulls || {};
+  const id = Number(finishedCourseId || 0);
+  if (id && map[id] && !map[id].done) delete map[id];
+  pruneBankPullRows();
   refreshBankPullProgressUi();
+  scheduleBankPullDwell();
+  // 还有没结束的就得继续轮（刷新页面后接回来的那些也要，否则行会停在接回来那一刻不动）
+  if (bankPullRows().some((pull) => !pull.done)) ensureBankPullPolling();
+  else stopBankPullPolling();
+}
+
+// 刷新页面/重进「更新」页签：进度记录在服务端进程里，本页是空的，重新接上
+async function resumeBankPullProgress() {
+  if (bankPullResumeAt && Date.now() - bankPullResumeAt < 3000) return;
+  bankPullResumeAt = Date.now();
+  await syncBankPullsFromServer(0);
 }
 
 /* 「更新」页签的一级分类**默认折叠**（S-28）。
@@ -10654,11 +11297,12 @@ async function pullQuestionBankUpdate(query, btn = null) {
     // POST 是同步的（要几分钟），进度靠轮询另一个端点，见 startBankPullProgress
     result = await api(`/api/admin/update-bank?${query}`, { method: "POST" });
   } finally {
-    stopBankPullProgress();
     if (btn) {
       btn.disabled = false;
       btn.textContent = oldText || "更新题库";
     }
+    // 成功、报错、抛异常都要收敛：POST 结束了这行就不能再写"正在更新"（用户反馈 2）
+    await syncBankPullsFromServer(courseId).catch(() => {});
   }
   await handleQuestionBankUpdateResult(result);
 }
@@ -10692,6 +11336,8 @@ async function uploadCourseQuestionBank(courseId, btn = null) {
         btn.disabled = false;
         btn.textContent = oldText || "更新题库";
       }
+      // 上传路径本身不登记拉取进度，但这页可能同时有别的课在拉取：收敛一次列表
+      await syncBankPullsFromServer(courseId).catch(() => {});
     }
   } finally {
     input.remove();

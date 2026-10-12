@@ -517,7 +517,7 @@ app.MapPost("/api/user/save", async (HttpContext context, string? user, UserData
     }
 });
 
-app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, AuthStore auth, SessionStore sessionStore) =>
+app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, AuthStore auth, SessionStore sessionStore, UserDataStore userData) =>
 {
     var admin = CleanUserName(user);
     if (!admin.Equals("admin", StringComparison.OrdinalIgnoreCase))
@@ -571,7 +571,8 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
         profile["createdAt"] = NowText();
         auth.Set(target, profile);
         auth.Save();
-        await File.WriteAllTextAsync(UserDataPath(paths, target), "{}", Encoding.UTF8);
+        // 空档案也走同一把用户锁，保持"这个用户的数据文件只由持锁者写"这一不变式
+        userData.Clear(target);
         return Results.Json(new { ok = true, user = target, created = true, defaultPassword = paths.DefaultLoginPassword });
     }
     if (action == "reset-password")
@@ -597,13 +598,16 @@ app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, 
     }
     if (action == "clear-data")
     {
-        await File.WriteAllTextAsync(UserDataPath(paths, target), "{}", Encoding.UTF8);
+        // 走 UserDataStore 的按用户锁：否则会与用户正在进行的 save 交错
+        // （用户读到旧内容 → 管理员清空 → 用户保存，清空被整体覆盖）
+        userData.Clear(target);
         return Results.Json(new { ok = true, user = target, cleared = true });
     }
     if (action == "delete")
     {
-        var path = UserDataPath(paths, target);
-        if (File.Exists(path)) File.Delete(path);
+        // 删除用户数据必须在用户的锁内：否则用户的 save 可能在删除之后落地，
+        // 把已删账号的数据文件"复活"，而 auth 里已经没有这个账号了。
+        userData.Delete(target);
         auth.Remove(target);
         auth.Save();
         // 删号后会话立即失效（否则旧 cookie 还能读写，甚至把数据文件"复活"）
@@ -711,6 +715,19 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
                 message = "Docker 版已启用直连拉取；dryRun 未执行实际更新。",
             });
         }
+        /* 同一门课重复发起：进度记录按课程 ID 只有一条，两个并发拉取只会互相覆盖对方的状态，
+           写入侧本来也要排队等闸（见 BankWriteGate）。这里直接拒绝，让用户等前一次结束。
+           放在上游"有没有更新"检查之前：重复点击不该再打一次外网、也不该白做一遍备份。 */
+        if (Puller.PullProgressTracker.Shared.IsActive(courseId.Value))
+        {
+            return Results.Json(new
+            {
+                ok = false,
+                mode = "pull",
+                courseId = courseId.Value,
+                error = Puller.PullProgressTracker.Shared.DescribeBusy(courseId.Value),
+            }, statusCode: 409);
+        }
         /* 拉取前先问一次上游「有没有更新」：没有就直接跳过，省掉一次几分钟的白拉。
            检查失败（上游账号没配、网络抖动等）**不阻断拉取** —— 宁可多拉一次，
            也不能因为检查本身出错就彻底拉不了。要强制拉取可以带 force=true。 */
@@ -741,6 +758,18 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
             // 题库换过之后章节归属要重算 —— 映射是外挂文件，不会跟着题库走。
             chapterMap.TryRebuildQuietly("拉取更新");
             return Results.Json(result);
+        }
+        catch (Puller.PullProgressTracker.PullAlreadyRunningException ex)
+        {
+            // 上面那次预检与这里之间有极小窗口（两个请求同时进来），到登记处才发现重复：
+            // 同一个 409，别降级成 500。
+            return Results.Json(new
+            {
+                ok = false,
+                mode = "pull",
+                courseId = courseId.Value,
+                error = ex.Message,
+            }, statusCode: 409);
         }
         catch (Exception ex)
         {
@@ -777,13 +806,16 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
 });
 
 // 拉取进度：POST /api/admin/update-bank 仍是同步返回最终结果，管理页在它进行期间轮询这里。
-// 没有记录（没拉过 / 进程重启过 / 已过期）时 active=false，前端据此降级成不确定态。
+//   · 不带 courseId：返回**全部**条目 { ok, snapshots }，管理页刷新后据此接上所有在跑的拉取；
+//   · 带 courseId：保持旧的单条形状 { ok, known, snapshot }（老前端还在用，别改）。
+// 没有记录（没拉过 / 进程重启过 / 已过期）时 snapshot 为 null + active=false，前端据此降级。
 app.MapGet("/api/admin/update-bank/progress", (HttpContext context, string? user, int? courseId) =>
 {
     if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     if (!courseId.HasValue || courseId.Value <= 0)
     {
-        return Results.Json(new { ok = false, error = "缺少课程 ID" }, statusCode: 400);
+        // 已结束但还在保留期内的记录也会返回；调用方自己按 active 过滤
+        return Results.Json(new { ok = true, snapshots = Puller.PullProgressTracker.Shared.ReadAll() });
     }
     var snapshot = Puller.PullProgressTracker.Shared.Read(courseId.Value);
     return Results.Json(snapshot is null
@@ -896,7 +928,7 @@ app.MapGet("/api/admin/data/download", (HttpContext context, string? user, strin
     }
 });
 
-app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, string? type, AuthStore auth, ChapterMapStore chapterMap) =>
+app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, string? type, AuthStore auth, UserDataStore userData, ChapterMapStore chapterMap) =>
 {
     if (!IsAdminRequest(request)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
     if (!request.HasFormContentType) return Results.Json(new { ok = false, error = "请使用表单上传文件" }, statusCode: 400);
@@ -916,7 +948,7 @@ app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, 
         }
         var result = kind == "bank"
             ? AdminDataTransfer.ImportBank(paths, tempFile, originalName)
-            : AdminDataTransfer.ImportUserData(paths, auth, tempFile, originalName);
+            : AdminDataTransfer.ImportUserData(paths, auth, userData, tempFile, originalName);
         if (kind == "bank") chapterMap.TryRebuildQuietly("题库整包上传");
         return Results.Json(result);
     }
@@ -1325,6 +1357,10 @@ internal static string SafeError(Exception ex) => SafeErrorText(ex);
 internal static string SafeErrorText(Exception ex)
 {
     Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR: {ex}");
+    /* 凭据库损坏：**不要**把详细文案（含绝对路径、解析器内部信息）回给调用方。
+       这条路径可能被未登录请求触发（/api/auth/session 一进来就解析 AuthStore），
+       回显绝对路径等于免费泄露部署目录结构。完整原因已写进上面的日志。 */
+    if (ex is AuthStoreUnavailableException) return "账号数据暂时不可用，请联系管理员（服务端日志有详细信息）";
     if (ex is InvalidOperationException || ex is UserDataConflictException) return ex.Message;
     // 以前这些都被压成"操作失败，请稍后重试"，用户无法自诊断；这里透传（不含机密）
     if (ex is IOException) return "文件读写失败：" + ex.Message;
@@ -1405,6 +1441,23 @@ internal static void TryDeleteFile(string path)
     }
 }
 
+/// <summary>
+/// 递归删除目录，失败只当没删掉。用于清理导入的撤销目录：即使残留，
+/// 里面的文件名都以 `.stage-` / `old-` 开头、且目录名以 `.` 开头，
+/// 不会被用户列表（`*.json` 顶层枚举）或备份（排除 _backups 之外的递归枚举，见下）当成用户数据。
+/// </summary>
+internal static void TryDeleteDirectory(string path)
+{
+    try
+    {
+        if (Directory.Exists(path)) Directory.Delete(path, true);
+    }
+    catch
+    {
+        // Best-effort cleanup for temporary directories.
+    }
+}
+
 internal static string ContentType(string path)
 {
     return Path.GetExtension(path).ToLowerInvariant() switch
@@ -1432,10 +1485,22 @@ internal static class BankWriteGate
 {
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
-    public static IDisposable Enter()
+    /// <summary>正在执行 + 正在排队等闸的写操作数。只用来告诉界面「前面还有几个任务」。</summary>
+    private static int _pending;
+
+    /// <summary>
+    /// 取闸，拿不到就等（最多 15 分钟）。
+    /// <paramref name="onWaiting"/> 在**开始阻塞之前**同步调用一次，参数是排在我前面的任务数
+    /// （0 = 闸空着，不用等）。拉取用它把「排队中」登记进进度记录：排队是阻塞的，
+    /// 不提前上报的话，前端在整个等待期间一门课的进度都看不到。
+    /// </summary>
+    public static IDisposable Enter(Action<int>? onWaiting = null)
     {
+        var ahead = Interlocked.Increment(ref _pending) - 1;
+        onWaiting?.Invoke(ahead);
         if (!Gate.Wait(TimeSpan.FromMinutes(15)))
         {
+            Interlocked.Decrement(ref _pending);
             throw new InvalidOperationException("题库正在被另一个操作占用，请等它结束后重试");
         }
         return new Releaser();
@@ -1443,7 +1508,11 @@ internal static class BankWriteGate
 
     private sealed class Releaser : IDisposable
     {
-        public void Dispose() => Gate.Release();
+        public void Dispose()
+        {
+            Interlocked.Decrement(ref _pending);
+            Gate.Release();
+        }
     }
 }
 
@@ -1452,12 +1521,42 @@ static class ServerBankPuller
     public static object PullCourseIntoBank(AppPaths paths, IConfiguration configuration, int courseId)
     {
         if (courseId <= 0) throw new InvalidOperationException("请选择要更新的题库");
-        // 与整包上传/单课导入/清广告互斥（都是"先删后写"，交叠会把课程清成 0 题）
-        using var gate = BankWriteGate.Enter();
+        var live = Path.GetFullPath(paths.SqlitePath);
 
+        /* 进度登记必须在取闸**之前**：BankWriteGate 门口最长要等 15 分钟，
+           等待期间没有记录的话，前端轮询到的是"这门课没有数据"（用户反馈 1）。
+           闸的排队位次由 Enter 在开始阻塞前回调进来（MarkQueued → "前面还有 N 个任务"）。 */
+        using var progressScope = Puller.PullProgressTracker.Shared.Begin(courseId, ReadCourseName(live, courseId));
+        try
+        {
+            // 与整包上传/单课导入/清广告互斥（都是"先删后写"，交叠会把课程清成 0 题）
+            using var gate = BankWriteGate.Enter(
+                ahead => Puller.PullProgressTracker.Shared.MarkQueued(courseId, ahead));
+            var result = PullCourseUnderGate(paths, configuration, courseId, live);
+            // 拉取 + 收尾（重贴本地改动 / 对比报告）都走完了才算「完成」
+            progressScope.Complete();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            /* 兜底收尾：任何异常都要把这条进度记录标成失败再抛。
+               以前只有「拉取本身」被 try 包住，后面那一段（重贴本地改动 / 读写题号 / 打日志）
+               是裸奔的 —— 在那里抛异常就没人调 Complete()，记录永远 active=true，
+               界面一直显示"正在更新"，用户看到的就是"更新完成后还显示更新中"（用户反馈 2）。 */
+            Puller.PullProgressTracker.Shared.Fail(courseId, SafeErrorText(ex));
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 拉取主体。调用方必须已经持有 <see cref="BankWriteGate"/> 的闸 ——
+    /// 这里全是"先删后写"，并发交叠会把课程清成 0 题。
+    /// <paramref name="live"/> 是主库路径（进度登记时已经取过，见 <see cref="PullCourseIntoBank"/>）。
+    /// </summary>
+    private static object PullCourseUnderGate(AppPaths paths, IConfiguration configuration, int courseId, string live)
+    {
         // 课程内容在主库（导出产物里有正文）→ 就地更新主库；否则（未购课程）→ 写**拉取库**。
         // 拉取库不在"整包上传题库"的替换范围内，所以拉来的内容不会被那条链路清掉。
-        var live = Path.GetFullPath(paths.SqlitePath);
         var intoPulled = !MainHoldsCourseContent(live, courseId);
         var target = intoPulled ? Path.GetFullPath(paths.PulledSqlitePath) : live;
         var assetsRoot = intoPulled ? paths.PulledAssetsRoot : paths.DataAssetsRoot;
@@ -1494,24 +1593,14 @@ static class ServerBankPuller
             user: configuration["App:BankServiceUser"],
             password: configuration["App:BankServicePassword"]);
 
-        // 进度登记：管理页在 POST 进行期间轮询 /api/admin/update-bank/progress 读这里。
-        // POST 本身仍是同步返回最终结果（前端契约不变）。
-        var progressScope = Puller.PullProgressTracker.Shared.Begin(courseId, ReadCourseName(live, courseId));
-        Puller.PullSummary summary;
-        try
-        {
-            summary = Puller.BankPull
-                .PullCourseAsync(options,
-                    line => Console.WriteLine($"[bankpull] {line}"),
-                    point => Puller.PullProgressTracker.Shared.Report(courseId, point))
-                .GetAwaiter()
-                .GetResult();
-        }
-        catch (Exception ex)
-        {
-            Puller.PullProgressTracker.Shared.Fail(courseId, SafeErrorText(ex));
-            throw;
-        }
+        // 进度登记在取闸前就做完了（见 PullCourseIntoBank），这里只上报拉取本身的阶段。
+        // POST 仍是同步返回最终结果（前端契约不变）。
+        var summary = Puller.BankPull
+            .PullCourseAsync(options,
+                line => Console.WriteLine($"[bankpull] {line}"),
+                point => Puller.PullProgressTracker.Shared.Report(courseId, point))
+            .GetAwaiter()
+            .GetResult();
 
         // 本地改动（题库编辑器改过的题干/解析/章节名）重贴回去：本地优先
         var localEdits = Puller.LocalEdits.Reapply(paths.SqlitePath, target, courseId);
@@ -1527,8 +1616,6 @@ static class ServerBankPuller
                           $"清洗广告 {summary.AdHits} 处，{localEdits.Describe()}，" +
                           $"新增 {added.Count} 题 / 消失 {removed.Count} 题，" +
                           $"用时 {summary.ElapsedSeconds}s，写入 {(intoPulled ? "拉取库" : "主库")}");
-
-        progressScope.Complete();
 
         return new
         {
@@ -1881,7 +1968,7 @@ static class AdminDataTransfer
         }
     }
 
-    public static object ImportUserData(AppPaths paths, AuthStore auth, string uploadedFile, string originalName)
+    public static object ImportUserData(AppPaths paths, AuthStore auth, UserDataStore userData, string uploadedFile, string originalName)
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
         if (ext != ".zip") throw new InvalidOperationException("用户数据上传仅支持 zip 包");
@@ -1917,32 +2004,104 @@ static class AdminDataTransfer
             }
             BackupRetention.Prune(backupRoot);
 
-            // 先试后换：先全部写成临时名，就位后再改名；任何一步失败都不动线上文件。
-            // 旧实现是"先删光 *.json（含 sessions.json）再拷"，中途失败即丢数据。
+            /* ── 提交阶段：可回滚的「备份 → 就位」两阶段 ──────────────────────────────
+               旧实现的提交是「先把线上 *.json 全删光 + 删 accounts.dat，再逐个 Move」，
+               catch 里只删 temp。于是任何一次 Move 失败，用户数据已经被删掉且**永不恢复**
+               （备份 zip 在，但没有任何自动回滚）—— 实测一次注入失败就让 u1.json/u2.json
+               永久消失，/api/admin/users 从 u1,u2 变成只剩新导入的那个。
+
+               新做法把"破坏性动作"全部变成**可撤销**的：
+                 阶段 1  把将被覆盖/将被替换的现有文件**移动到撤销目录**（同卷 rename，不会失败）；
+                         新增用户（目标不存在）不在此列，撤销时直接删掉即可。
+                 阶段 2  逐个把已 staged 的 temp Move 到最终名。每成功一个就记进 placed。
+                 撤销     任一步抛异常 → 先把 placed 里的新文件删掉，再把撤销目录里的旧文件
+                         原样 Move 回去（顺带还原原文件的修改时间/属性由 rename 天然保留）。
+
+               为什么选「移到撤销目录」而不是注入失败后从备份 zip 解：走 zip 要重新解包
+               整个用户目录、会丢扩展属性、还要处理 zip 里没有的会话文件；rename 是 O(1)
+               且语义精确。撤销目录放在**同一卷**（UserDataRoot 下），保证 File.Move 是
+               同卷改名而不是跨卷拷贝（跨卷拷贝会慢且可能中途失败）。
+
+               另外：`sessions.json` 不在删除/替换范围内（它是登录会话存储，不是用户），
+               `_backups/` 也不会被碰到 —— 这两条由 CollectUserDataFiles 的保留名校验先兜住。
+
+               ⚠️ 提交阶段同时接受**按用户锁**：UserDataStore 提供 RunExclusive，
+               我们对包内每个用户都取一次锁，把"这个用户的数据"串行化。
+               不这样的话会与用户正在进行的 load/save 交错：用户读到旧内容 →
+               管理员的导入把文件整批换掉 → 用户基于旧快照 save，把导入结果覆盖回去。 */
+            var rollbackDir = Path.Combine(paths.UserDataRoot, ".import-rollback-" + Guid.NewGuid().ToString("N"));
+            // 包内每个用户各取一次锁（去重，避免同一用户重复取锁自锁）。
+            var lockUsers = files.Select(f => Path.GetFileNameWithoutExtension(f.Name))
+                .Where(n => n.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
             var staged = new List<(string Temp, string Final)>();
+            var placed = new List<string>();
+            var displaced = new List<(string Saved, string Final)>();
             try
             {
+                Directory.CreateDirectory(rollbackDir);
                 foreach (var file in files)
                 {
                     var final = Path.Combine(paths.UserDataRoot, file.Name);
-                    var temp = final + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    var temp = Path.Combine(rollbackDir, ".stage-" + Guid.NewGuid().ToString("N"));
                     File.Copy(file.Path, temp, true);
                     RestrictFilePermissions(temp);
                     staged.Add((temp, final));
                 }
-                // 只删会被覆盖的文件：用户 json（**不含**会话文件）+ accounts.dat（若在包里）
-                foreach (var old in Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly)
-                             .Where(path => !SessionStore.IsSessionFile(path)))
+
+                // 取锁 → 提交 → 释放。锁的获取顺序固定（按名字排序），避免两个导入互相死锁。
+                CommitUnderUserLocks(userData, lockUsers.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList(), () =>
                 {
-                    File.Delete(old);
-                }
-                if (hasAccounts && File.Exists(paths.AuthDataPath)) File.Delete(paths.AuthDataPath);
-                foreach (var (temp, final) in staged) File.Move(temp, final, true);
+                    // 阶段 1：把「会被覆盖」和「会被删掉」的现有文件移进撤销目录。
+                    // 用户 json：导入是**整包替换语义**（包里的用户集合成为新集合），所以不在
+                    // 包里的旧用户 json 也要一并撤走 —— 撤销时再原样移回。
+                    Directory.CreateDirectory(paths.UserDataRoot);
+                    foreach (var old in Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly)
+                                 .Where(path => !SessionStore.IsSessionFile(path)))
+                    {
+                        var saved = Path.Combine(rollbackDir, "old-" + Guid.NewGuid().ToString("N") + ".json");
+                        File.Move(old, saved);
+                        displaced.Add((saved, old));
+                    }
+                    if (hasAccounts && File.Exists(paths.AuthDataPath))
+                    {
+                        var savedAuth = Path.Combine(rollbackDir, "old-accounts.dat");
+                        File.Move(paths.AuthDataPath, savedAuth);
+                        displaced.Add((savedAuth, paths.AuthDataPath));
+                    }
+
+                    // 阶段 2：就位。每成功一个 Move 立刻登记，撤销时才知道该删哪些。
+                    foreach (var (temp, final) in staged)
+                    {
+                        File.Move(temp, final, true);
+                        placed.Add(final);
+                    }
+                });
             }
             catch
             {
-                foreach (var (temp, _) in staged) TryDeleteFile(temp);
+                /* 撤销：必须**尽力而为、逐项 try**。若这里因为同一原因再抛一次，
+                   catch 会盖掉原始异常，并且撤销半途而废。先把撤销做完，再重抛原始异常。 */
+                foreach (var final in placed) TryDeleteFile(final);
+                foreach (var (saved, final) in displaced)
+                {
+                    try
+                    {
+                        if (File.Exists(saved)) File.Move(saved, final, true);
+                    }
+                    catch
+                    {
+                        // 撤销回到该文件失败：记录，便于人工从 backup zip 恢复。绝不吞掉原始异常。
+                        Console.WriteLine($"[userdata-import-rollback-failed] {saved} -> {final}");
+                    }
+                }
                 throw;
+            }
+            finally
+            {
+                foreach (var (temp, _) in staged) TryDeleteFile(temp);
+                TryDeleteDirectory(rollbackDir);
             }
             auth.Reload();
             return new
@@ -1960,19 +2119,112 @@ static class AdminDataTransfer
         }
     }
 
-    private static IEnumerable<(string Path, string Name)> CollectUserDataFiles(string root)
+    /// <summary>
+    /// 在**多个用户的按用户锁**下执行一次提交。
+    ///
+    /// 导入是整包替换：一次要动多个用户的文件，所以要把涉及的用户全部先锁住再动手，
+    /// 中途逐个"边锁边写"会留下"一部分用户已换、一部分还没换"的中间态。
+    /// 调用方保证 <paramref name="users"/> 已按固定顺序去重排序 —— 两个并发导入
+    /// 若按不同顺序取锁就会互相死锁。
+    /// </summary>
+    private static void CommitUnderUserLocks(UserDataStore userData, List<string> users, Action commit)
     {
-        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        if (users.Count == 0)
+        {
+            commit();
+            return;
+        }
+        CommitFrom(userData, users, 0, commit);
+    }
+
+    private static void CommitFrom(UserDataStore userData, List<string> users, int index, Action commit)
+    {
+        if (index >= users.Count)
+        {
+            commit();
+            return;
+        }
+        userData.RunExclusive(users[index], () =>
+        {
+            CommitFrom(userData, users, index + 1, commit);
+            // RunExclusive 的返回值只是为了让泛型能推导，这里没有实际值要带出来
+            return true;
+        });
+    }
+
+    /// <summary>
+    /// 收集包内可导入的用户数据文件，并把它**映射到用户数据目录下的目标文件名**。
+    ///
+    /// ⚠️ 两条硬约束，都是踩过的坑：
+    /// 1. **撞名必须报错，不能静默覆盖**。目标名由 CleanUserName 归一化而来，是**多对一**的：
+    ///    包里的 `胡 平.json`、`胡_平.json`、`胡/平.json` 都会落到同一个 `胡_平.json`。
+    ///    旧实现直接 yield，后一个把前一个静默覆盖 —— 上传返回 200、文件数也"对"，
+    ///    但有一个用户的数据被无声吞掉，事后无从察觉。这里显式抛出，让管理员改名重传。
+    /// 2. **保留名要拒绝**。`accounts.dat`/`sessions.json`/`_backups/…` 不是用户数据：
+    ///    · `sessions.json` 是登录会话存储，包内同名文件会**顶掉线上会话**（等于上传者凭空
+    ///      获得/破坏他人登录态）；它同时也在下面的"删除"范围里，必须先于任何写操作挡掉。
+    ///    · `_backups/…` 会往备份目录里塞任意内容，破坏备份保留策略。
+    /// </summary>
+    private static List<(string Path, string Name)> CollectUserDataFiles(string root)
+    {
+        var collected = new List<(string Path, string Name)>();
+        var byTarget = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             var name = Path.GetFileName(file);
-            if (name.Equals("accounts.dat", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            // 包内相对路径（用于报错信息，让管理员知道是哪个文件）
+            var relative = Path.GetRelativePath(root, file).Replace('\\', '/');
+            if (name.Equals("accounts.dat", StringComparison.OrdinalIgnoreCase))
             {
-                var cleanName = name.Equals("accounts.dat", StringComparison.OrdinalIgnoreCase)
-                    ? "accounts.dat"
-                    : CleanUserName(Path.GetFileNameWithoutExtension(name)) + ".json";
-                yield return (file, cleanName);
+                if (byTarget.TryGetValue("accounts.dat", out var dupAccounts))
+                {
+                    throw new InvalidOperationException($"压缩包里有多个 accounts.dat（{dupAccounts} 与 {relative}），无法确定采用哪一个");
+                }
+                byTarget["accounts.dat"] = relative;
+                collected.Add((file, "accounts.dat"));
+                continue;
             }
+            if (!name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var cleanName = CleanUserName(Path.GetFileNameWithoutExtension(name)) + ".json";
+            /* 保留名检查要看**两个**东西：
+               ① 目标文件名本身（`sessions.json` 归一化后还是 `sessions.json`）；
+               ② 包内**源路径**里有没有保留目录段（`_backups/x.json`、`p/_backups/x.json`）。
+                  只查①是不够的：CollectUserDataFiles 用 SearchOption.AllDirectories 递归收，
+                  但目标名只取 `Path.GetFileName`，所以 `_backups/evil.json` 会被**摊平**成
+                  顶层的 `evil.json` —— 变成一个凭空多出来的用户，而不是落进备份目录。
+                  （实测：包内 `_backups/evil.json` 导入后 /api/admin/users 多出 evil 账号。） */
+            if (IsReservedUserDataFile(cleanName) || IsReservedUserDataFile(relative))
+            {
+                throw new InvalidOperationException($"压缩包里的 {relative} 是系统保留文件/目录，不能导入");
+            }
+            if (byTarget.TryGetValue(cleanName, out var dup))
+            {
+                throw new InvalidOperationException(
+                    $"压缩包里的 {dup} 与 {relative} 会归一化成同一个用户文件名「{cleanName}」，请改名后重新上传");
+            }
+            byTarget[cleanName] = relative;
+            collected.Add((file, cleanName));
         }
+        return collected;
+    }
+
+    /// <summary>
+    /// 用户数据目录里**不属于用户**的文件名/路径：会话存储与备份目录。
+    /// 导入时它们既不能被覆盖，也不能进"会被清掉的旧文件"名单。
+    /// 参数可以是纯文件名（`sessions.json`）或包内相对路径（`_backups/x.json`）。
+    /// </summary>
+    private static bool IsReservedUserDataFile(string nameOrRelative)
+    {
+        var slash = nameOrRelative.Replace('\\', '/').TrimStart('/');
+        // 任何一段是 _backups 就拒绝：包内 `_backups/x.json` 会被摊平成顶层 `x.json`，
+        // 只看文件名挡不住，必须看源路径里的目录段。
+        foreach (var segment in slash.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment.Equals("_backups", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return SessionStore.IsSessionFile(Path.GetFileName(slash));
     }
 
     private static void ValidateJsonFile(string path, string name)
@@ -2023,6 +2275,9 @@ static class AdminDataTransfer
     /// 校验 accounts.dat：必须是「账号名 → 档案对象」的 JSON 对象，且含 admin。
     /// 以前只验"是不是 JSON"，结构错的合法 JSON（`{"admin":"oops"}` / `[]`）会通过校验，
     /// 导入后凭据被静默清空、重启后无人能登录。
+    /// 现在还要求 **至少有一个可用的管理员**：导入一个"有账号但 admin 档案残缺
+    /// （没有 salt/hash）"的包，会通过上面的结构校验，但导入后没人能登录，
+    /// 只能靠初始口令兜底 —— 那条路径会顺手把凭据重写一遍，等于把坏包固化。
     /// </summary>
     private static void ValidateAccountsFile(string path)
     {
@@ -2036,6 +2291,33 @@ static class AdminDataTransfer
             throw new InvalidOperationException($"accounts.dat 结构不正确（应为「账号名 → 档案对象」的对象）：{ex.Message}");
         }
         if (raw is null || raw.Count == 0) throw new InvalidOperationException("accounts.dat 里没有任何账号");
+
+        // 每个档案值都必须是非 null 对象（`{"admin":null}` 反序列化成 null 值，字典校验不到）
+        foreach (var pair in raw)
+        {
+            if (pair.Value is null)
+            {
+                throw new InvalidOperationException($"accounts.dat 里账号「{pair.Key}」的档案是 null，结构不正确");
+            }
+        }
+
+        // 至少一个可用的 admin：档案齐全（salt/hash）且没被停用
+        var admin = raw.FirstOrDefault(pair => pair.Key.Equals("admin", StringComparison.OrdinalIgnoreCase));
+        if (admin.Key is null)
+        {
+            throw new InvalidOperationException("accounts.dat 里没有 admin 账号，导入后将无人能登录管理后台");
+        }
+        var profile = admin.Value;
+        var hasSalt = profile.TryGetValue("salt", out var saltValue) && ScalarString(saltValue).Length > 0;
+        var hasHash = profile.TryGetValue("hash", out var hashValue) && ScalarString(hashValue).Length > 0;
+        if (!hasSalt || !hasHash)
+        {
+            throw new InvalidOperationException("accounts.dat 里 admin 的档案缺少 salt/hash，导入后无法登录");
+        }
+        if (profile.TryGetValue("disabled", out var disabledValue) && ScalarBool(disabledValue))
+        {
+            throw new InvalidOperationException("accounts.dat 里 admin 被标记为停用，导入后将无人能登录管理后台");
+        }
     }
 
     private static (string Name, int Chapters, int Subjects) ReadCourseImportInfo(string dbPath, int courseId)
@@ -2270,6 +2552,92 @@ sealed class UserDataStore
         _paths = paths;
     }
 
+    /// <summary>
+    /// 取某个用户的**串行锁**。普通 LoadAsync/SaveAsync 内部走同一张表，
+    /// 所以只要管理员的写操作也调这里，就会和用户的 load/save 排到同一条队上。
+    ///
+    /// 为什么必须有这个出口：管理员链路（导入 / 清空 / 删号）以前直接 File.*，
+    /// 完全不经过这把锁。于是会出现这样的交错 ——
+    ///   用户 load 出旧内容(rev A) → 管理员把文件换成新内容(rev B) → 用户 save(基于 rev A)
+    /// 用户那次 save 因为 rev 对不上而撞冲突、被拒（UserDataConflictException），
+    /// 但它发生在管理员写完之后，语义上"用户读到的东西"和"他覆盖的东西"已经不是同一份了；
+    /// 真正危险的是**管理员清空/删号**：它不带 revision 校验，一旦和用户的写交错，
+    /// 就会出现"用户刚保存的进度被清空"或"已删除的账号被一次保存复活"。
+    /// 把管理员的写也纳进同一把锁，这类交错就变成确定性的前后关系。
+    /// </summary>
+    public async Task<T> RunExclusiveAsync<T>(string user, Func<Task<T>> work)
+    {
+        var clean = CleanUserName(user);
+        var gate = _locks.GetOrAdd(clean, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            return await work();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>同步版（导入/清空/删号都是文件系统操作，用不上 async 的等待点）。</summary>
+    public T RunExclusive<T>(string user, Func<T> work)
+    {
+        var clean = CleanUserName(user);
+        var gate = _locks.GetOrAdd(clean, _ => new SemaphoreSlim(1, 1));
+        gate.Wait();
+        try
+        {
+            return work();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// 管理员的"清空某用户数据"：写回空对象。**在用户的锁内**执行，
+    /// 避免和该用户的并发 save 交错（旧实现直接 File.WriteAllText，不带锁）。
+    /// </summary>
+    public string Clear(string user)
+    {
+        return RunExclusive(user, () =>
+        {
+            Directory.CreateDirectory(_paths.UserDataRoot);
+            var path = UserDataPath(_paths, user);
+            var body = "{}";
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temp, body, new UTF8Encoding(false));
+                RestrictFilePermissions(temp);
+                File.Move(temp, path, true);
+                RestrictFilePermissions(path);
+            }
+            finally
+            {
+                TryDeleteFile(temp);
+            }
+            return Revision(body);
+        });
+    }
+
+    /// <summary>
+    /// 管理员的"删除某用户数据"：**在用户的锁内**执行。
+    /// 必须持锁的原因：删号是"读 auth + 删文件"两步，若与用户 save 交错，
+    /// 用户那次 save 会在删除之后把文件写回来（"已删除的账号被保存复活"）。
+    /// </summary>
+    public void Delete(string user)
+    {
+        RunExclusive(user, () =>
+        {
+            var path = UserDataPath(_paths, user);
+            if (File.Exists(path)) File.Delete(path);
+            return true;
+        });
+    }
+
     public async Task<(object Data, string Revision)> LoadAsync(string user)
     {
         var clean = CleanUserName(user);
@@ -2351,6 +2719,21 @@ sealed class UserDataStore
 
 sealed class UserDataConflictException : Exception
 {
+}
+
+/// <summary>
+/// 账号库（accounts.dat）不可用：文件存在但读不出来 / 解析失败 / 结构不对。
+///
+/// 独立成一个类型，是为了让它和普通 InvalidOperationException 走**不同的对外文案**：
+/// 这类异常的 Message 里含绝对路径和解析器细节，而它的触发点可能是**未登录请求**
+/// （/api/auth/session 一进来就要解析 AuthStore），不能原样回显给调用方。
+/// 完整文案仍然写进服务端日志（见 SafeErrorText）。
+/// </summary>
+sealed class AuthStoreUnavailableException : Exception
+{
+    public AuthStoreUnavailableException(string message, Exception? inner = null) : base(message, inner)
+    {
+    }
 }
 
 sealed class SessionStore
@@ -2781,8 +3164,25 @@ sealed class AuthStore
         lock (_lock)
         {
             Directory.CreateDirectory(_paths.UserDataRoot);
-            File.WriteAllText(_paths.AuthDataPath, JsonSerializer.Serialize(_auth), Encoding.UTF8);
-            RestrictFilePermissions(_paths.AuthDataPath);
+            var body = JsonSerializer.Serialize(_auth);
+            /* 原子写：先写同目录临时文件，再 File.Move(overwrite) 替换。
+               旧实现直接 File.WriteAllText 覆盖 accounts.dat —— 写到一半断电/被 kill
+               会留下**截断的半个文件**，下次启动 Load() 解析失败 → 全员账号消失。
+               与 UserDataStore.SaveAsync 的写法保持一致（同一目录、同卷 rename 才是原子的）。
+               ⚠️ 临时文件放 UserDataRoot 下、以 `.` 开头：不会被用户列表（顶层 `*.json`）
+               和备份（按 *.json / accounts.dat 收集）当成正式数据。 */
+            var temp = _paths.AuthDataPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temp, body, new UTF8Encoding(false));
+                RestrictFilePermissions(temp);
+                File.Move(temp, _paths.AuthDataPath, true);
+                RestrictFilePermissions(_paths.AuthDataPath);
+            }
+            finally
+            {
+                TryDeleteFile(temp);
+            }
         }
     }
 
@@ -2794,21 +3194,52 @@ sealed class AuthStore
         }
     }
 
+    /// <summary>
+    /// 读取 accounts.dat。
+    ///
+    /// ⚠️ 读失败**绝不允许**退化成空账号库。旧实现 catch { return 空字典; }：
+    /// 文件损坏/不可读 → 内存里变成"一个账号都没有"，服务照常起来，所有登录 401；
+    /// 更糟的是**下一次凭据写入会把空库固化到磁盘**（实测：先是全员登录失败，
+    /// 然后一次改密就把 accounts.dat 覆写成只剩 admin 一个账号，u1 永久消失）。
+    ///
+    /// 现在的口径：
+    ///   · 文件不存在            → 空库（首次部署的正常状态，admin 用初始口令走无档案路径）
+    ///   · 文件存在但解析/读取失败 → **上抛**，让启动/调用方决定（启动时直接失败比带病运行好）
+    /// </summary>
     private Dictionary<string, Dictionary<string, object?>> Load()
     {
         Directory.CreateDirectory(_paths.UserDataRoot);
         if (!File.Exists(_paths.AuthDataPath)) return new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
+
+        string text;
         try
         {
-            var raw = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, object?>>>(File.ReadAllText(_paths.AuthDataPath, Encoding.UTF8));
-            return raw is null
-                ? new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase)
-                : new Dictionary<string, Dictionary<string, object?>>(raw, StringComparer.OrdinalIgnoreCase);
+            text = File.ReadAllText(_paths.AuthDataPath, Encoding.UTF8);
         }
-        catch
+        catch (Exception ex)
         {
-            return new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
+            throw new AuthStoreUnavailableException($"账号文件 {_paths.AuthDataPath} 无法读取：{ex.Message}；请从备份恢复，不要以空账号库启动", ex);
         }
+        // 空文件同样是"不可用"，不能当作"没有账号"——那样会静默清空全员。
+        if (text.Trim().Length == 0)
+        {
+            throw new AuthStoreUnavailableException($"账号文件 {_paths.AuthDataPath} 是空的，拒绝以空账号库启动；请从备份恢复");
+        }
+        Dictionary<string, Dictionary<string, object?>>? raw;
+        try
+        {
+            raw = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, object?>>>(text);
+        }
+        catch (JsonException ex)
+        {
+            throw new AuthStoreUnavailableException($"账号文件 {_paths.AuthDataPath} 不是有效 JSON：{ex.Message}；请从备份恢复，不要以空账号库启动", ex);
+        }
+        // 合法 JSON 但结构不对（[]、{"admin":"oops"}、null）——同样拒绝，别退化成空库
+        if (raw is null)
+        {
+            throw new AuthStoreUnavailableException($"账号文件 {_paths.AuthDataPath} 结构不正确（应为「账号名 → 档案对象」的对象）；请从备份恢复");
+        }
+        return new Dictionary<string, Dictionary<string, object?>>(raw, StringComparer.OrdinalIgnoreCase);
     }
 
     private static string GetProfileString(Dictionary<string, object?> profile, string key)
