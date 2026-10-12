@@ -71,7 +71,16 @@ function collectReferences(html) {
   return [...found.values()];
 }
 
-function sha256(buf) { return createHash("sha256").update(buf).digest("hex"); }
+/* ⚠️ 必须先统一换行符再算哈希。
+   `.gitattributes` 是 `* text=auto eol=lf`：仓库里存 LF，但 Windows 工作副本可能是 CRLF，
+   而 git 认为两者「相同」（`status` 干净）。直接哈希原始字节会导致：
+     · 锁在 Windows 上按 CRLF 生成 → CI 在 Linux 检出的是 LF → **永远对不上**，
+       门禁每次必红，而 `needs: verify` 会把整条镜像构建一起卡住（实测就是这个原因）。
+   `?v=` 要防的是「内容真的变了」，换行符差异不是内容变化 —— 服务端两边都会照原样发。
+   所以这里按 LF 规范化后再比对。 */
+function sha256(buf) {
+  return createHash("sha256").update(buf.toString("utf8").replace(/\r\n/g, "\n"), "utf8").digest("hex");
+}
 
 const html = readFileSync(indexAbs, "utf8");
 const refs = collectReferences(html);
