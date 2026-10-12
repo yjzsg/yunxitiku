@@ -28,6 +28,12 @@ const state = {
   zoom: 1,
   storage: {},
   storageRevision: "",
+  /* 服务端读用户数据**失败**（5xx / 网络断）→ 只读态。
+     这个基线是空的，但它**不是**「这个账号没有数据」：绝不能拿它去保存，
+     否则第一次整包回写就把用户真实进度覆盖掉（实测 supa.json 2651 → 700 字节）。
+     只读态下：scheduleSave 直接 return、saveUserData 拒发、顶部横幅提示。 */
+  storageReadFailed: false,
+  storageReadErrorMessage: "",
   saveTimer: null,
   saveChain: null,
   saveErrorShownAt: 0,
@@ -285,8 +291,12 @@ async function api(path, options) {
     const payload = await res.json().catch(() => ({ error: res.statusText }));
     /* `error` 字段历史上出现过**嵌套对象**（后端 SafeError 曾返回 {ok,error}），
        直接 new Error(对象) 会让 toast 显示 "[object Object]"，用户完全看不懂。
-       这里做类型防御：字符串直接用；对象则取它自己的 error / message。 */
-    const raw = payload?.error;
+       这里做类型防御：字符串直接用；对象则取它自己的 error / message。
+       ⚠️ 还有第三种历史形态：响应体是**裸 JSON 字符串**（后端 `Results.Json(SafeError(ex), 400)`
+       → `400 | "题目不存在"`）。那时 payload 本身就是字符串，取 `payload.error` 得到 undefined，
+       于是落到 `res.statusText` → 用户只看到 "Bad Request"，看不到真实原因。
+       后端已统一改成 `{ok:false,error:…}`，这里同时兜住裸字符串（老版本后端 / 未覆盖到的端点）。 */
+    const raw = typeof payload === "string" ? payload : payload?.error;
     const text = typeof raw === "string"
       ? raw
       : (raw && typeof raw === "object" && typeof raw.error === "string")
@@ -318,6 +328,7 @@ function handleSessionExpired() {
   state.saveTimer = null;
   stopExamTimer();
   state.storageDirty = false;
+  setStorageReadFailed(false, "");
   setSaveStatus("idle");
   localStorage.removeItem(SESSION_USER_KEY);
   localStorage.removeItem(SESSION_TOKEN_KEY);
@@ -1496,7 +1507,10 @@ async function changePassword() {
 
 async function enterApp(user, options = {}) {
   if (options.rememberSession !== false) localStorage.setItem(SESSION_USER_KEY, user);
-  await loadUserData(user);
+  /* tolerateFailure：服务端读用户数据失败时**照样进应用**，但只读
+     （顶部常驻横幅 + 不保存）。以前会让登录整个失败，用户连导出都做不到；
+     更早的版本则是把读失败当成空账号，直接把真实进度覆盖掉。 */
+  await loadUserData(user, { tolerateFailure: true });
   /* 上次关页时没存上的改动（sendBeacon 兜底失败，见 flushPendingSaveBeacon）。
      必须在 applyQuestionWindow / restoreLastCourse 之前接回来，否则界面先按
      服务器那份旧数据渲染一遍，再被替换掉。 */
@@ -1579,8 +1593,34 @@ async function logout() {
   showLogin();
 }
 
-async function loadUserData(user) {
-  const res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
+/* 读用户数据。
+   ⚠️ 读失败**不等于**「这个账号没有数据」：服务端读失败会回 5xx（见 /api/user/load），
+   这里必须把它和「首次用户（200 + 空数据 + revision:""）」分开处理。
+   旧实现把 5xx 直接抛给调用方 → 登录页报错；更早的实现把读失败当成空数据 →
+   下一次保存把用户真实进度整包覆盖（实测 supa.json 2651 → 700 字节）。
+   现在：只在 tolerateFailure 时进**只读态**（能看、能导出，但不保存）；其它错误照旧上抛。 */
+async function loadUserData(user, options = {}) {
+  let res;
+  try {
+    res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
+  } catch (err) {
+    const readFailed = !err?.status || err.status >= 500;
+    setStorageReadFailed(readFailed, err?.message || "");
+    if (readFailed && options.tolerateFailure) {
+      /* 只读态：空基线只为让界面能渲染；storageDirty 保持 false，不会去回写。 */
+      state.user = user;
+      state.storage = normalizeStorage({});
+      state.storageRevision = "";
+      state.storageDirty = false;
+      setSaveStatus("idle");
+      state.zoom = 1;
+      localStorage.setItem(LAST_USER_KEY, state.user);
+      renderUsers();
+      return res;
+    }
+    throw err;
+  }
+  setStorageReadFailed(false, "");
   state.user = res.user;
   state.storage = normalizeStorage(res.data || {});
   state.storageRevision = res.revision || "";
@@ -1593,6 +1633,29 @@ async function loadUserData(user) {
     scheduleSave();
   }
   renderUsers();
+}
+
+/* 只读态的开关 + 顶部横幅。横幅是**常驻**的（不是 toast）：
+   用户可能在只读态里做很久，几秒就消失的提示等于没提示。 */
+function setStorageReadFailed(failed, message) {
+  const next = !!failed;
+  const changed = state.storageReadFailed !== next;
+  state.storageReadFailed = next;
+  state.storageReadErrorMessage = next ? (message || "") : "";
+  if (next && changed) {
+    /* 定时器里可能已经挂了一次保存，必须撤掉：它会带着空基线去打服务端。 */
+    clearTimeout(state.saveTimer);
+    state.saveTimer = null;
+    state.storageDirty = false;
+  }
+  updateStorageReadOnlyBanner();
+  updateSaveStatusUi();   // 「已同步 / 只读 · 未保存」两态切换要立刻反映到顶栏和账号菜单
+}
+
+function updateStorageReadOnlyBanner() {
+  const banner = $("readOnlyBanner");
+  if (!banner) return;
+  banner.classList.toggle("hidden", !state.storageReadFailed);
 }
 
 function normalizeZoom(value) {
@@ -1685,16 +1748,18 @@ function updateSaveStatusUi() {
     saving: "保存中…",
     error: "保存失败",
   };
+  /* 只读态：状态文案必须说清楚「不是已同步」，否则用户看到「已同步」以为存上了。 */
+  const label = state.storageReadFailed ? "只读 · 未保存" : (map[status] || map.idle);
   /* 顶栏账号头像上的状态角标。
      同步状态原本只写在账号下拉菜单里（#saveStatusLabel），菜单一关宽度就是 0 ——
      409 之后按「暂时保留本地」时，界面上唯一的「保存失败」提示在看不见的地方。
      角标是同一个 state.saveStatus 的第二个投递点，红点/同步点由 CSS 画。 */
   const avatar = $("accountMenuBtn");
   if (avatar) {
-    avatar.classList.toggle("has-error", status === "error");
-    avatar.classList.toggle("is-syncing", status === "dirty" || status === "saving");
-    avatar.dataset.sync = status;
-    avatar.title = state.user ? `账号 · ${map[status] || map.idle}` : "账号";
+    avatar.classList.toggle("has-error", status === "error" || state.storageReadFailed);
+    avatar.classList.toggle("is-syncing", !state.storageReadFailed && (status === "dirty" || status === "saving"));
+    avatar.dataset.sync = state.storageReadFailed ? "error" : status;
+    avatar.title = state.user ? `账号 · ${label}` : "账号";
   }
   const el = $("saveStatusLabel");
   if (!el) return;
@@ -1703,8 +1768,8 @@ function updateSaveStatusUi() {
     el.dataset.status = "idle";
     return;
   }
-  el.textContent = map[state.saveStatus] || map.idle;
-  el.dataset.status = state.saveStatus || "idle";
+  el.textContent = label;
+  el.dataset.status = state.storageReadFailed ? "error" : (state.saveStatus || "idle");
 }
 
 function markStorageDirty() {
@@ -1714,6 +1779,9 @@ function markStorageDirty() {
 
 function scheduleSave() {
   if (!state.user) return;
+  /* 只读态（服务端读用户数据失败）下**一次都不发**。
+     基线是空的，发出去就是拿空包覆盖用户的真实进度。 */
+  if (state.storageReadFailed) return;
   markStorageDirty();
   clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(() => {
@@ -1767,6 +1835,9 @@ function clearPendingSaveDraft() {
 function applyPendingSaveDraft() {
   const draft = readPendingSaveDraft();
   if (!draft) return false;
+  /* 只读态：基线是空的，把草稿贴上来也存不下去，只会让用户以为改动还在。
+     草稿**留着**（不清），下次读成功时再走正常补存。 */
+  if (state.storageReadFailed) return false;
   if (String(draft.user || "") !== String(state.user || "")) { clearPendingSaveDraft(); return false; }
   let same = false;
   try { same = JSON.stringify(draft.storage) === JSON.stringify(state.storage); } catch (_err) { same = false; }
@@ -1794,8 +1865,15 @@ function applyPendingSaveDraft() {
 
 function flushPendingSaveBeacon() {
   if (!state.user || !state.storageDirty) return false;
+  /* 只读态下 sendBeacon 更危险：它不看响应，发出去就当作已保存。 */
+  if (state.storageReadFailed) return false;
   try {
-    const revision = state.storageRevision ? `&revision=${encodeURIComponent(state.storageRevision)}` : "";
+    /* revision 为空时**不能**省掉前置条件：服务端会把「无前置条件」当成放行，
+       于是空基线直接盖掉真实数据。空 revision 用标准 HTTP 的「只在不存在时创建」
+       （If-None-Match: *），sendBeacon 发不了自定义头，所以带上 expectEmpty=1。 */
+    const revision = state.storageRevision
+      ? `&revision=${encodeURIComponent(state.storageRevision)}`
+      : "&expectEmpty=1";
     const body = JSON.stringify(state.storage);
     const blob = new Blob([body], { type: "application/json; charset=utf-8" });
     const ok = navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}${revision}`, blob);
@@ -1819,10 +1897,18 @@ function flushPendingSaveBeacon() {
 
 function saveUserData() {
   if (!state.user) return Promise.resolve();
+  /* 只读态：直接返回失败，不发请求（调度侧已拦，这里是第二道闸）。 */
+  if (state.storageReadFailed) {
+    return Promise.reject(new Error("数据读取失败，本次改动不会保存，请刷新重试"));
+  }
   const run = async () => {
     setSaveStatus("saving");
     const headers = { "Content-Type": "application/json; charset=utf-8" };
+    /* 前置条件**始终**带：revision 为空时用 If-None-Match: *（「只在服务端还没有数据时创建」），
+       不能再省成「无前置条件」—— 服务端在「文件非空但客户端 revision 为空」时按 409 处理，
+       这正是那条「读失败 → 空包覆盖真实进度」的路径的兜底。 */
     if (state.storageRevision) headers["If-Match"] = `"${state.storageRevision}"`;
+    else headers["If-None-Match"] = "*";
     const result = await api(`/api/user/save?user=${encodeURIComponent(state.user)}`, {
       method: "POST",
       headers,
@@ -3440,7 +3526,10 @@ function refreshDailyTrainingState() {
   state.storage.dailyActivity ||= {};
   if (!state.storage.dailyActivity[key]) {
     state.storage.dailyActivity[key] = { courses: {}, total: 0, correct: 0, verified: 0, updatedAt: nowText() };
-    changed = true;
+    /* ⚠️ 只读态**不算**成「有改动」。开页时这个桶必然不存在 → 旧实现恒返回 true →
+       loadUserData 当场就 scheduleSave 回写一次；读失败时那就是拿空包覆盖真实进度
+       （实测 supa.json 2651 → 700 字节）。桶仍然建出来，界面要它稳定。 */
+    if (!state.storageReadFailed) changed = true;
   }
   return changed;
 }
@@ -8364,8 +8453,9 @@ function renderBankEditorDetail() {
       <div class="bank-editor-chapter-fields">
         ${path.map((chapter, index) => `
           <label>
-            <span>${["一级标题", "二级标题", "三级标题", "四级标题"][index] || `第 ${index + 1} 级标题`} · ID ${chapter.id}</span>
-            <input data-editor-chapter-id="${chapter.id}" value="${escapeHtml(chapter.name || "")}">
+            <span>${["一级标题", "二级标题", "三级标题", "四级标题"][index] || `第 ${index + 1} 级标题`} · ID ${chapter.id} · 该章 ${Number(chapter.questionCount || 0)} 题</span>
+            <input data-editor-chapter-id="${chapter.id}" value="${escapeHtml(chapter.name || "")}"
+                   title="章节名是整章共用的：改这里会同时改掉该章全部 ${Number(chapter.questionCount || 0)} 道题的章节名，保存时会再确认一次">
           </label>
         `).join("") || `<div class="admin-empty">未找到章节路径</div>`}
       </div>
@@ -8577,6 +8667,22 @@ async function saveBankEditorQuestion() {
   if (!payload.title.trim()) {
     toast("题目内容不能为空");
     return;
+  }
+  /* ⚠️ 章节名是「一章一份」的：改一个字，这一章下**全部**题的 chapterName 都跟着变
+     （实测把章节 20173 改名后，同章 96 道题的 chapterName 全变）。
+     以前只有和「保存题干」共用的那一句通用 confirm，管理员根本看不出这次改的是整章；
+     这里对**真的改动了名字**的每一级标题单独再确认一次，并报出影响面。 */
+  const pathById = new Map((detail.chapterPath || []).map((chapter) => [Number(chapter.id), chapter]));
+  const chapterRenames = chapters
+    .map((chapter) => {
+      const before = pathById.get(Number(chapter.id));
+      if (!before) return null;
+      if (String(before.name || "") === String(chapter.name || "")) return null;
+      return { from: before.name || "（空）", to: chapter.name || "（空）", count: Number(before.questionCount || 0) };
+    })
+    .filter(Boolean);
+  for (const rename of chapterRenames) {
+    if (!confirm(`章节「${rename.from}」将改名为「${rename.to}」，影响该章全部 ${rename.count} 道题。\n\n确定要改这一章的标题吗？`)) return;
   }
   if (!confirm("确定保存题库修改吗？系统会先自动备份当前数据库。")) return;
   state.adminEditorBusy = "save";

@@ -430,11 +430,17 @@ app.MapGet("/api/user/load", async (HttpContext context, string? user, UserDataS
     try
     {
         var loaded = await userData.LoadAsync(clean);
-        return Results.Json(new { user = clean, data = loaded.Data, revision = loaded.Revision });
+        return Results.Json(new { ok = true, user = clean, data = loaded.Data, revision = loaded.Revision });
     }
-    catch
+    catch (Exception ex)
     {
-        return Results.Json(new { user = clean, data = new Dictionary<string, object?>(), revision = "" });
+        /* ⚠️ 读失败**绝不能**伪装成「这个账号没有数据」。
+           旧实现返回 200 + {data:{},revision:""}，前端就把空包当基线：等读恢复正常，
+           用户随手做一步操作，下一次整包保存就把真实进度整包覆盖掉
+           （实测 supa.json 2651 → 700 字节，四门课的 answers/notes/verified/dailyActivity 全丢）。
+           这里返回 5xx，前端据此进只读态、不写回。 */
+        SafeErrorText(ex);   // 只借它把完整堆栈记进服务端日志，细节不外泄
+        return Results.Json(new { ok = false, error = "读取用户数据失败" }, statusCode: 500);
     }
 });
 
@@ -462,12 +468,47 @@ app.MapPost("/api/user/save", async (HttpContext context, string? user, UserData
     {
         return Results.Json(new { ok = false, error = "用户数据不是有效 JSON：" + ex.Message }, statusCode: 400);
     }
-    var expectedRevision = request.Headers.IfMatch.FirstOrDefault()?.Trim('"')
-        ?? Convert.ToString(request.Query["revision"], CultureInfo.InvariantCulture)
-        ?? "";
+    /* 前置条件必须**显式**，三种写法都收：
+         · If-Match: "<revision>"   常规：内容必须与客户端手里的 revision 一致
+         · If-None-Match: *         标准 HTTP「只在资源不存在时创建」
+         · If-Match: "" / expectEmpty=1 / ?revision=（空值）  「客户端这边没有数据」
+       ⚠️ 最后一种以前会被当成「无前置条件」直接写 —— 那正是覆盖用户真实进度的那条路
+       （读失败 → revision="" → 下一次保存把 2651 字节整包换成 700 字节）。
+       完全不带前置条件（老客户端）行为不变。 */
+    var hasIfNoneMatch = request.Headers.TryGetValue("If-None-Match", out var ifNoneMatchValues);
+    var hasIfMatch = request.Headers.TryGetValue("If-Match", out var ifMatchValues);
+    var ifNoneMatch = ifNoneMatchValues.ToString();
+    var ifMatch = ifMatchValues.ToString();
+    var expectedRevision = "";
+    var expectEmpty = false;
+    if (hasIfNoneMatch && ifNoneMatch.Contains('*', StringComparison.Ordinal))
+    {
+        expectEmpty = true;
+    }
+    else if (hasIfMatch)
+    {
+        var tag = ifMatch.Trim();
+        if (tag != "*")
+        {
+            tag = tag.Trim('"').Trim();
+            if (tag.Length == 0) expectEmpty = true;      // If-Match: "" = 「我这边是空的」
+            else expectedRevision = tag;
+        }
+    }
+    else if (request.Query.ContainsKey("revision"))
+    {
+        var revisionQuery = (Convert.ToString(request.Query["revision"], CultureInfo.InvariantCulture) ?? "").Trim();
+        if (revisionQuery.Length > 0) expectedRevision = revisionQuery;
+        else expectEmpty = true;                          // ?revision= 空值 = 「我这边是空的」
+    }
+    else if (request.Query.ContainsKey("expectEmpty"))
+    {
+        var flag = (Convert.ToString(request.Query["expectEmpty"], CultureInfo.InvariantCulture) ?? "").Trim();
+        expectEmpty = flag is "1" or "true" or "True";
+    }
     try
     {
-        var revision = await userData.SaveAsync(clean, body, expectedRevision);
+        var revision = await userData.SaveAsync(clean, body, expectedRevision, expectEmpty);
         return Results.Json(new { ok = true, user = clean, revision, savedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") });
     }
     catch (UserDataConflictException)
@@ -727,7 +768,7 @@ app.MapPost("/api/admin/update-bank", async (HttpRequest request, HttpContext co
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
     finally
     {
@@ -790,7 +831,7 @@ app.MapPost("/api/admin/clean-ads", (HttpContext context, string? user, int? cou
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
 });
 
@@ -851,7 +892,7 @@ app.MapGet("/api/admin/data/download", (HttpContext context, string? user, strin
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
 });
 
@@ -881,7 +922,7 @@ app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, 
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
     finally
     {
@@ -898,7 +939,7 @@ app.MapGet("/api/admin/bank-editor/questions", (HttpContext context, QuestionBan
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
 });
 
@@ -912,7 +953,7 @@ app.MapGet("/api/admin/bank-editor/question", (HttpContext context, QuestionBank
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
 });
 
@@ -926,7 +967,7 @@ app.MapPost("/api/admin/bank-editor/question", async (HttpRequest request, Quest
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
 });
 
@@ -941,7 +982,7 @@ app.MapPost("/api/admin/bank-editor/restore", (HttpContext context, QuestionBank
     }
     catch (Exception ex)
     {
-        return Results.Json(SafeError(ex), statusCode: 400);
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
 });
 
@@ -2237,8 +2278,25 @@ sealed class UserDataStore
         try
         {
             var path = UserDataPath(_paths, clean);
-            if (!File.Exists(path)) return (new Dictionary<string, object?>(), "");
-            var body = await File.ReadAllTextAsync(path, Encoding.UTF8);
+            string body;
+            try
+            {
+                body = await File.ReadAllTextAsync(path, Encoding.UTF8);
+            }
+            catch (FileNotFoundException)
+            {
+                // 首次用户：文件还没建立，这是**正常**的空状态
+                return (new Dictionary<string, object?>(), "");
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return (new Dictionary<string, object?>(), "");
+            }
+            /* ⚠️ 除「文件不存在」以外的异常（共享冲突 / 权限 / IO）**必须继续上抛**。
+               旧实现先 File.Exists 再读，读失败被外层 catch 吞成「和首次用户一样」→
+               路由返回 200 + 空包 → 前端把空包当基线 → 下一次保存整包覆盖真实进度。
+               抛出去让路由层回 5xx，前端才有机会进只读态。 */
+            if (body.Trim().Length == 0) return (new Dictionary<string, object?>(), "");
             var data = JsonSerializer.Deserialize<object>(body) ?? new Dictionary<string, object?>();
             return (data, Revision(body));
         }
@@ -2248,7 +2306,7 @@ sealed class UserDataStore
         }
     }
 
-    public async Task<string> SaveAsync(string user, string body, string expectedRevision)
+    public async Task<string> SaveAsync(string user, string body, string expectedRevision, bool expectEmpty = false)
     {
         var clean = CleanUserName(user);
         var gate = _locks.GetOrAdd(clean, _ => new SemaphoreSlim(1, 1));
@@ -2259,7 +2317,12 @@ sealed class UserDataStore
             var path = UserDataPath(_paths, clean);
             var currentBody = File.Exists(path) ? await File.ReadAllTextAsync(path, Encoding.UTF8) : "";
             var currentRevision = currentBody.Length == 0 ? "" : Revision(currentBody);
-            if (expectedRevision.Length > 0 && !string.Equals(expectedRevision, currentRevision, StringComparison.OrdinalIgnoreCase))
+            if (expectEmpty)
+            {
+                // 客户端说「我这边没有数据」，可服务端已经有内容 → 冲突，绝不覆盖
+                if (currentRevision.Length > 0) throw new UserDataConflictException();
+            }
+            else if (expectedRevision.Length > 0 && !string.Equals(expectedRevision, currentRevision, StringComparison.OrdinalIgnoreCase))
             {
                 throw new UserDataConflictException();
             }
@@ -3331,12 +3394,37 @@ sealed class QuestionBank
         var question = NormalizeHtml(DecryptField(r["cquestion"], r["dupdatedate"]));
         var answer = StripHtml(DecryptField(r["canswer"], r["dupdatedate"])).Trim();
         var description = NormalizeHtml(DecryptField(r["cdescription"], r["dupdatedate"]));
-        var options = ExtractOptions(title, ToInt(r["ianswercount"]));
-        var stem = options.Count > 0 ? RemoveOptions(title) : title;
-        if (options.Count == 0 && question.Length > 0)
+        var subjectType = ToInt(r["isubjecttype"]);
+        var answerCount = ToInt(r["ianswercount"]);
+        /* 题型自己就说明了「这道题有没有选项」，不能靠正则去题干里猜。
+           老实现对所有题型一律跑 ExtractOptions，两种题因此坏掉：
+             · 判断题(2)：库里根本没有选项（canswer 是「对」/「错」）→ options 恒为空 →
+               前端按「没有 options 就是主观题」渲染成填空框 → 没有对/错按钮、
+               不计分、不进错题本（实测 23657642，markResult 调用 0 次）。
+             · 问答题(3)/解析题(4)/填空题(5)：答案是空串，题干里的「1. 2.」这类编号
+               被误当成选项 → course 24 有 21 道问答题判成客观题，答什么都是错、
+               还进错题本（实测 24082359 被解析出 5 个假选项 A/B/C/D/A）。 */
+        List<object> options;
+        var stem = title;
+        if (subjectType is 3 or 4 or 5)
         {
-            options = ExtractOptions(question, ToInt(r["ianswercount"]));
-            if (options.Count > 0) question = "";
+            options = new List<object>();        // 主观题：一律没有选项，保持 stem/extraQuestion 原样
+        }
+        else if (subjectType == 2)
+        {
+            // text 留空：前端选项按钮画成「<b>标签</b><span>正文</span>」，判断题不需要正文
+            options = new List<object> { new { label = "对", text = "" }, new { label = "错", text = "" } };
+            // 判断题的 canswer 就是「对」/「错」，与合成选项的 label 同口径 → 判分/错题本/答题卡全通
+        }
+        else
+        {
+            options = ExtractOptions(title, answerCount);
+            stem = options.Count > 0 ? RemoveOptions(title) : title;
+            if (options.Count == 0 && question.Length > 0)
+            {
+                options = ExtractOptions(question, answerCount);
+                if (options.Count > 0) question = "";
+            }
         }
         return new
         {
@@ -3345,7 +3433,7 @@ sealed class QuestionBank
             chapterId = ToInt(r["ichapterid"]),
             chapterName = ToStr(r["cchaptername"]),
             type = ToStr(r["csubjectname"]),
-            subjectType = ToInt(r["isubjecttype"]),
+            subjectType,
             score = ToStr(r["iscore"]),
             stem,
             extraQuestion = question,
@@ -3491,6 +3579,19 @@ sealed class QuestionBank
 
         var courseId = ToInt(current["icourseid"]);
         var chaptersToRename = BodyChapters(body).Where(c => c.Id > 0 && c.Name.Length > 0).ToList();
+        /* ⚠️ chapters[].id 以前**完全不校验**：传 {id:1} 也照收，于是能一次改掉任意
+           **另一章**的名字（实测传路径外章节 570708，返回 200 且该章名被改）。
+           只允许改这道题自己 chapterPath 上的章节 —— 判定与界面渲染走同一份 ChapterPathRows。 */
+        if (chaptersToRename.Count > 0)
+        {
+            var allowedChapters = ChapterPathIds(courseId, ToInt(current["ichapterid"]));
+            var illegal = chaptersToRename.Where(c => !allowedChapters.Contains(c.Id)).Select(c => c.Id).ToList();
+            if (illegal.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"章节 {string.Join("、", illegal)} 不属于这道题的章节路径，已拒绝改名（只能改这道题所在的章）");
+            }
+        }
         // 记下"改动前"的内容（原样存，供一键还原用）
         var before = Query("select ctitle, cquestion, canswer, cdescription from coursesubject where isubjectid=@id",
             new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
@@ -3589,7 +3690,37 @@ sealed class QuestionBank
             ? _paths.SqlitePath
             : _paths.PulledSqlitePath;
         var ok = Puller.LocalEdits.RestoreSubject(_paths.SqlitePath, target, courseId, id, out var message);
+        /* ⚠️ 还原必须连 ianswercount 一起回，否则「还原 ≠ 恢复」：
+           RestoreSubject 只写回 ctitle/cquestion/canswer/cdescription 四个字段，
+           而 ianswercount 停在「删过选项」的那次保存上。实测 1509187 删掉 C 行保存
+           （4→3）再还原：题干回到 A/B/C/D、答案回到 B，可 ianswercount 仍是 3 →
+           学员端 options 被截成 A/B/C，D 消失。
+           这里按**和保存路径同一口径**（CountOptions）从还原后的文本重算。 */
+        if (ok) RecomputeAnswerCount(id, courseId);
         return new { ok, id, message, question = ok ? GetEditorQuestion(id) : null };
+    }
+
+    /// <summary>
+    /// 按保存时的同一口径重算这道题的 <c>ianswercount</c>。
+    /// 保存路径写的是 <see cref="CountOptions"/>(title + "\n" + question)，回填必须同口径，
+    /// 否则会出现「还原一次 / 保存一次就来回变」的抖动。
+    /// </summary>
+    private void RecomputeAnswerCount(int id, int courseId)
+    {
+        var row = Query("select ctitle, cquestion, dupdatedate from coursesubject where isubjectid=@id",
+            new Dictionary<string, object?> { ["@id"] = id }).FirstOrDefault();
+        if (row is null) return;
+        var count = CountOptions(TextForEdit(row["ctitle"], row["dupdatedate"]) + "\n" + TextForEdit(row["cquestion"], row["dupdatedate"]));
+        // 改的是还原那一步刚写过的同一份库（主库 / 拉取库）
+        var owner = ServerBankPuller.MainHoldsCourseContent(_paths.SqlitePath, courseId) ? "main" : "pulled";
+        SqliteConnection.ClearAllPools();
+        using var conn = OpenBank(_paths.SqlitePath, _paths.PulledSqlitePath, readOnly: false);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"update {owner}.coursesubject set ianswercount=@count where isubjectid=@id";
+        cmd.Parameters.AddWithValue("@count", count);
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+        SqliteConnection.ClearAllPools();
     }
 
     /// <summary>这门课的内容在主库（导出产物）还是在拉取库（未购课程）。</summary>
@@ -3603,7 +3734,26 @@ sealed class QuestionBank
 
     private List<object> GetChapterPath(int courseId, int chapterId)
     {
-        if (courseId <= 0 || chapterId <= 0) return new List<object>();
+        return ChapterPathRows(courseId, chapterId)
+            .Select(row => (object)new
+            {
+                id = row.Id,
+                name = row.Name,
+                code = row.Code,
+                grade = row.Grade,
+                questionCount = row.QuestionCount
+            })
+            .ToList();
+    }
+
+    /// <summary>
+    /// 章节路径的原始行。<see cref="GetChapterPath"/>（给界面渲染章节输入框）与
+    /// <see cref="SaveEditorQuestion"/>（校验改名的章节 id 是不是这道题自己的章）
+    /// 必须走同一份判定，否则「界面能显示、后端拒绝」或反过来「后端放行越权改别人的章」。
+    /// </summary>
+    private List<(int Id, string Name, string Code, int Grade, int QuestionCount)> ChapterPathRows(int courseId, int chapterId)
+    {
+        if (courseId <= 0 || chapterId <= 0) return new List<(int Id, string Name, string Code, int Grade, int QuestionCount)>();
         var chapters = Query(@"
             select ch.ichapterid, ch.cchaptername, ch.cchaptercode, ch.igrade, ch.itype,
                    (select count(*) from coursesubject s where s.ichapterid=ch.ichapterid and coalesce(s.bstopflag,0)=0) as subject_count
@@ -3612,24 +3762,20 @@ sealed class QuestionBank
             order by ch.itype, ch.cchaptercode",
             new Dictionary<string, object?> { ["@courseId"] = courseId });
         var target = chapters.FirstOrDefault(row => ToInt(row["ichapterid"]) == chapterId);
-        if (target is null) return new List<object>();
+        if (target is null) return new List<(int Id, string Name, string Code, int Grade, int QuestionCount)>();
         var code = ToStr(target["cchaptercode"]);
         var type = ToInt(target["itype"]);
         return chapters
             .Where(row => ToInt(row["itype"]) == type && code.StartsWith(ToStr(row["cchaptercode"]), StringComparison.OrdinalIgnoreCase))
             .OrderBy(row => ToInt(row["igrade"]))
             .ThenBy(row => ToStr(row["cchaptercode"]).Length)
-            .Select(row => new
-            {
-                id = ToInt(row["ichapterid"]),
-                name = ToStr(row["cchaptername"]),
-                code = ToStr(row["cchaptercode"]),
-                grade = ToInt(row["igrade"]),
-                questionCount = ToInt(row["subject_count"])
-            })
-            .Cast<object>()
+            .Select(row => (ToInt(row["ichapterid"]), ToStr(row["cchaptername"]), ToStr(row["cchaptercode"]), ToInt(row["igrade"]), ToInt(row["subject_count"])))
             .ToList();
     }
+
+    /// <summary>这道题所在章节路径上的章节 id 集合 —— 改章节名只允许动这些章。</summary>
+    private HashSet<int> ChapterPathIds(int courseId, int chapterId)
+        => ChapterPathRows(courseId, chapterId).Select(row => row.Id).ToHashSet();
 
     private string BackupQuestionBank(string reason)
     {
@@ -3764,22 +3910,59 @@ sealed class QuestionBank
         }
     }
 
+    /* 选项标签出现在「行首」的形式（老口径，不变）。 */
+    private static readonly Regex OptionLabelRegex = new(@"(?m)(?:^|\n)\s*([A-H])[\.\u3001\uff0e:：]\s*");
+
+    /* 行内标签：标签前必须是空白。分隔符后**不加**空白要求 ——
+       实测 1509100 的「132 D、66; 99」在 D 后面直接跟内容，加了 \s 就切不开，
+       而它的正确答案正是 D（选项里没有 D，学员无法作答）。 */
+    private static readonly Regex InlineOptionLabelRegex = new(@"\s([A-H])[\.\u3001\uff0e:：]\s*");
+
     private static List<object> ExtractOptions(string html, int answerCount)
     {
         var text = StripHtml(html).Replace("\r", "\n");
-        var regex = new Regex(@"(?m)(?:^|\n)\s*([A-H])[\.\u3001\uff0e:：]\s*");
-        var matches = regex.Matches(text);
-        var options = new List<object>();
+        var matches = OptionLabelRegex.Matches(text);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var parsed = new List<(string Label, string Text)>();
         for (var i = 0; i < matches.Count; i++)
         {
             var start = matches[i].Index + matches[i].Length;
             var end = i + 1 < matches.Count ? matches[i + 1].Index : text.Length;
-            var label = matches[i].Groups[1].Value;
-            var optionText = text.Substring(start, Math.Max(0, end - start)).Trim();
-            if (optionText.Length > 0) options.Add(new { label, text = optionText });
+            SplitOptionSegment(matches[i].Groups[1].Value, text.Substring(start, Math.Max(0, end - start)), parsed, seen);
         }
-        if (answerCount > 0 && options.Count > answerCount && answerCount <= 8) options = options.Take(answerCount).ToList();
-        return options;
+        if (answerCount > 0 && parsed.Count > answerCount && answerCount <= 8) parsed = parsed.Take(answerCount).ToList();
+        return parsed.Select(item => (object)new { label = item.Label, text = item.Text }).ToList();
+    }
+
+    /// <summary>
+    /// 把「行首标签 + 整行正文」再按**行内标签**切开：同一行写了两个选项时，后一个会被
+    /// 前一个吞进正文（实测 1509065 的 A 里混进「11. 34 B.」、1509100 的正确答案 D
+    /// 根本不在选项里、1509104 只剩 1 个选项 → 学员无法作答）。
+    /// 只在该标签**还没出现过**时切，避免把正文里引用的标签当成分隔点。
+    /// </summary>
+    private static void SplitOptionSegment(string label, string body, List<(string Label, string Text)> parsed, HashSet<string> seen)
+    {
+        var pendingLabel = label;
+        var rest = body;
+        while (true)
+        {
+            var cut = FindInlineOptionLabel(rest, seen);
+            var head = (cut is null ? rest : rest[..cut.Index]).Trim();
+            if (head.Length > 0) parsed.Add((pendingLabel, head));
+            seen.Add(pendingLabel);
+            if (cut is null) return;
+            pendingLabel = cut.Groups[1].Value;
+            rest = rest[(cut.Index + cut.Length)..];
+        }
+    }
+
+    private static Match? FindInlineOptionLabel(string body, HashSet<string> seen)
+    {
+        for (var match = InlineOptionLabelRegex.Match(body); match.Success; match = match.NextMatch())
+        {
+            if (!seen.Contains(match.Groups[1].Value)) return match;
+        }
+        return null;
     }
 
     private static string RemoveOptions(string html)

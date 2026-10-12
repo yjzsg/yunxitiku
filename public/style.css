@@ -571,6 +571,31 @@ body.is-admin .admin-only {
   background: var(--success-50);
 }
 
+/* 只读横幅（#20）：服务端读用户数据失败时**常驻**在顶栏下方。
+   它是 .app-shell（flex 列）的直接子项，.workspace 是 flex:1，会被自然挤小；
+   所以不需要改任何既有布局。整条文案不可点、不给关闭按钮 ——
+   这不是「提示一下就好」的状态：只要还在只读态，任何操作都不会被保存。 */
+.read-only-banner {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--danger-200);
+  background: var(--danger-50);
+  color: var(--danger-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.read-only-banner strong {
+  font-weight: 700;
+}
+
+.read-only-banner span {
+  opacity: 0.85;
+}
+
 .account-box {
   margin-left: auto;
   display: flex;
@@ -10618,6 +10643,14 @@ body.answer-card-collapsed .answer-card-collapse-btn::before {
   background: var(--ink-l5);
   border-color: var(--ink-l5);
   color: var(--ink-l0);
+}
+
+/* 只读横幅在墨水屏下走「实心最强」那一档（和 error 同口径）：
+   浅灰底在 1bit 屏上等于没有边界，这条信息必须一眼看到。 */
+[data-theme="ink"] .read-only-banner {
+  background: var(--ink-l0);
+  border-bottom: 2px solid var(--ink-l5);
+  color: var(--ink-l5);
 }
 
 /* ── 题库对比 chip：新增实心 / 删除虚线 ── */

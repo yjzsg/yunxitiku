@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261012-b5a1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261012-b6a2"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -117,6 +117,16 @@
         </div>
       </div>
     </header>
+
+    <!-- 只读横幅（#20）：服务端读用户数据失败时显示。
+         这时页面里的 state.storage 是**空基线**，不是「这个账号没有数据」——
+         任何一次回写都会把用户真实进度整包覆盖，所以此时一律不保存。
+         常驻而不是 toast：只读态可能持续很久，几秒就消失的提示等于没提示。
+         语言用 role="alert"：读屏要能听到。 -->
+    <div id="readOnlyBanner" class="read-only-banner hidden" role="alert">
+      <strong>数据读取失败，本次改动不会保存，请刷新重试</strong>
+      <span>服务端没有读到你的学习数据，为避免覆盖真实进度，本页已自动进入只读模式。刷新（F5）可重试。</span>
+    </div>
 
     <!-- 手机端底部悬浮标签栏（只在 ≤760px 显示；桌面端仍是顶栏导航）。
          按钮沿用 .nav-item[data-mode]：点击切页、选中态（renderMode 切 .active）、
@@ -368,7 +378,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261012-b5a1"></script>
+  <script src="/app.js?v=20261012-b6a2"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     if ("serviceWorker" in navigator) {
