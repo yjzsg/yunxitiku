@@ -2515,6 +2515,120 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   white-space: nowrap;
 }
 
+/* 按钮文案两套（见 renderWeakChapterCard）：宽屏带题量「只练这一章 · N 题」，
+   窄屏换成短的「只练这一章」并把宽度还给章名。
+   ⚠️ 必须写在下面 760px 媒体查询**之前**：媒体查询里的 `.weak-action-short
+   { display: inline }` 与它同优先级，靠位置在后才能生效。写在后面的话
+   两条都会被这条压成 display:none，按钮只剩 22px 空壳（实测踩过）。 */
+.weak-chapter-row button .weak-action-short {
+  display: none;
+}
+
+/* ── 窄屏把这张卡压低到「每一行的按钮都在首屏内」（390×844，标签栏上沿 780）────
+   改前实测：整卡 468→827（高 358），第 3 行的按钮 bottom=810 被标签栏盖住，
+   必须滚动才点得到。目标 ≤310 高、每行按钮 bottom ≤ 780。
+   手段（只在 ≤760px 生效，**1440 桌面端一个像素都不动** —— 那边地方够）：
+     ① 行内布局改成「章名 / 正确率」左列叠放 + 按钮右列**同一行**；
+     ② 行间距 / 内边距 / 字号收紧，按钮保持 34px（触控目标不缩水）；
+     ③ 卡标题那段（标题 + headline + 说明）整体收小，headline 单行省略；
+     ④ 按钮文案去掉题量（「只练这一章 · N 题」→「只练这一章」，见 2600 附近），
+        把 ~66px 还给章名 —— 题量在同一行的 meta 里仍然写着。
+   ⚠️ 章名为什么要争这几十像素：题库里存在**省略后会撞车**的真章名
+     （「第二章 安装工程施工技术」/「第二章 安装工程计量」、
+      「第三章 安装工程计量」/「第三章 安装工程计价」）。章名列实测只有 152px
+     时它们会省略成同一串「第二章 安装工程…」，用户分不清。
+     加宽 + .weak-chapter-tail（括号尾部不参与省略）之后实测无撞车。 */
+@media screen and (max-width: 760px) {
+  .study-card:has(.weak-chapter-list) {
+    gap: 4px;
+    padding: 12px 12px 10px;
+  }
+
+  .study-card:has(.weak-chapter-list) > span {
+    font-size: 12px;
+  }
+
+  .study-card:has(.weak-chapter-list) > b {
+    font-size: 15px;
+    line-height: 1.2;
+    /* headline 就是第 1 行的章名，窄屏单行省略即可（同一屏下面还写着它） */
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .study-card:has(.weak-chapter-list) > small {
+    font-size: 11px;
+    line-height: 1.3;
+  }
+
+  .weak-chapter-list {
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  /* 一行 = 「章名 / 正确率」两行叠在左列 + 按钮在右列。
+     ⚠️ 为什么不是三列（章名 | meta | 按钮）：390 下 meta(「正确率 29% · 可练 1451 题」)
+     加按钮后只剩不到 8ch 给章名，会把章名挤成 1~2 个字（实测只剩「身」），
+     而三列里再给章名加下限，meta 就会被折断成「正确率 29% · / 练 1451」（实测很难看）。
+     叠放后章名拿整列宽，meta 也拿整列宽 —— 行高 = 章名行 + meta 行，按钮 34px 居中。 */
+  .weak-chapter-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 10px;
+  }
+
+  .weak-chapter-row .weak-chapter-name {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.2;
+    overflow: hidden;
+    white-space: nowrap;
+    /* 首部省略：保留「第X章 …」，区分位在最前面 */
+    text-overflow: ellipsis;
+  }
+
+  /* 尾部（括号里的卷别 / 地区 / 年份版本）不参与省略 —— 同前缀的两行靠它分开 */
+  .weak-chapter-row .weak-chapter-tail {
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .weak-chapter-row .weak-chapter-meta {
+    grid-column: 1;
+    grid-row: 2;
+    font-size: 11px;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+  }
+
+  .weak-chapter-row button {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    height: 34px;
+    min-height: 34px;
+    padding: 0 10px;
+    font-size: 11.5px;
+    align-self: center;
+  }
+
+  /* 窄屏按钮只留「只练这一章」：题量在同一行的 meta 里，不重复占宽（见文件顶注）。
+     选择器比基础规则更具体（多一层 button），所以不依赖先后顺序也能覆盖。 */
+  .weak-chapter-row button .weak-action-long {
+    display: none;
+  }
+
+  .weak-chapter-row button .weak-action-short {
+    display: inline;
+  }
+}
+
 .practice-quick-actions {
   display: flex;
   align-items: center;

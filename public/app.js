@@ -188,6 +188,15 @@ const SMART_QUOTA = { due: 12, repeated: 10, weak: 12 };
 const SPRINT_PRACTICE_SIZE = 100;
 const SPRINT_PRACTICE_FLOOR_NEW = 40;
 const SPRINT_QUOTA = { wrong: 25, weak: 35 };
+/* 「薄弱」判定共用的最小样本量。**只此一处**，两个判定方都必须引用它：
+     · getWeakChapterRows()：一行章至少要确认这么多道客观题才配上榜；
+     · chapterMastery()：确认数不足时直接判「薄弱」（样本不够 = 还看不出掌握）。
+   旧实现是 3 / 5 两个值，3 和 4 道确认的章会「上榜却又被别处判成薄弱」，同屏两套口径。
+   为什么是 5 不是 3：3 道全错即 0%，必然霸榜，且 3 样本的正确率置信区间宽到没有意义。
+   ⚠️ 它同时是 getWeakChapterRows() 的**上榜门槛**，所以提高会让「薄弱章」变少 ——
+   3 个生成器（今日强化段③ / 考前冲刺段② / 今日计划）拿的是它的 top-N，样本不足的章
+   不再参与，题池会略微缩小。这是「口径统一」的必然代价，**没有**给生成器另加过滤。 */
+const WEAK_MIN_VERIFIED = 5;
 /* 弱项类题的轮换冷却：N 天内出现过的降到候选队尾（不是硬排除，
    池子不够时仍然会被用上，不会出现「凑不满」）。 */
 const TRAINING_COOLDOWN_DAYS = 3;
@@ -6501,18 +6510,25 @@ function renderTraining() {
   const planOverview = hasReviewPlan
     ? buildReviewPlanOverview(stats, Object.keys(courseStore.wrong || {}).length, items)
     : { hasPlan: false, task: { ids: [], counts: {} }, days: 0, debt: 0, todayCompleted: false, todaySession: null };
+  /* 今日建议 / KPI 格里的章也要按门槛说话：只有真的达标（verified≥5 且 rate<60）
+     才叫「薄弱章节」；只是相对最弱就说「相对最弱章节」，别把 92% 的章也叫薄弱。 */
+  const weakTop = weak[0] || null;
+  const weakTopIsWeak = !!weakTop && isWeakRow(weakTop);
+  const weakTopLabel = weakTopIsWeak ? "薄弱章节" : "相对最弱章节";
   const mainAdvice = dueLeft
     ? `优先复习 ${dueLeft} 道到期错题`
-    : weak[0]
-      ? `优先强化 ${weak[0].name}`
+    : weakTop
+      ? `优先强化 ${weakTop.name}`
       : today.total
         ? "继续做一组今日强化"
         : "建议从今日强化开始";
   const adviceDetail = dueLeft
     ? "这些题已经到复习周期，先处理能减少反复遗忘。"
-    : weak[0]
-      ? `当前薄弱章节正确率 ${weak[0].rate}%，系统会优先混入相关错题和未做题。`
-      : "系统会按错题、薄弱章节和未做题自动生成练习。";
+    : weakTop
+      ? (weakTopIsWeak
+        ? `当前薄弱章节正确率 ${weakTop.rate}%，系统会优先混入相关错题和未做题。`
+        : `暂无低于 60% 的章节，相对最弱的是它（${weakTop.rate}%），系统会优先混入相关错题和未做题。`)
+      : "系统会按错题、相对最弱的章节和未做题自动生成练习。";
   $("questionBody").classList.add("hidden");
   $("emptyState").classList.remove("hidden");
   $("emptyState").innerHTML = `
@@ -6542,7 +6558,7 @@ function renderTraining() {
       <div class="training-summary-grid">
         <div><b>${dueTotal}</b><span>到期错题</span></div>
         <div><b>${today.total}</b><span>今日已练</span></div>
-        <div><b>${weak[0] ? weak[0].rate : 0}%</b><span>${weak[0] ? escapeHtml(weak[0].name) : "暂无薄弱章节"}</span></div>
+        <div><b>${weakTop ? weakTop.rate : 0}%</b><span>${weakTop ? `${escapeHtml(weakTop.name)}（${weakTopLabel}）` : "暂无薄弱章节"}</span></div>
         <div><b>${Math.max(0, items.length - stats.done)}</b><span>未做题</span></div>
       </div>
       <div class="training-card-grid">
@@ -6665,11 +6681,26 @@ function bindTrainingActions() {
   });
 }
 
+/* 从课本章名里拆出「可区分的尾部」，给窄屏用（见 renderWeakChapterCard）。
+   题库里前缀相同、只差尾部的章名真实存在（「…真题精选 (浙江)」/「(陕西)」、
+   「…《建设工程计价》真题」/「…《造价管理》真题」），单靠首部省略分不清。
+   规则：取**最后一个**中/全角括号段（含括号本身）作为尾部；没有括号就返回空串
+   （这类章名的区分位在前部，例如「第四章 建设工程发承包阶段…」）。
+   只做展示，不改 row.key（取题仍用完整章名）。 */
+function weakChapterNameTail(name) {
+  const text = String(name || "");
+  const m = text.match(/[（(][^（()）]*[)）]\s*$/);
+  if (!m) return "";
+  /* 尾部独占整个名字（章名本身就是括号内容）时不必拆，拆了反而主体为空。 */
+  if (m[0].trim() === text.trim()) return "";
+  return m[0];
+}
+
 /* 学习看板「薄弱章节」卡。三件必须在卡上说清的事：
-     ① **能不能叫「薄弱」**：getWeakChapterRows() 只有相对排序（没有绝对门槛），
-        实测 92% 的章也会被列在「薄弱章节」标题下 —— 卡上只有真的低于门槛的章
-        才配这两个字。门槛直接调 chapterMastery()（verified<5 或 rate<60），
-        与深分析树的 badge 同一个函数、同一个值，不另写一份判据。
+     ① **能不能叫「薄弱」**：只有真的达标（verified≥WEAK_MIN_VERIFIED 且 rate<60）
+        才配这两个字，门槛调 isWeakRow()（与深分析树徽章同一个函数、同一个值）。
+        这一批还统一了样本量：以前 getWeakChapterRows() 用 3、chapterMastery() 用 5，
+        3~4 道确认的章会「上榜却被别处判成薄弱」—— 现在两处都是 WEAK_MIN_VERIFIED。
      ② **会出多少题**：每行按钮上写题量（点之前看得见，别让用户点进去才知道）。
         取题走 weakChapterPracticeIds —— 与「今日强化」段③同一条件，写几道就发几道。
      ③ **不能练的时候**：按钮 disabled + 原因写在卡上（title + 行内文案），
@@ -6681,17 +6712,17 @@ function renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount
   const courseId = Number(state.currentCourse?.id || 0);
   const analysisLoaded = state.analysisCourseId === courseId;
   const loading = !items.length && !analysisLoaded;
-  /* 没有数据（加载中 / 还没有章达到 3 道已确认）时说「相对最弱」和说「薄弱」一样是没有
+  /* 没有数据（加载中 / 还没有章达到 5 道已确认）时说「相对最弱」和说「薄弱」一样是没有
      依据的结论，所以这两种情况下都不贴章节标签，只写「章节掌握」。 */
   const title = loading || !weak.length ? "章节掌握" : weakBelowCount ? "薄弱章节" : "相对最弱的几章";
   const headline = loading ? "正在计算…" : weak[0] ? escapeHtml(weak[0].name) : "暂无明显短板";
   const note = loading
     ? "题库分析数据还在加载，稍后自动刷新"
     : weakBelowCount
-      ? `共 ${weakBelowCount} 章判定为薄弱（正确率 < 60% 或已确认不足 5 题）`
+      ? `共 ${weakBelowCount} 章判定为薄弱（正确率 < 60%）`
       : weak.length
-        ? "暂无低于 60% 的章节，以下只是相对最弱"
-        : "继续积累做题数据后会更准";
+        ? `暂无低于 60% 的章节，以下只是相对最弱（上榜需已确认 ≥ ${WEAK_MIN_VERIFIED} 题）`
+        : `继续积累做题数据后会更准（每个章已确认 ≥ ${WEAK_MIN_VERIFIED} 题才会统计）`;
   const rows = weak.map((row) => {
     const ids = weakChapterPracticeIds(row.key, courseStore, items);
     const disabled = !ids.length;
@@ -6700,13 +6731,34 @@ function renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount
     const reason = disabled
       ? `这一章 ${row.done} 道题都已答对，没有「没做对过」的题了`
       : `只练「${row.name}」：${ids.length} 题（已排除你答对过的题）`;
+    /* 窄屏会把章名挤成一行（见 .weak-chapter-row 的 760px 规则）。题目库里的章名很长
+       （实测 291 个 grade=1 章名里 258 个超过 14 字），而且**有前缀相同的**：
+       「2019年二级造价安装真题精选 (浙江)」/「(陕西)」只差**尾部括号**——
+       只做首部省略的话这两行会长得一模一样，用户分不清。
+       所以除了首部（保留「第X章」这种区分位），再单独渲染一段「尾部」：
+       把中文/全角括号里的内容（卷别、地区、年份版本）拆出来贴在章名后面，
+       窄屏下它不参与省略 —— 同前缀的两行靠尾部一眼分开。
+       全名同时写进 title（鼠标用户可读），但**不依赖** title（手机没有 hover）。 */
+    const tail = weakChapterNameTail(row.name);
+    const head = tail ? row.name.slice(0, row.name.length - tail.length).trim() : row.name;
+    /* 按钮文案两套：宽屏带题量（「只练这一章 · N 题」，点之前看得见），
+       窄屏只留「只练这一章」—— 题量那 60 多像素要还给章名（详见 style.css 的
+       760px 规则：390 下章名不够宽就会出现「第二章 安装工程施工技术」与
+       「第二章 安装工程计量」省略后**撞成同一串**的问题）。
+       题量不会丢：同一行的 meta 里就写着「可练 N 题」，窄屏两处不重复。 */
+    const actionLong = `只练这一章 · ${ids.length} 题`;
+    const actionShort = "只练这一章";
     return `
-      <div class="weak-chapter-row">
-        <span class="weak-chapter-name">${escapeHtml(row.name)}</span>
+      <div class="weak-chapter-row" data-chapter-name="${escapeHtml(row.name)}">
+        <span class="weak-chapter-name" title="${escapeHtml(row.name)}">${escapeHtml(head)}${tail
+          ? `<span class="weak-chapter-tail">${escapeHtml(tail)}</span>`
+          : ""}</span>
         <em class="weak-chapter-meta">正确率 ${row.rate}% · ${disabled ? "已无可练题" : `可练 ${ids.length} 题`}</em>
         <button type="button" data-weak-chapter="${escapeHtml(row.key)}"${disabled
           ? ` disabled aria-disabled="true" title="${escapeHtml(reason)}"`
-          : ` title="${escapeHtml(reason)}"`}>${disabled ? "只练这一章" : `只练这一章 · ${ids.length} 题`}</button>
+          : ` title="${escapeHtml(reason)}"`}>${disabled
+            ? `<span class="weak-action-long">${actionShort}</span><span class="weak-action-short">${actionShort}</span>`
+            : `<span class="weak-action-long">${actionLong}</span><span class="weak-action-short">${actionShort}</span>`}</button>
       </div>
     `;
   }).join("");
@@ -6723,14 +6775,11 @@ function renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount
 function renderStudyDashboard(courseStore, stats, items) {
   const records = getWrongRecordsForCurrentCourse(courseStore);
   const due = records.filter(([, item]) => isReviewDue(item)).length;
-  /* 取全量再切 3 行：判断「有没有真的低于门槛的章」必须看全量。
-     排序是正确率升序，但 chapterMastery 还有 verified<5 这一条 ——
-     一个 75% 但只有 3 道确认题的章可能排在第 4 行之外，只看前 3 行会漏判。
-     ⚠️ 门槛只加在**这张卡的展示判断**上：getWeakChapterRows() 的返回被 8 处调用
-     （训练页段③、考前冲刺段②、今日计划、日报文案…），改它会连带动取题。 */
+  /* 取全量再切 3 行：判断「有没有真的低于门槛的章」必须看全量（一个 75% 的章
+     可能排在第 4 行之外，只看前 3 行会漏判）。门槛统一走 isWeakRow()。 */
   const allWeak = getWeakChapterRows(courseStore, items);
   const weak = allWeak.slice(0, 3);
-  const weakBelowCount = allWeak.filter((row) => chapterMastery(row).level === "weak").length;
+  const weakBelowCount = allWeak.filter((row) => isWeakRow(row)).length;
   const report = getTodayReport() || buildDailyReport(courseStore, stats, items);
   const today = getTodayActivity();
   const reportText = report
@@ -6933,7 +6982,12 @@ function buildStudyReportSummary(courseStore, stats, items) {
   const rate = confirmedRate(stats.correct, stats.verified);
   const weak = getWeakChapterRows(courseStore, items)[0];
   const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
-  const focus = weak ? `优先练 ${weak.name}` : due ? "优先复习到期错题" : "保持当前节奏";
+  /* 措辞跟门槛走（同训练页/看板）：真的达标才叫「薄弱」，
+     只是相对最弱就写「相对最弱章节」—— 别把 92% 的章也叫薄弱。 */
+  const weakIsWeak = !!weak && isWeakRow(weak);
+  const focus = weak
+    ? `${weakIsWeak ? "优先练薄弱章" : "优先练相对最弱章节"} ${weak.name}`
+    : due ? "优先复习到期错题" : "保持当前节奏";
   return {
     done: stats.done,
     correct: stats.correct,
@@ -6954,8 +7008,9 @@ function buildDailyReport(courseStore, stats, items) {
   const today = getTodayActivity();
   const weak = getWeakChapterRows(courseStore, items)[0];
   const due = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => isReviewDue(item)).length;
+  /* 同上：只有真达标才说「薄弱章」，否则照实说「相对最弱章节」。 */
   const tomorrow = weak
-    ? `明天优先练「${weak.name}」+ 到期错题 ${due} 道`
+    ? `明天优先练${isWeakRow(weak) ? "薄弱章" : "相对最弱章节"}「${weak.name}」+ 到期错题 ${due} 道`
     : due
       ? `明天优先复习到期错题 ${due} 道`
       : "明天可继续智能训练";
@@ -7006,9 +7061,19 @@ function getWeakChapterRows(courseStore, items) {
     });
   });
   return [...byChapter.values()]
-    .filter((row) => row.verified >= 3)
+    .filter((row) => row.verified >= WEAK_MIN_VERIFIED)
     .map((row) => ({ ...row, rate: confirmedRate(row.correct, row.verified) }))
     .sort((a, b) => a.rate - b.rate || b.verified - a.verified);
+}
+
+/* 一行章是否「够格被叫薄弱」——**全站唯一的判定入口**。
+   深分析树的徽章、看板薄弱卡的门槛、生成会话的标题前缀都走这里，
+   阈值与最小样本量统一取上面的常量（旧实现是 3 / 5 两个值）。
+   传入的 row 至少要带 { verified, correct, done }（rate 会被重算）。 */
+function isWeakRow(row) {
+  const verified = Number(row.verified || 0);
+  if (verified < WEAK_MIN_VERIFIED) return true;
+  return confirmedRate(row.correct, verified) < 60;
 }
 
 /* 「只练这一章」的取题条件 —— 与「今日强化」段③（buildSmartPracticePlan 里那段）
@@ -7705,6 +7770,14 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
   const verifiedIds = new Set(Array.from(confirmedSets(courseStore).objective).map(Number));
   const byChapter = new Map();
   const byType = new Map();
+  /* 「薄弱」判定必须按**课本章名**聚合，不能按 chapterId 逐行判。
+     同一个课本章在题库里被拆成多份 chapter 记录（卷册各一份，实测 5 份），
+     每份的样本量不同 —— 按 id 逐行判的话，同一个课本章会出现「一行薄弱、
+     旁边同名一行稳定」这种自相矛盾的画面（用户没法互相对照）。
+     所以这里额外按章名攒一份聚合统计，渲染时**每一行都取同名的聚合判定**。
+     ⚠️ 只换判定依据，章节树的层级/展开折叠/点行跳章一律不动。 */
+  const byTextbook = new Map();
+  const textbookKeyOfChapterId = new Map();
   const ensureChapterRow = (node, depth) => {
     const id = Number(node?.id || 0);
     if (!id) return null;
@@ -7735,6 +7808,23 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
       if (isVerified) chapter.verified++;
       if (isVerified && isCorrect) chapter.correct++;
     });
+    /* 按课本章名聚合一份：同一个课本章的多个 chapterId 行共用这一份样本，
+       判定（薄弱/稳定…）就从它算 —— 与「看板薄弱卡」「生成的题单」同一维度。
+       一题多章时每个所属章各记一次（同 getWeakChapterRows 的约定）。 */
+    textbookChapterKeys(item, items).forEach((key) => {
+      const agg = byTextbook.get(key) || { key, name: key, done: 0, verified: 0, correct: 0 };
+      agg.done++;
+      if (isVerified) agg.verified++;
+      if (isVerified && isCorrect) agg.correct++;
+      byTextbook.set(key, agg);
+      /* 记录「这个 chapterId 属于哪个课本章名」，好让树里每一行认领聚合判定。
+         同一个 id 只认第一个章名即可（外挂映射下可能多个，取稳定排序的第一个）。 */
+      targets.forEach((node) => {
+        const cid = Number(node?.id || 0);
+        if (!cid) return;
+        if (!textbookKeyOfChapterId.has(cid)) textbookKeyOfChapterId.set(cid, key);
+      });
+    });
 
     const typeKey = item.subjectType ?? item.type ?? "题目";
     const type = byType.get(typeKey) || { id: typeKey, name: item.type || "题目", total: 0, done: 0, verified: 0, correct: 0 };
@@ -7751,6 +7841,15 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
       const aCode = aPath.map((node) => String(node.code || "").padEnd(8, "0")).join(".");
       const bCode = bPath.map((node) => String(node.code || "").padEnd(8, "0")).join(".");
       return aCode.localeCompare(bCode, "zh-CN") || (a.depth || 9) - (b.depth || 9);
+    })
+    /* 认领同课本章名的聚合统计：**只对 depth=2（课本章那一层）**生效 ——
+       depth=1 是卷册行（名字是「章节练习」这种卷册名），既不是课本章，
+       也不该跟着某一章被判「薄弱」。认领不到就沿用本行样本。 */
+    .map((row) => {
+      if (Number(row.depth) !== 2) return { ...row, textbookKey: null, weakStats: row };
+      const key = textbookKeyOfChapterId.get(Number(row.id));
+      const agg = key ? byTextbook.get(key) : null;
+      return agg ? { ...row, textbookKey: key, weakStats: agg } : { ...row, textbookKey: null, weakStats: row };
     });
   const typeRows = [...byType.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), "zh-Hans-CN"));
   return `
@@ -7787,12 +7886,14 @@ function renderAnalysisRows(rows, clickable) {
 }
 
 /* 掌握度分级。判据与 confirmedRate 同口径（答对 ÷ 已确认）——
-   旧实现用「已做」当分母，同一行里的 <b>rate%</b> 与 KPI 的正确率算法不同。 */
+   旧实现用「已做」当分母，同一行里的 <b>rate%</b> 与 KPI 的正确率算法不同。
+   「薄弱」这一档直接调 isWeakRow()：门槛（含最小样本量 WEAK_MIN_VERIFIED）
+   全站只有那一处定义，这里不再自己写一份。 */
 function chapterMastery(row) {
   const verified = Number(row.verified || 0);
   const rate = confirmedRate(row.correct, verified);
   if (!verified) return { label: Number(row.done || 0) ? "待确认" : "未开始", level: "none" };
-  if (verified < 5 || rate < 60) return { label: "薄弱", level: "weak" };
+  if (isWeakRow(row)) return { label: "薄弱", level: "weak" };
   if (rate < 80) return { label: "一般", level: "normal" };
   return { label: "稳定", level: "stable" };
 }
@@ -7809,15 +7910,26 @@ function renderAnalysisChapterTree(rows) {
     const expanded = state.analysisExpandedChapters.has(Number(node.id));
     const rate = confirmedRate(row.correct, row.verified);
     const level = rate >= 80 ? "good" : rate >= 60 ? "warn" : "bad";
-    const mastery = chapterMastery(row);
+    /* 徽章按**课本章名**判，不按本行 chapterId —— 否则同一个课本章被拆成的
+       几行会一行「薄弱」一行「稳定」（各行样本量不同）。depth=2 的行都带
+       weakStats（同名聚合），depth=1 是卷册行、没有课本章名，沿用本行样本。
+       数字（em / rate%）仍是本行的，只有「薄弱」这个标签是整章的 —— 两处不再打架。 */
+    const mastery = chapterMastery(row.weakStats || row);
+    /* 整章聚合同一判定：给同名行挂 data-mastery-key，方便用户/探针核对「同名同判」。
+       本行样本与整章不一致时补一句 title，说清这个标签是整章口径。 */
+    const aggregateMismatch = row.weakStats && row.weakStats !== row
+      && (Number(row.weakStats.verified || 0) !== Number(row.verified || 0));
+    const badgeTitle = aggregateMismatch
+      ? `按课本章名「${row.weakStats.name}」整体判定：${row.weakStats.correct}/${row.weakStats.verified} 确认`
+      : "";
     return `
       <div class="analysis-tree-node level-${depth}">
         <div class="analysis-tree-row">
           <button type="button" class="analysis-toggle ${expanded ? "expanded" : "collapsed"}" data-analysis-toggle="${node.id}" ${children.length ? "" : "disabled"}>${children.length ? (expanded ? "−" : "+") : ""}</button>
-          <button type="button" class="analysis-row ${level} ${depth === 1 ? "heading" : ""}" ${depth === 1 ? "disabled" : `data-analysis-chapter="${row.id}"`}>
+          <button type="button" class="analysis-row ${level} ${depth === 1 ? "heading" : ""}" ${depth === 1 ? "disabled" : `data-analysis-chapter="${row.id}"`}${row.textbookKey ? ` data-mastery-key="${escapeHtml(row.textbookKey)}"` : ""}>
             <span>${escapeHtml(row.name)}</span>
             <em>${row.total}题 · 已做${row.done} · 对${row.correct}/${row.verified}确认</em>
-            <i class="mastery-badge ${mastery.level}">${mastery.label}</i>
+            <i class="mastery-badge ${mastery.level}"${badgeTitle ? ` title="${escapeHtml(badgeTitle)}"` : ""}>${mastery.label}</i>
             <b>${rate}%</b>
           </button>
         </div>
