@@ -6665,10 +6665,72 @@ function bindTrainingActions() {
   });
 }
 
+/* 学习看板「薄弱章节」卡。三件必须在卡上说清的事：
+     ① **能不能叫「薄弱」**：getWeakChapterRows() 只有相对排序（没有绝对门槛），
+        实测 92% 的章也会被列在「薄弱章节」标题下 —— 卡上只有真的低于门槛的章
+        才配这两个字。门槛直接调 chapterMastery()（verified<5 或 rate<60），
+        与深分析树的 badge 同一个函数、同一个值，不另写一份判据。
+     ② **会出多少题**：每行按钮上写题量（点之前看得见，别让用户点进去才知道）。
+        取题走 weakChapterPracticeIds —— 与「今日强化」段③同一条件，写几道就发几道。
+     ③ **不能练的时候**：按钮 disabled + 原因写在卡上（title + 行内文案），
+        不留一个点了才弹 toast 的假按钮（同 renderTrainingCard 的 disabled 风格）。 */
+function renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount) {
+  /* 分析数据还没到（看板会先于 /api/questions 渲染一轮）：既不说「暂无明显短板」
+     也不说 0 题 —— 那两句都是结论，此时还没资格下（同 renderTrainingCard 的
+     「正在计算」处理）。analysisCourseId 才是「这个科目已经算出来过」的凭据。 */
+  const courseId = Number(state.currentCourse?.id || 0);
+  const analysisLoaded = state.analysisCourseId === courseId;
+  const loading = !items.length && !analysisLoaded;
+  /* 没有数据（加载中 / 还没有章达到 3 道已确认）时说「相对最弱」和说「薄弱」一样是没有
+     依据的结论，所以这两种情况下都不贴章节标签，只写「章节掌握」。 */
+  const title = loading || !weak.length ? "章节掌握" : weakBelowCount ? "薄弱章节" : "相对最弱的几章";
+  const headline = loading ? "正在计算…" : weak[0] ? escapeHtml(weak[0].name) : "暂无明显短板";
+  const note = loading
+    ? "题库分析数据还在加载，稍后自动刷新"
+    : weakBelowCount
+      ? `共 ${weakBelowCount} 章判定为薄弱（正确率 < 60% 或已确认不足 5 题）`
+      : weak.length
+        ? "暂无低于 60% 的章节，以下只是相对最弱"
+        : "继续积累做题数据后会更准";
+  const rows = weak.map((row) => {
+    const ids = weakChapterPracticeIds(row.key, courseStore, items);
+    const disabled = !ids.length;
+    /* 一道可练的都没有 = 这一章的题**全都答对了**（ids 只在「答对过」时被剔掉），
+       所以这里说的是事实，不是「0 题」这种没信息量的数字。 */
+    const reason = disabled
+      ? `这一章 ${row.done} 道题都已答对，没有「没做对过」的题了`
+      : `只练「${row.name}」：${ids.length} 题（已排除你答对过的题）`;
+    return `
+      <div class="weak-chapter-row">
+        <span class="weak-chapter-name">${escapeHtml(row.name)}</span>
+        <em class="weak-chapter-meta">正确率 ${row.rate}% · ${disabled ? "已无可练题" : `可练 ${ids.length} 题`}</em>
+        <button type="button" data-weak-chapter="${escapeHtml(row.key)}"${disabled
+          ? ` disabled aria-disabled="true" title="${escapeHtml(reason)}"`
+          : ` title="${escapeHtml(reason)}"`}>${disabled ? "只练这一章" : `只练这一章 · ${ids.length} 题`}</button>
+      </div>
+    `;
+  }).join("");
+  return `
+    <div class="study-card">
+      <span>${title}</span>
+      <b>${headline}</b>
+      <small>${escapeHtml(note)}</small>
+      ${rows ? `<div class="weak-chapter-list">${rows}</div>` : ""}
+    </div>
+  `;
+}
+
 function renderStudyDashboard(courseStore, stats, items) {
   const records = getWrongRecordsForCurrentCourse(courseStore);
   const due = records.filter(([, item]) => isReviewDue(item)).length;
-  const weak = getWeakChapterRows(courseStore, items).slice(0, 3);
+  /* 取全量再切 3 行：判断「有没有真的低于门槛的章」必须看全量。
+     排序是正确率升序，但 chapterMastery 还有 verified<5 这一条 ——
+     一个 75% 但只有 3 道确认题的章可能排在第 4 行之外，只看前 3 行会漏判。
+     ⚠️ 门槛只加在**这张卡的展示判断**上：getWeakChapterRows() 的返回被 8 处调用
+     （训练页段③、考前冲刺段②、今日计划、日报文案…），改它会连带动取题。 */
+  const allWeak = getWeakChapterRows(courseStore, items);
+  const weak = allWeak.slice(0, 3);
+  const weakBelowCount = allWeak.filter((row) => chapterMastery(row).level === "weak").length;
   const report = getTodayReport() || buildDailyReport(courseStore, stats, items);
   const today = getTodayActivity();
   const reportText = report
@@ -6693,11 +6755,7 @@ function renderStudyDashboard(courseStore, stats, items) {
         <b>${today.total} 题</b>
         <small>已确认 ${today.verified} 题 · 答对 ${today.correct} 题 · ${today.rate}%${today.durationMs ? ` · 用时 ${formatDuration(today.durationMs)}` : ""}</small>
       </div>
-      <div class="study-card">
-        <span>薄弱章节</span>
-        <b>${weak[0] ? escapeHtml(weak[0].name) : "暂无明显短板"}</b>
-        <small>${weak.map((item) => `${item.name} ${item.rate}%`).join(" · ") || "继续积累做题数据后会更准"}</small>
-      </div>
+      ${renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount)}
       <div class="study-card">
         <span>学习日报</span>
         <b>${report.todayTotal || today.total} 题</b>
@@ -6730,6 +6788,12 @@ function bindStudyDashboardActions(courseStore) {
   };
   const smartBtn = $("continueSmartBtn");
   if (smartBtn) smartBtn.onclick = () => continueSmartPractice().catch((err) => toast(err.message));
+  /* 「薄弱章节」卡每行的「只练这一章」（见 renderWeakChapterCard）。
+     disabled 的按钮不会派发 click，所以这里不必过滤 ——
+     不能练的原因已经写在卡上（title + 行内文案），点不到也不会静默。 */
+  document.querySelectorAll("[data-weak-chapter]").forEach((row) => {
+    row.onclick = () => startWeakChapterPractice(row.dataset.weakChapter).catch((err) => toast(err.message));
+  });
 }
 
 function renderTrainingHistoryPanel(courseStore) {
@@ -6947,6 +7011,21 @@ function getWeakChapterRows(courseStore, items) {
     .sort((a, b) => a.rate - b.rate || b.verified - a.verified);
 }
 
+/* 「只练这一章」的取题条件 —— 与「今日强化」段③（buildSmartPracticePlan 里那段）
+   **逐字相同**，一个字都没加：按课本章名判章（textbookChapterKeys，跨卷册、
+   一题多章）+ 排除已答对（!courseStore.correct?.[id]）。
+   不新写算法：两处必须永远一致，所以只把它抽成一个函数给看板按钮复用。
+
+   ⚠️ 这里是「课本章名」维度，不是 chapterId —— 同一个课本章在题库里被拆成
+   5 个 chapterId（见上面 getWeakChapterRows 的注释），按 id 取会漏掉大部分题。 */
+function weakChapterPracticeIds(chapterKey, courseStore = userCourseStore(), items = null) {
+  const pool = items || (state.analysisQuestions.length ? state.analysisQuestions : state.questions);
+  return pool
+    .filter((item) => textbookChapterKeys(item).includes(chapterKey))
+    .filter((item) => !courseStore.correct?.[item.id])
+    .map((item) => item.id);
+}
+
 function renderLearningSignalPanel(courseStore) {
   const wrongReasonRows = buildSignalRows(state.storage.wrongReasons || {}, courseStore, "reason");
   const confidenceRows = buildSignalRows(state.storage.confidence || {}, courseStore, "confidence");
@@ -7111,6 +7190,41 @@ async function startSmartPractice(options = {}) {
   setCoursePicker(false);
   await loadQuestions();
   toast(`已生成今日强化（${state.questions.length || ids.length} 题）`);
+}
+
+/* 学习看板「薄弱章节」卡 →「只练这一章」。
+   **不新写取题算法**：走 weakChapterPracticeIds，即「今日强化」段③那一句
+   （textbookChapterKeys 判课本章 + 排除 courseStore.correct），一题不多、一题不少。
+
+   ⚠️ 会话 type 用 "weak"，**不复用 "smart"**：两条必须是不同的会话，
+   否则点一次「只练这一章」就把今日强化的题单顶掉了，
+   「继续上次」也分不清自己续的是哪一条（session id 不同 → 互不覆盖）。 */
+async function startWeakChapterPractice(chapterKey) {
+  if (!state.currentCourse || !chapterKey) return;
+  if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  const courseStore = userCourseStore();
+  const ids = weakChapterPracticeIds(chapterKey, courseStore);
+  if (!ids.length) {
+    /* 正常走不到：该章没有可练的题时按钮已经是 disabled（见 renderWeakChapterCard）。
+       只有「渲染之后数据又变了」才会命中 —— 照实说，不静默，也不生成空题单。 */
+    toast("这一章已经没有「没做对过」的题了");
+    renderProgress();
+    return;
+  }
+  const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const row = getWeakChapterRows(courseStore, items).find((item) => item.key === chapterKey);
+  const name = row?.name || chapterKey;
+  /* sourceTitle 要能认出是哪一章（「继续上次」/智能练习卡直接显示它）。
+     前缀跟着卡上的展示判断走：真低于门槛才写「薄弱章节」，只是相对最弱就照实说。 */
+  const prefix = row && chapterMastery(row).level !== "weak" ? "相对最弱章节" : "薄弱章节";
+  resetGeneratedPracticeFilters();
+  saveSmartPracticeSession(ids, `${prefix}：${name}`, { type: "weak" });
+  state.mode = "smart";
+  state.smartLeftCourseName = "";
+  state.smartLeftCourseId = 0;
+  setCoursePicker(false);
+  await loadQuestions();
+  toast(`已生成「${name}」专项练习（${state.questions.length || ids.length} 题）`);
 }
 
 async function exitSmartPractice() {

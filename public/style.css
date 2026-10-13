@@ -2471,6 +2471,50 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   opacity: 1;
 }
 
+/* ── 「薄弱章节」卡的行 +「只练这一章」按钮（见 renderWeakChapterCard） ─────────
+   一行 = 章名 / 正确率 + 可练题量 / 按钮。题量写在按钮上：
+   按钮上写几道，这一轮就发几道（同错题本「开始训练」的规则）；
+   该章已经没有被排除掉的可练题时按钮 disabled，原因写在 title + 行内文案上。 */
+.weak-chapter-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 3px;
+}
+
+.weak-chapter-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.weak-chapter-row .weak-chapter-name {
+  grid-column: 1 / -1;
+  color: var(--primary-ink);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.weak-chapter-row .weak-chapter-meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.weak-chapter-row button {
+  justify-self: end;
+  min-width: 0;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .practice-quick-actions {
   display: flex;
   align-items: center;
