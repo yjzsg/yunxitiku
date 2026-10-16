@@ -14554,4 +14554,87 @@ textarea,
     grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   }
 }
+/* ── ⑰ 手机端科目/章节面板：吃满标签栏以上的高度（问题①） ─────────────────
+   改前实测（390×844、light、选科目态）：
+     .course-pane  62 ~ 409.5  h 347.5（.workspace 717 的一半）
+     #courseList   h 202.5（5 个科目里 3 个完整可见）
+     #chapterList  h 14      （20 个章节 0 个完整可见 —— 用户说的「不好选章节」）
+     面板底 409.5 到标签栏顶 780 之间白扔 370.5px。
+   两个原因叠在一起，缺一不可：
+     1) `.workspace` 在 ≤760px 没有 grid-template-rows（收起态靠 8511 那条
+        `minmax(0,1fr) !important` 撑着，**选科目态没有**）→ 两个子项各占一个
+        implicit auto 行，平分 717px；而 14406 又把 `.question-pane` 改回
+        `display:grid`，所以第二行照样占真实高度。
+     2) 面板自己的 max-height 被 14403 的 `min(58dvh, calc(100dvh - 122px))`
+        夹住（844 下 = 58dvh = 489.5px）—— 即使第一行给它 644px 也只画 489.5。
+   现在：选科目态把第二行钉成 56px 的「读题区把手」（点它照样收起面板，
+   app.js:13000 的捕获监听挂在 #questionView 上），第一行 1fr 把剩下的高度全给
+   面板；面板 max-height 抬到「标签栏以上」（不减任何魔法常数，纯公式）。
+   ⚠️ 面板内部那 5 行模板（4257：科目 `minmax(116px,24dvh)` = 202.5、
+   章节 `minmax(0,1fr)`）一个字没改 —— 多出来的高度按原设计全落到章节目录：
+   章节 14px → 296px（6 行完整可见），科目仍是 202.5px（3 行，5 个科目滚一次）。
+   两块都够用，没有把哪一块撑大。
+   ── 特异性/顺序论证（为什么这两条现在生效） ──────────────────────────────
+   · 要压的两条：8511 `body:not(.admin-view):not(.picker-open) .workspace{}`
+     —— 它带 `:not(.picker-open)`，选科目态**必然不匹配**，与它无关；
+     真正的对手是 4245 `@media (max-width:760px) .workspace`（(0,1,0)，没有
+     grid-template-rows）。本块 `body:not(.admin-view).picker-open .workspace`
+     = (0,3,0) > (0,1,0)，且写在文件最后 → 稳赢。
+   · max-height 的对手是 14403 `body:not(.admin-view).picker-open .course-pane`
+     = (0,3,1)。本块同特异性 (0,3,1) 且写在 14403 **之后** → 靠顺序赢；
+     4257 `.course-pane` (0,1,0) 与 6783 `.course-pane` (0,1,0) 更压不过。
+   · 没引入任何 `!important`。
+   ⚠️ 只在 ≤760px + 非管理视图 + 选科目态生效：≥761px、收起态一个字节都不碰。 */
+@media screen and (max-width: 760px) {
+  body:not(.admin-view).picker-open .workspace {
+    /* 第 2 行 56px = 读题区把手（面板底与标签栏顶之间由 .workspace 的 padding 让出） */
+    grid-template-rows: minmax(0, 1fr) 56px;
+  }
 
+  body:not(.admin-view).picker-open .course-pane {
+    /* 面板最大高度 = 标签栏以上的全部空间（.workspace 自己已经让出标签栏） */
+    max-height: calc(100dvh - var(--tabbar-h) - 1px);
+  }
+}
+
+/* ── ⑱ 展开答题卡：底排题号格被 `.question-pane` 的 overflow:hidden 裁掉（问题②） ──
+   改前实测（390×844、light、展开态）：
+     卡片盒子 525 ~ 835（h 310，`--answer-card-h` 也是 310）—— 布局上它本来就
+     占满到底部，可是：
+       · 13947 那条 `bottom: calc(8px - var(--tabbar-h) - 25px - …)` = -71px，
+         是给「`.question-pane` 当包含块」用的补偿（pane 底 764 + 71 = 835）；
+       · 而 `.question-pane` 自己 `overflow: hidden`（1140），于是这张 fixed 卡片
+         **被 pane 的下边界裁掉 71px**：canvas 上 764 以下露的是
+         `section.question-pane` / `main.workspace` / `#appShell` 的底色。
+     题号格行距 43px：第 3 行 739~775 被切一半，第 4 行 782~818 整行看不见，
+     `document.elementFromPoint(50, 800)` 返回 `div.appShell` —— 点不到。
+     这就是用户说的「最下面一排也显示不完全」。
+     （不是标签栏遮的：展开态 `.mobile-tabbar` 是 `display:none`（13214，设计如此），
+       实测 tabbar 高 0；真正的裁剪者是 pane 的 overflow。13219 的层级注释里
+       写的「卡片下半截被标签栏盖住」是展开态之前的旧结论。）
+   现在：展开态（且非选科目态）把 `.question-pane` 和 `main.workspace` 的
+   `overflow` 放成 visible —— 卡片位置、高度、`--answer-card-h` 预留量、
+   层级、翻页、app.js 全部不动，只把「画不出来」变成「画得出来」。
+   `.workspace` 也必须一起放：它是第二道裁剪者（底边 772 < 卡片底 835）。
+   `#appShell` 底边 844 > 835，不裁，不用动。
+   ── 特异性/顺序论证 ──────────────────────────────────────────────────────
+   · `.question-pane { overflow: hidden }` 是 1140 的 (0,1,0)；本块
+     `body:not(.admin-view):not(.picker-open):not(.answer-card-collapsed) .question-pane`
+     = (0,4,0) > (0,1,0) → 与顺序无关就赢。
+   · `.workspace` 的 `overflow: hidden` 来自 4245 的 `@media (max-width:760px)`
+     = (0,1,0)（且 `.workspace` 基础规则 830 根本没写 overflow）；本块 (0,3,0) 赢。
+   · 没有其它 `overflow: hidden !important` 落在 `.question-pane` / `.workspace` 上
+     （8403 那条 `overflow-x: hidden !important` 只给 html/body/.app-shell/.login-view）。
+   · 没引入任何 `!important`。
+   ⚠️ 为什么加 `:not(.picker-open)`：面板打开时 `.question-pane` 只剩 56px 高，
+      放开裁剪会让读题区内容糊到面板上。两个状态本来就互斥，不值得为它赌。
+   ⚠️ 收起态（`.answer-card-collapsed`）不进这条：那时卡片是 `position: relative`
+      的流内元素，本来就不被裁，改了反而可能露出 13960 那条修掉的 8px 位移。
+   ⚠️ 墨水屏主题（`backdrop-filter:none` → pane 不是包含块）走的是另一条分支：
+      卡片贴视口、本来就没被裁，这条只改 overflow，不动它的定位。 */
+@media screen and (max-width: 760px) {
+  body:not(.admin-view):not(.picker-open):not(.answer-card-collapsed) .workspace,
+  body:not(.admin-view):not(.picker-open):not(.answer-card-collapsed) .question-pane {
+    overflow: visible;
+  }
+} /* ── END ⑱ */
