@@ -14638,3 +14638,37 @@ textarea,
     overflow: visible;
   }
 } /* ── END ⑱ */
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑲ 跨分辨率操作性审查：标签面板高度 cap + 触屏标签按钮放大（2026-10-16）
+   ──────────────────────────────────────────────────────────────────────────
+   ① 标签面板整体 cap：320×568 实测面板高 339px、底边溢出视口 188px。
+      面板体有 max-height + overflow-y:auto（14205），但面板头 + margin 不受控，
+      整个面板盒子还是顶出视口。这里给整个面板一个上限。
+      数值推导：56dvh 在 568px 视口下 = 318px，刚好装下「toggle 30 + margin 8
+      + 面板体 min(46vh,330) 261」= 299px，余量 19px 给边框/padding。
+      特异性：`.question-tag-panel` = (0,1,0)，本块加 body 前缀 (0,1,1) 赢。 */
+@media screen and (max-width: 760px) {
+  body .question-tag-panel {
+    max-height: min(56dvh, calc(100dvh - 20px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* 面板在 DOM 流中位置过低（320×568 下 top=417），max-height 只管自身高度，
+       底部仍溢出。改为 fixed 贴底，不再依赖父容器定位。 */
+    position: fixed !important;
+    bottom: calc(var(--tabbar-h, 0px) + env(safe-area-inset-bottom, 0px));
+    left: 8px;
+    right: 8px;
+    z-index: 40;
+  }
+}
+
+/* ② 触屏设备标签按钮 ≥36px：平板（768×1024）实测标签按钮高 30px，
+      低于 36px 触控底线。不扩展断点（761px 以上布局分支不同），
+      改用 `@media (pointer: coarse)` 精准覆盖触屏设备（含平板触屏模式）。
+      特异性：`.question-tag-panel .quick-mark` = (0,2,0)，本块同特异性 + 后写赢。 */
+@media (pointer: coarse) {
+  .question-tag-panel .quick-mark {
+    min-height: 44px;
+  }
+}
