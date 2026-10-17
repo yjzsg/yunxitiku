@@ -7240,6 +7240,7 @@ sealed class PushScheduler : BackgroundService
         }
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        Console.WriteLine("[push] 调度器已启动：每 30 秒检查一次");
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -7336,6 +7337,8 @@ sealed class PushScheduler : BackgroundService
                     }
                     report.Sent++;
                     AddDetail(report, $"{user}：已发送「{message.Title}」");
+                    // 一天一条，写一行日志便于事后核对「到底发了没」。
+                    Console.WriteLine($"[push] 已发送 {user}：{message.Title} / {message.Body}");
                 }
                 else
                 {
