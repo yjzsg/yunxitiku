@@ -5138,6 +5138,17 @@ function renderWrongFilters() {
     panel?.remove();
     return;
   }
+  /* 错题「训练中」不画筛选面板。训练和浏览同为 mode="wrong"，旧实现只看 mode，
+     于是点「开始训练/继续上轮」后这整块（两个大按钮 + 4 组下拉 + 导出）还留在
+     .question-pane 的网格里 —— 面板没有 grid-row，掉进隐式第 6 行，移动端实测
+     390×844 吃掉读题区下方 296px（题干只剩 246px、选项伸进操作区底下被盖住），
+     桌面 1440×900 也占 149px。训练中的会话信息由 renderPracticeContextPanel
+     顶上的「错题本训练」条承担（含退出按钮），筛选只属于「浏览错题本」这个形态。
+     判据与 activeWrongPracticeSession 一致：有活跃指针且 mode==="wrong"。 */
+  if (activeWrongPracticeSession()) {
+    panel?.remove();
+    return;
+  }
   if (!panel) {
     panel = document.createElement("div");
     panel.id = "wrongFilterPanel";
