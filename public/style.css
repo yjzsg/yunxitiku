@@ -14661,6 +14661,23 @@ textarea,
     right: 8px;
     z-index: 40;
   }
+
+  /* 收起态不需要 fixed：此时面板只剩一个 toggle 按钮（44px），
+     固定在答题卡（z:90）正下方时，答题卡把按钮盖住、只露出面板自己的
+     上边框 2px —— 墨水屏上就是「答题卡下面多了一条线」（390×844 实测：
+     wrap 722~764，panel 720~790，720~722 那条边框永远可见）。
+     收起态回到文档流（按钮跟着题目滚动，本来就在题干末尾），
+     展开打标签时才贴底固定。 */
+  body .question-tag-panel:not(.open) {
+    position: static !important;
+    max-height: none;
+    overflow: visible;
+    border: 0;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+    margin-top: 8px;
+  }
 }
 
 /* ② 触屏设备标签按钮 ≥36px：平板（768×1024）实测标签按钮高 30px，
