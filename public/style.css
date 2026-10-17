@@ -14893,3 +14893,89 @@ textarea,
 @media (pointer: coarse) {
   .push-guide-link { min-height: 44px; display: inline-flex; align-items: center; }
 }
+
+/* ── 浏览器通知：已绑定设备 ──────────────────────────────────────────────
+   列表为空时整块不占位（只留「绑定本机」和提示），避免出现一个空框。 */
+.push-device-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.push-device-list:empty { display: none; }
+
+.push-device-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.push-device-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+/* 设备名可能是很长的 UA 摘要，必须截断，否则会把「解除」按钮挤出弹窗。 */
+.push-device-name {
+  color: var(--text);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.push-device-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.push-device-item button {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.push-device-item button:hover {
+  color: var(--danger-700);
+  border-color: currentColor;
+}
+
+.push-bind-btn {
+  justify-self: start;
+  min-height: var(--control-h);
+  padding: 0 16px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.push-bind-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary-ink);
+}
+.push-bind-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (pointer: coarse) {
+  .push-bind-btn,
+  .push-device-item button { min-height: 44px; }
+}

@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261018-merge1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261018-wp1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -403,9 +403,10 @@
       <small class="exam-history-modal-hint">删除一场记录后，本场的成绩与逐题明细都不再保留，也无法恢复。</small>
     </div>
   </div>
-  <!-- 每日提醒：由**服务端**定时推一条（Bark / ntfy / webhook）。
-       为什么不能只在前端做：页面一关就没有 JS，浏览器通知发不出去；
-       Web Push 又要 HTTPS 公网 + VAPID 密钥，这套部署（127.0.0.1 反代）用不上。 -->
+  <!-- 每日提醒：由**服务端**定时推一条（浏览器通知 / 微信 / 企业微信 / Bark / ntfy / webhook）。
+       为什么不能只在前端做：页面一关就没有 JS，定时器不会跑 —— 定时必须在服务端。
+       浏览器通知（Web Push）的**发送**也在服务端（VAPID 私钥在服务端），页面只负责
+       「点一下绑定本机」拿到这台设备的订阅；绑定时要求 HTTPS 安全上下文。 -->
   <div id="pushModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="pushModalTitle">
     <div class="modal-panel push-modal">
       <div class="modal-head">
@@ -427,6 +428,7 @@
         <div class="push-row">
           <span class="push-label">推送方式</span>
           <select id="pushType" aria-label="推送方式">
+            <option value="webpush">浏览器通知（不用装 App）</option>
             <option value="serverchan">微信 · Server酱</option>
             <option value="pushplus">微信 · PushPlus</option>
             <option value="wechat">企业微信群机器人</option>
@@ -452,6 +454,15 @@
         <div class="push-row hidden" id="pushTemplateRow">
           <span class="push-label">请求体模板</span>
           <textarea id="pushTemplate" rows="3" spellcheck="false" aria-label="请求体模板"></textarea>
+        </div>
+
+        <!-- 浏览器通知：不需要地址/令牌，凭据是「每台设备各一份订阅」。
+             绑定动作必须由用户在页面上点（浏览器要求用户手势 + 授权），服务端代替不了。 -->
+        <div class="push-row hidden" id="pushDeviceRow">
+          <span class="push-label">已绑定设备</span>
+          <ul id="pushDeviceList" class="push-device-list"></ul>
+          <button id="pushBindBtn" type="button" class="push-bind-btn">绑定本机</button>
+          <small id="pushDeviceHint" class="push-hint"></small>
         </div>
 
         <div class="push-row">
@@ -487,7 +498,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261018-merge2"></script>
+  <script src="/app.js?v=20261018-wp1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     // `?v=` 跟着 public/sw.js 的 CACHE 版本走（v2 = 白名单缓存 + 不再缓存 /assets/）：
@@ -495,7 +506,7 @@
     // 老 cache（可能含受保护题图）由新 SW 的 activate 清掉。
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
-        navigator.serviceWorker.register("/sw.js?v=20261013-sw2").catch(function (err) {
+        navigator.serviceWorker.register("/sw.js?v=20261018-wp1").catch(function (err) {
           console.warn("service worker 注册失败", err);
         });
       });

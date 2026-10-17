@@ -114,3 +114,51 @@ self.addEventListener("message", (event) => {
     if (port) port.postMessage({ ok: true });
   }));
 });
+
+/* ── Web Push（每日提醒）───────────────────────────────────────────────
+   载荷是服务端加密后送来的 JSON：{ title, body, url }。
+   ⚠️ 收到 push **必须**显示通知：Chrome 对「收下推送却不显示」按滥用处理，
+   几次之后直接取消订阅（userVisibleOnly 的契约就是每次都要让用户看见）。 */
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch (err) {
+    // 非 JSON 载荷（比如别人拿同一个订阅乱发）也要显示出来，不能静默吞掉。
+    data = { body: event.data ? event.data.text() : "" };
+  }
+  const title = (data && data.title) || "云习题库";
+  const body = (data && data.body) || "";
+  const url = (data && data.url) || "/";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: body,
+      icon: "/favicon.svg",
+      badge: "/favicon.svg",
+      // 同一天只留一条：tag 相同的通知会替换而不是堆一屏。
+      tag: "yunxi-daily",
+      renotify: false,
+      data: { url: url },
+    })
+  );
+});
+
+/* 点通知：优先复用已经开着的本站标签页（否则每点一次多开一个窗口），没有才新开。 */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+      for (const client of list) {
+        if (new URL(client.url).origin !== self.location.origin) continue;
+        return client.focus().then((focused) => {
+          if (focused && typeof focused.navigate === "function" && focused.url !== target) {
+            return focused.navigate(target).catch(() => focused);
+          }
+          return focused;
+        });
+      }
+      return self.clients.openWindow(target);
+    })
+  );
+});

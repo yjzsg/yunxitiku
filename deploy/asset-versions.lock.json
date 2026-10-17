@@ -1,13 +1,13 @@
 {
  "schema": "yunxitiku-asset-versions/1",
- "generatedAt": "2026-10-17T18:14:28.127Z",
+ "generatedAt": "2026-10-17T19:07:52.887Z",
  "note": "内容 sha256 ↔ ?v= 版本号的成对记录；由 deploy/check-asset-versions.mjs --update 生成，勿手改。",
  "assets": [
   {
    "path": "public/app.js",
-   "version": "20261018-merge2",
-   "bytes": 645004,
-   "sha256": "5ad04610e066ab2100cbc68b92318ada3349e32f7bdfe845e847001cd3f6ba16"
+   "version": "20261018-wp1",
+   "bytes": 652744,
+   "sha256": "e933b52d105b06f0648a9cb5175c27785a5cd78c632238b93970ca90b2744f39"
   },
   {
    "path": "public/drawer.css",
@@ -17,15 +17,15 @@
   },
   {
    "path": "public/style.css",
-   "version": "20261018-merge1",
-   "bytes": 425356,
-   "sha256": "ebce0dac883fa4dde5d7359ec9747305229ed5bf542a68a293daf31e51b199f9"
+   "version": "20261018-wp1",
+   "bytes": 427282,
+   "sha256": "6df55510a0837d23062d37a820dcd3cf9debe2321316c8f4d8bd6082a619e7e7"
   },
   {
    "path": "public/sw.js",
-   "version": "20261013-sw2",
-   "bytes": 5113,
-   "sha256": "602956a98e5e6c0002b0d1290a4eb4e39bfccdc619d372f269e69e06c79dc72e"
+   "version": "20261018-wp1",
+   "bytes": 7172,
+   "sha256": "0178f74b207ac091c675f0587b60a44f36a7f98df01a4b9340ae6d0a908122dc"
   }
  ]
 }

@@ -74,6 +74,10 @@ builder.Services.AddSingleton<ChapterMapStore>();
    注册成单例再挂 HostedService，是为了让 /api/push/test 和 /api/push/run 能拿到**同一个**
    调度器实例（AddHostedService 默认建的是独立实例，端点里注入不到它）。 */
 builder.Services.AddSingleton<PushConfigStore>();
+/* Web Push（浏览器通知）：VAPID 密钥全站一份、存在 userdata/push/_server/ 下；
+   WebPushSender 要拿 PushConfigStore 才能把 404/410 的死订阅顺手删掉。 */
+builder.Services.AddSingleton<VapidKeyStore>();
+builder.Services.AddSingleton<WebPushSender>();
 builder.Services.AddSingleton<PushScheduler>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PushScheduler>());
 /* 反代/隧道部署时按真实客户端 IP 计数（否则限流把所有人算成一个 IP）。
@@ -1192,13 +1196,15 @@ app.MapPut("/api/push/config", async (HttpContext context, PushConfigStore store
 
 /* 「发送测试」：用当前配置立刻发一条，**不写** lastSentDate。
    开关关着也能测 —— 用户改完地址第一件事就是想验证通不通，不该先逼他打开总开关。 */
-app.MapPost("/api/push/test", async (HttpContext context, PushConfigStore store, UserDataStore userData, string? user) =>
+app.MapPost("/api/push/test", async (HttpContext context, PushConfigStore store, UserDataStore userData, WebPushSender webPush, string? user) =>
 {
     string clean;
     try { clean = ResolveRequestedUser(context, user); }
     catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
     var cfg = store.Read(clean);
-    if (string.IsNullOrWhiteSpace(cfg.Channel.Url))
+    /* webpush 没有「地址」这个概念（凭据是每台设备的订阅），所以这条前置检查要跳过，
+       否则浏览器通知永远点不动「发送测试」。 */
+    if (cfg.Channel.Type != "webpush" && string.IsNullOrWhiteSpace(cfg.Channel.Url))
     {
         return Results.Json(new { ok = false, error = "还没有填写推送地址" }, statusCode: 400);
     }
@@ -1210,13 +1216,89 @@ app.MapPost("/api/push/test", async (HttpContext context, PushConfigStore store,
         ?? new PushMessage("【测试】提醒已配置好",
             digest.DoneToday > 0 ? $"今天已练 {digest.DoneToday} 题，之后不会再打扰你" : "正式提醒会在每天 " + cfg.Time + " 发出",
             PushMessageBuilder.UrlFor(cfg.BaseUrl));
-    var (ok, error) = await PushSenders.SendAsync(cfg.Channel, message, CancellationToken.None);
+    var (ok, error) = await PushDelivery.SendAsync(webPush, clean, cfg.Channel, message, CancellationToken.None);
     return Results.Json(new
     {
         ok,
         error,
         message = new { title = message.Title, body = message.Body, url = message.Url }
     });
+});
+
+/* ── 浏览器通知（Web Push）的绑定 ────────────────────────────────────────
+   为什么单独三个端点而不是并进 PUT /api/push/config：订阅是**每台设备一份凭据**，
+   走整包保存必然出现「手机保存一次就把电脑那份冲掉」。 */
+app.MapGet("/api/push/vapid", (HttpContext context, WebPushSender webPush) =>
+{
+    /* 公钥本来就是公开的（它要发到每台设备上），但仍然要求已登录：
+       没登录的人不需要知道这个站开了推送。ResolveRequestedUser 只用来验会话。 */
+    try { ResolveRequestedUser(context, null); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    return Results.Json(new { ok = true, publicKey = webPush.PublicKey });
+});
+
+app.MapPost("/api/push/subscribe", async (HttpContext context, PushConfigStore store, string? user) =>
+{
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    var body = await new StreamReader(context.Request.Body, Encoding.UTF8).ReadToEndAsync();
+    try
+    {
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        /* 前端直接 POST PushSubscription.toJSON()，所以同时接受
+           { endpoint, keys:{p256dh,auth} } 和包一层 { subscription: {...} } 两种形状。 */
+        var source = root.ValueKind == JsonValueKind.Object
+                     && root.TryGetProperty("subscription", out var nested)
+                     && nested.ValueKind == JsonValueKind.Object
+            ? nested
+            : root;
+        var subscription = new PushSubscription
+        {
+            Endpoint = ReadString(source, "endpoint"),
+            UserAgent = (context.Request.Headers.UserAgent.ToString() ?? "").Trim(),
+        };
+        if (source.TryGetProperty("keys", out var keys) && keys.ValueKind == JsonValueKind.Object)
+        {
+            subscription.P256dh = ReadString(keys, "p256dh");
+            subscription.Auth = ReadString(keys, "auth");
+        }
+        return Results.Json(store.AddSubscription(clean, subscription));
+    }
+    catch (JsonException ex)
+    {
+        return Results.Json(new { ok = false, error = "订阅内容不是有效 JSON：" + ex.Message }, statusCode: 400);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+    }
+});
+
+app.MapPost("/api/push/unsubscribe", async (HttpContext context, PushConfigStore store, string? user) =>
+{
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    var body = await new StreamReader(context.Request.Body, Encoding.UTF8).ReadToEndAsync();
+    string? id = null;
+    string? endpoint = null;
+    try
+    {
+        using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+        if (doc.RootElement.ValueKind == JsonValueKind.Object)
+        {
+            id = doc.RootElement.TryGetProperty("id", out var idValue) ? idValue.ToString() : null;
+            endpoint = doc.RootElement.TryGetProperty("endpoint", out var epValue) ? epValue.ToString() : null;
+        }
+    }
+    catch (JsonException ex)
+    {
+        return Results.Json(new { ok = false, error = "请求内容不是有效 JSON：" + ex.Message }, statusCode: 400);
+    }
+    var (config, removed) = store.RemoveSubscription(clean, id, endpoint);
+    return Results.Json(new { ok = true, removed, config });
 });
 
 /* 「服务端看到什么」：把服务端算出的到期数/已练数/连续天数摊开给前端。
@@ -1310,6 +1392,16 @@ internal static async Task<Dictionary<string, object?>> ReadJsonBody(HttpRequest
 /// <summary>当前会话的用户名（中间件已把会话用户放进 Items；取不到返回空串）。</summary>
 internal static string SessionUser(HttpContext context)
     => Convert.ToString(context.Items[SessionStore.UserItemKey], CultureInfo.InvariantCulture) ?? "";
+
+/// <summary>从 JSON 对象里读一个字符串字段；缺失或类型不对都回空串（不抛）。</summary>
+internal static string ReadString(JsonElement element, string name)
+{
+    return element.ValueKind == JsonValueKind.Object
+           && element.TryGetProperty(name, out var value)
+           && value.ValueKind == JsonValueKind.String
+        ? (value.GetString() ?? "")
+        : "";
+}
 
 internal static string GetBodyString(Dictionary<string, object?> body, string name)
 {
@@ -6465,11 +6557,34 @@ sealed class PushConfig
 
 sealed class PushChannelConfig
 {
-    public string Type { get; set; } = "bark";   // bark | ntfy | webhook
+    /// <summary>bark | ntfy | webhook | wechat | serverchan | pushplus | webpush</summary>
+    public string Type { get; set; } = "webpush";
     public string Url { get; set; } = "";
     public string Token { get; set; } = "";
     /// <summary>仅 webhook 用：正文模板，占位符 {{title}} {{body}} {{url}}（会做 JSON 转义）。</summary>
     public string Template { get; set; } = "";
+    /// <summary>
+    /// 仅 webpush 用：绑定的设备。一个账号可以绑多台（手机 + 电脑），
+    /// 发送时逐台推，全部失败才算失败。
+    /// 这一项**客户端改不动**（Save 会保留原值），只能通过 /api/push/subscribe 增删。
+    /// </summary>
+    public List<PushSubscription> Subscriptions { get; set; } = new();
+}
+
+/// <summary>浏览器推送订阅（PushSubscription.toJSON() 的形状）。</summary>
+sealed class PushSubscription
+{
+    public string Endpoint { get; set; } = "";
+    /// <summary>P-256 公钥（base64url，未压缩点，65 字节）。</summary>
+    public string P256dh { get; set; } = "";
+    /// <summary>16 字节认证密钥（base64url）。</summary>
+    public string Auth { get; set; } = "";
+    public string UserAgent { get; set; } = "";
+    public string CreatedAt { get; set; } = "";
+
+    public bool IsValid =>
+        Endpoint.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+        && P256dh.Length > 0 && Auth.Length > 0;
 }
 
 sealed class PushMessage
@@ -6553,6 +6668,11 @@ sealed class PushConfigStore
             var body = File.ReadAllText(path, Encoding.UTF8);
             if (body.Trim().Length == 0) return NewConfig();
             var cfg = JsonSerializer.Deserialize<PushConfig>(body, JsonOptions) ?? NewConfig();
+            /* 手写坏了的 JSON 里可能有 "channel": null —— 下面每处都直接点 Channel.Type，
+               一个 null 就让整个调度器每轮抛异常。读的时候补回来最省事。 */
+            cfg.Channel ??= new PushChannelConfig();
+            cfg.Channel.Subscriptions ??= new List<PushSubscription>();
+            cfg.Channel.Subscriptions.RemoveAll(s => s is null || !s.IsValid);
             /* 空 = 用服务端默认值。这样「老配置没这一项」和「用户清空了」都落到同一个
                结果上：点开通知能跳回站点，而不是一个没有链接的消息。 */
             if (cfg.BaseUrl.Trim().Length == 0) cfg.BaseUrl = _defaultBaseUrl;
@@ -6586,6 +6706,18 @@ sealed class PushConfigStore
                 token = MaskToken(cfg.Channel.Token),
                 tokenSet = cfg.Channel.Token.Length > 0,
                 template = cfg.Channel.Template,
+                /* 订阅端点本身就是一台设备的凭据（拿到就能冒充那台设备），
+                   所以只回可读的摘要 + 一个稳定的短 id，不回完整 URL。 */
+                subscriptions = cfg.Channel.Subscriptions
+                    .Select(s => new
+                    {
+                        id = SubscriptionId(s.Endpoint),
+                        host = HostOf(s.Endpoint),
+                        userAgent = ShortUserAgent(s.UserAgent),
+                        createdAt = s.CreatedAt,
+                    })
+                    .ToArray(),
+                subscriptionCount = cfg.Channel.Subscriptions.Count,
             },
             lastSentDate = cfg.LastSentDate,
             lastSentAt = cfg.LastSentAt,
@@ -6619,6 +6751,9 @@ sealed class PushConfigStore
             Url = (channel.Url ?? "").Trim(),
             Token = MergeToken(current.Channel.Token, channel.Token),
             Template = (channel.Template ?? "").Trim(),
+            /* 订阅只能由 /api/push/subscribe 增删：前端保存设置时整个 channel 是重发的，
+               不保留就会被「保存一次就清空所有设备」。 */
+            Subscriptions = current.Channel.Subscriptions ?? new List<PushSubscription>(),
         };
 
         Validate(current);
@@ -6668,7 +6803,11 @@ sealed class PushConfigStore
     private static string NormalizeType(string? type)
     {
         var value = (type ?? "").Trim().ToLowerInvariant();
-        return value is "ntfy" or "webhook" or "wechat" or "serverchan" or "pushplus" ? value : "bark";
+        /* 默认给 webpush：新用户最省事的渠道（不用装 App、不用第三方账号）。
+           已有配置里写了具体 type 的照旧，不受影响。
+           ⚠️ "bark" 必须**显式列出**：它原来是兜底值，改成 webpush 兜底之后，
+           漏掉它会让选 Bark 的人静默变成浏览器通知（校验还会报「先绑定设备」）。 */
+        return value is "bark" or "ntfy" or "webhook" or "wechat" or "serverchan" or "pushplus" or "webpush" ? value : "webpush";
     }
 
     private static string NormalizeStyle(string? style)
@@ -6697,23 +6836,35 @@ sealed class PushConfigStore
     {
         var url = cfg.Channel.Url;
         var token = (cfg.Channel.Token ?? "").Trim();
-        /* Server酱 / PushPlus 的接口地址是服务商固定的，用户手里只有一串 key：
-           地址留空 = 走默认接口（发送端会自动补上），所以这里不要求填地址。 */
-        var keyOnly = cfg.Channel.Type is "serverchan" or "pushplus";
-
-        if (keyOnly)
+        /* webpush 既不需要地址也不需要令牌 —— 凭据是订阅本身（每台设备一份）。
+           它唯一的前置条件是「至少绑了一台设备」，否则启用后每天都发不出去。 */
+        if (cfg.Channel.Type == "webpush")
         {
-            if (token.Length == 0 && cfg.Enabled)
+            if (cfg.Enabled && cfg.Channel.Subscriptions.Count == 0)
             {
-                throw new InvalidOperationException(cfg.Channel.Type == "serverchan"
-                    ? "启用前请先填写 Server酱的 SendKey"
-                    : "启用前请先填写 PushPlus 的 token");
+                throw new InvalidOperationException("启用前请先点「绑定本机」—— 浏览器通知需要至少一台已绑定的设备");
             }
         }
-        else if (url.Length == 0)
+        else
         {
-            if (cfg.Enabled) throw new InvalidOperationException("启用每日提醒前请先填写推送地址");
-            return;
+            /* Server酱 / PushPlus 的接口地址是服务商固定的，用户手里只有一串 key：
+               地址留空 = 走默认接口（发送端会自动补上），所以这里不要求填地址。 */
+            var keyOnly = cfg.Channel.Type is "serverchan" or "pushplus";
+
+            if (keyOnly)
+            {
+                if (token.Length == 0 && cfg.Enabled)
+                {
+                    throw new InvalidOperationException(cfg.Channel.Type == "serverchan"
+                        ? "启用前请先填写 Server酱的 SendKey"
+                        : "启用前请先填写 PushPlus 的 token");
+                }
+            }
+            else if (url.Length == 0)
+            {
+                if (cfg.Enabled) throw new InvalidOperationException("启用每日提醒前请先填写推送地址");
+                return;
+            }
         }
 
         if (url.Length > 0
@@ -6728,6 +6879,90 @@ sealed class PushConfigStore
         {
             throw new InvalidOperationException("「点击跳转」地址必须是 http:// 或 https:// 开头的完整 URL");
         }
+    }
+
+    /* ── webpush 订阅的增删 ──────────────────────────────────────────────
+       单独开方法而不是让前端 PUT 整个 channel：订阅是「每台设备各一份凭据」，
+       走整包保存必然出现「手机保存一次就把电脑那份冲掉」。 */
+
+    /// <summary>登记一台设备。同一个 endpoint 重复提交 = 更新（浏览器会重发同一个）。</summary>
+    public object AddSubscription(string user, PushSubscription incoming)
+    {
+        if (incoming is null || !incoming.IsValid)
+        {
+            throw new InvalidOperationException("订阅信息不完整（需要 endpoint / p256dh / auth）");
+        }
+        var cfg = Read(user);
+        var endpoint = incoming.Endpoint.Trim();
+        var list = cfg.Channel.Subscriptions;
+        list.RemoveAll(s => string.Equals(s.Endpoint, endpoint, StringComparison.Ordinal));
+        list.Add(new PushSubscription
+        {
+            Endpoint = endpoint,
+            P256dh = incoming.P256dh.Trim(),
+            Auth = incoming.Auth.Trim(),
+            UserAgent = (incoming.UserAgent ?? "").Trim(),
+            CreatedAt = NowText(),
+        });
+        /* 绑一台就顺手把渠道切成 webpush：用户点「绑定本机」时多半还没选过渠道，
+           绑完却因为 type 还是 bark 而发不出去，是最容易踩的坑。 */
+        cfg.Channel.Type = "webpush";
+        Write(user, cfg);
+        return ReadForApi(user);
+    }
+
+    /// <summary>按短 id 或完整 endpoint 解除绑定。返回实际删掉了几台。</summary>
+    public (object Config, int Removed) RemoveSubscription(string user, string? id, string? endpoint)
+    {
+        var cfg = Read(user);
+        var wantEndpoint = (endpoint ?? "").Trim();
+        var wantId = (id ?? "").Trim();
+        var removed = cfg.Channel.Subscriptions.RemoveAll(s =>
+            (wantEndpoint.Length > 0 && string.Equals(s.Endpoint, wantEndpoint, StringComparison.Ordinal))
+            || (wantId.Length > 0 && string.Equals(SubscriptionId(s.Endpoint), wantId, StringComparison.Ordinal)));
+        if (removed > 0) Write(user, cfg);
+        return (ReadForApi(user), removed);
+    }
+
+    /// <summary>发送时发现 404/410（设备已注销 / 浏览器清了数据）→ 顺手删掉。</summary>
+    public void DropSubscriptions(string user, IReadOnlyCollection<string> endpoints)
+    {
+        if (endpoints.Count == 0) return;
+        var cfg = Read(user);
+        var removed = cfg.Channel.Subscriptions.RemoveAll(s => endpoints.Contains(s.Endpoint));
+        if (removed > 0)
+        {
+            Write(user, cfg);
+            Console.WriteLine($"[push] {user}：已自动解除 {removed} 台失效设备的绑定");
+        }
+    }
+
+    /// <summary>订阅的稳定短 id：端点换了它就变，够前端区分设备用。</summary>
+    public static string SubscriptionId(string endpoint)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(endpoint ?? ""));
+        return Convert.ToHexString(hash)[..12].ToLowerInvariant();
+    }
+
+    private static string HostOf(string endpoint)
+    {
+        return Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ? uri.Host : "未知";
+    }
+
+    /// <summary>UA 只留能认出来的部分：整串太长，界面上也不需要。</summary>
+    private static string ShortUserAgent(string ua)
+    {
+        var value = (ua ?? "").Trim();
+        if (value.Length == 0) return "";
+        foreach (var (marker, label) in new[]
+                 {
+                     ("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"),
+                     ("Windows", "Windows"), ("Macintosh", "Mac"), ("Linux", "Linux"),
+                 })
+        {
+            if (value.Contains(marker, StringComparison.OrdinalIgnoreCase)) return label;
+        }
+        return value.Length <= 24 ? value : value[..24];
     }
 
     private void Write(string user, PushConfig cfg)
@@ -7247,6 +7482,343 @@ static class PushSenders
 }
 
 /// <summary>
+/// Web Push 的 VAPID 密钥对（RFC 8292）。全站一份，第一次用到时生成并落盘。
+/// 存在 userdata/push/_server/ 这个**子目录**里：userdata 顶层的 *.json 就是账号列表
+/// （见 /api/admin/users），push 已经是子目录，再往下一层连枚举都碰不到。
+/// </summary>
+sealed class VapidKeyStore
+{
+    private readonly AppPaths _paths;
+    private readonly object _gate = new();
+    private readonly string _subject;
+    private string _public = "";
+    private string _private = "";
+    private bool _loaded;
+
+    public VapidKeyStore(AppPaths paths, IConfiguration configuration)
+    {
+        _paths = paths;
+        /* VAPID 的 sub 按规范是联系方式（mailto: 或 https:）。推送服务不校验内容，
+           但留空不合规范，给一个明确无害的默认值。 */
+        var subject = (configuration["App:VapidSubject"] ?? "").Trim();
+        _subject = subject.Length > 0 ? subject : "mailto:admin@localhost";
+    }
+
+    private string Dir => Path.Combine(_paths.UserDataRoot, "push", "_server");
+    private string FilePath => Path.Combine(Dir, "vapid.json");
+
+    /// <summary>给浏览器的公钥（base64url，65 字节未压缩点）。</summary>
+    public string PublicKey
+    {
+        get
+        {
+            Ensure();
+            lock (_gate) return _public;
+        }
+    }
+
+    /// <summary>RFC 8292 的授权头：<c>vapid t=&lt;jwt&gt;, k=&lt;公钥&gt;</c>。</summary>
+    public string AuthorizationHeader(Uri endpoint)
+    {
+        Ensure();
+        string publicKey;
+        string signingInput;
+        byte[] signature;
+        lock (_gate)
+        {
+            publicKey = _public;
+            var aud = endpoint.GetLeftPart(UriPartial.Authority);
+            var header = Base64Url(Encoding.UTF8.GetBytes("{\"typ\":\"JWT\",\"alg\":\"ES256\"}"));
+            var payloadJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["aud"] = aud,
+                ["exp"] = DateTimeOffset.UtcNow.AddHours(12).ToUnixTimeSeconds(),
+                ["sub"] = _subject,
+            });
+            var payload = Base64Url(Encoding.UTF8.GetBytes(payloadJson));
+            signingInput = header + "." + payload;
+            using var signer = CreateSigner();
+            /* JWS 要的是 r||s 的定长拼接（64 字节），不是 DER —— 默认格式浏览器会拒。
+               12 小时有效期：官方建议不超过 24 小时，每次发送现签，不复用。 */
+            signature = signer.SignData(Encoding.ASCII.GetBytes(signingInput),
+                HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        }
+        return $"vapid t={signingInput}.{Base64Url(signature)}, k={publicKey}";
+    }
+
+    private void Ensure()
+    {
+        lock (_gate)
+        {
+            if (_loaded) return;
+            _loaded = true;
+            try
+            {
+                if (File.Exists(FilePath))
+                {
+                    var body = File.ReadAllText(FilePath, Encoding.UTF8);
+                    var saved = JsonSerializer.Deserialize<VapidFile>(body, PushConfigStore.JsonOptions);
+                    if (saved is not null && saved.PublicKey.Length > 0 && saved.PrivateKey.Length > 0)
+                    {
+                        _public = saved.PublicKey;
+                        _private = saved.PrivateKey;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[push] 读取 VAPID 密钥失败，重新生成：{ex.Message}");
+            }
+            Generate();
+        }
+    }
+
+    private void Generate()
+    {
+        using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var p = ecdsa.ExportParameters(true);
+        var pub = new byte[65];
+        pub[0] = 0x04;
+        p.Q.X!.CopyTo(pub, 1);
+        p.Q.Y!.CopyTo(pub, 33);
+        _public = Base64Url(pub);
+        _private = Base64Url(p.D!);
+        try
+        {
+            System.IO.Directory.CreateDirectory(Dir);
+            var temp = FilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(temp,
+                JsonSerializer.Serialize(new VapidFile { PublicKey = _public, PrivateKey = _private, CreatedAt = NowText() },
+                    PushConfigStore.JsonOptions),
+                new UTF8Encoding(false));
+            File.Move(temp, FilePath, true);
+            RestrictFilePermissions(FilePath);
+        }
+        catch (Exception ex)
+        {
+            /* 写不下去也要能用：进程活着期间推送照发。只是重启后公钥会变，
+               旧订阅随之失效（浏览器下次打开会重新订阅），日志留痕便于排查。 */
+            Console.WriteLine($"[push] 保存 VAPID 密钥失败（重启后已绑定设备需重新绑定）：{ex.Message}");
+        }
+    }
+
+    private ECDsa CreateSigner()
+    {
+        var pub = Base64UrlDecode(_public);
+        return ECDsa.Create(new ECParameters
+        {
+            Curve = ECCurve.NamedCurves.nistP256,
+            D = Base64UrlDecode(_private),
+            Q = new ECPoint { X = pub[1..33], Y = pub[33..65] },
+        });
+    }
+
+    public static string Base64Url(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    public static byte[] Base64UrlDecode(string value)
+    {
+        var text = (value ?? "").Trim().Replace('-', '+').Replace('_', '/');
+        if (text.Length == 0) return Array.Empty<byte>();
+        return Convert.FromBase64String(text.PadRight(text.Length + (4 - text.Length % 4) % 4, '='));
+    }
+
+    private sealed class VapidFile
+    {
+        public string PublicKey { get; set; } = "";
+        public string PrivateKey { get; set; } = "";
+        public string CreatedAt { get; set; } = "";
+    }
+}
+
+/// <summary>
+/// Web Push 发送端（RFC 8030 传输 / 8291 消息加密 / 8292 VAPID）。
+/// .NET 没有内置实现，这里手写两条：
+///   · VAPID —— 用 ES256 签一个 JWT 放进 Authorization 头，向推送服务声明「我是这个站」；
+///   · 加密 —— 与设备公钥做 ECDH，HKDF 派生出 AES-128-GCM 的 key/nonce，按 RFC 8188 组包。
+/// 推送服务（FCM / Mozilla / Apple）只转发密文：看得到发给谁，看不到内容。
+/// </summary>
+sealed class WebPushSender
+{
+    private static readonly HttpClient Http = new(new SocketsHttpHandler { AllowAutoRedirect = false })
+    {
+        Timeout = TimeSpan.FromSeconds(10),
+    };
+
+    private readonly VapidKeyStore _keys;
+    private readonly PushConfigStore _store;
+
+    public WebPushSender(VapidKeyStore keys, PushConfigStore store)
+    {
+        _keys = keys;
+        _store = store;
+    }
+
+    /// <summary>浏览器 subscribe() 要的公钥。</summary>
+    public string PublicKey => _keys.PublicKey;
+
+    /// <summary>逐台推。全部失败才算失败（一个人手机绑着、电脑关着，不该算发送失败）。</summary>
+    public async Task<(bool Ok, string Error)> SendAsync(string user, PushChannelConfig channel, PushMessage message, CancellationToken ct)
+    {
+        var subs = channel?.Subscriptions ?? new List<PushSubscription>();
+        if (subs.Count == 0) return (false, "还没有绑定设备");
+        var plaintext = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["title"] = message.Title,
+            ["body"] = message.Body,
+            ["url"] = message.Url,
+        }));
+
+        var delivered = 0;
+        var dead = new List<string>();
+        var errors = new List<string>();
+        foreach (var sub in subs)
+        {
+            var (ok, error, gone) = await SendOneAsync(sub, plaintext, ct);
+            if (ok) { delivered++; continue; }
+            if (gone) { dead.Add(sub.Endpoint); continue; }
+            errors.Add(error);
+        }
+        _store.DropSubscriptions(user, dead);
+        if (delivered > 0) return (true, "");
+        if (errors.Count > 0) return (false, string.Join("；", errors.Take(3)));
+        return (false, "所有设备都已失效，已自动解除绑定");
+    }
+
+    private async Task<(bool Ok, string Error, bool Gone)> SendOneAsync(PushSubscription sub, byte[] plaintext, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(sub.Endpoint, UriKind.Absolute, out var endpoint) || endpoint.Scheme != Uri.UriSchemeHttps)
+        {
+            return (false, "订阅地址无效", true);
+        }
+        try
+        {
+            var body = Encrypt(sub, plaintext, out _);
+            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            {
+                Content = new ByteArrayContent(body),
+            };
+            request.Content.Headers.TryAddWithoutValidation("Content-Type", "application/octet-stream");
+            /* 这三个都是**内容头**，挂到 request.Headers 上会被拒。 */
+            request.Content.Headers.TryAddWithoutValidation("Content-Encoding", "aes128gcm");
+            request.Headers.TryAddWithoutValidation("TTL", "86400");
+            request.Headers.TryAddWithoutValidation("Urgency", "normal");
+            request.Headers.TryAddWithoutValidation("Authorization", _keys.AuthorizationHeader(endpoint));
+            /* 有些推送服务或前置代理（Cloudflare 一类）对空 User-Agent 直接回 402/403。
+               实测 httpbingo 就是「无 UA → 402」。加上标识既避开这类机器人策略，
+               也方便对方在日志里认出调用方。 */
+            request.Headers.TryAddWithoutValidation("User-Agent", "YunxiTiku-Push/1.0");
+            using var response = await Http.SendAsync(request, ct);
+            if (response.IsSuccessStatusCode) return (true, "", false);
+            var status = (int)response.StatusCode;
+            /* 404 / 410：设备已注销、浏览器清了数据、或卸载了站点。这条订阅永远不可能
+               再成功，留着只会让「发送成功」永远为假 —— 直接删掉，前端列表也跟着消失。 */
+            if (status is 404 or 410) return (false, "", true);
+            var text = await response.Content.ReadAsStringAsync(ct);
+            return (false, $"推送服务返回 HTTP {status}：{Shorten(text)}", false);
+        }
+        catch (TaskCanceledException)
+        {
+            return (false, "推送超时（10 秒无响应）", false);
+        }
+        catch (HttpRequestException ex)
+        {
+            return (false, "推送请求失败：" + ex.Message, false);
+        }
+        catch (Exception ex)
+        {
+            return (false, "推送失败：" + ex.Message, false);
+        }
+    }
+
+    /// <summary>RFC 8291（消息加密）+ RFC 8188（aes128gcm 内容编码）。</summary>
+    private static byte[] Encrypt(PushSubscription sub, byte[] plaintext, out byte[] asPublic)
+    {
+        var uaPublic = VapidKeyStore.Base64UrlDecode(sub.P256dh);
+        var authSecret = VapidKeyStore.Base64UrlDecode(sub.Auth);
+        if (uaPublic.Length != 65) throw new InvalidOperationException("设备公钥格式不对");
+        if (authSecret.Length != 16) throw new InvalidOperationException("设备认证密钥格式不对");
+
+        using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        var asParams = ecdh.ExportParameters(false);
+        asPublic = new byte[65];
+        asPublic[0] = 0x04;
+        asParams.Q.X!.CopyTo(asPublic, 1);
+        asParams.Q.Y!.CopyTo(asPublic, 33);
+
+        using var uaKey = ECDiffieHellman.Create(new ECParameters
+        {
+            Curve = ECCurve.NamedCurves.nistP256,
+            Q = new ECPoint { X = uaPublic[1..33], Y = uaPublic[33..65] },
+        });
+        var sharedSecret = ecdh.DeriveRawSecretAgreement(uaKey.PublicKey);
+
+        /* RFC 8291 §3.4：IKM = HKDF(salt = auth_secret,
+                                     ikm  = ECDH 共享密钥,
+                                     info = "WebPush: info\0" || ua_public || as_public) */
+        var keyInfo = Concat(Encoding.ASCII.GetBytes("WebPush: info\0"), uaPublic, asPublic);
+        var ikm = HKDF.DeriveKey(HashAlgorithmName.SHA256, sharedSecret, 32, authSecret, keyInfo);
+
+        var salt = RandomNumberGenerator.GetBytes(16);
+        var cek = HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, 16, salt, Encoding.ASCII.GetBytes("Content-Encoding: aes128gcm\0"));
+        var nonce = HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, 12, salt, Encoding.ASCII.GetBytes("Content-Encoding: nonce\0"));
+
+        // 明文末尾补 0x02 = RFC 8188 的「最后一条记录」分隔符。
+        var padded = Concat(plaintext, new byte[] { 0x02 });
+        // GCM 的 16 字节认证标签接在密文后面（RFC 8188 就是这么定义的），
+        // 所以缓冲区多留 16 字节，用 span 重载把标签写进去 —— 数组重载要传 tag:null，
+        // 在可空引用类型下是个 CS8625 警告。
+        var ciphertext = new byte[padded.Length + 16];
+        using (var gcm = new AesGcm(cek, 16))
+        {
+            gcm.Encrypt(nonce, padded, ciphertext.AsSpan(0, padded.Length), ciphertext.AsSpan(padded.Length));
+        }
+
+        // 正文 = salt(16) || rs(4) || idlen(1) || keyid(as_public, 65) || 密文
+        var body = new byte[16 + 4 + 1 + 65 + ciphertext.Length];
+        salt.CopyTo(body, 0);
+        var rsBytes = BitConverter.GetBytes(4096);
+        if (BitConverter.IsLittleEndian) Array.Reverse(rsBytes);
+        rsBytes.CopyTo(body, 16);
+        body[20] = 65;
+        asPublic.CopyTo(body, 21);
+        ciphertext.CopyTo(body, 86);
+        return body;
+    }
+
+    private static byte[] Concat(params byte[][] parts)
+    {
+        var result = new byte[parts.Sum(p => p.Length)];
+        var offset = 0;
+        foreach (var part in parts)
+        {
+            part.CopyTo(result, offset);
+            offset += part.Length;
+        }
+        return result;
+    }
+
+    private static string Shorten(string text)
+    {
+        var value = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+        return value.Length <= 200 ? value : value[..200] + "…";
+    }
+}
+
+/// <summary>「是不是 webpush」这一个分支收在一处：调度器和「发送测试」共用。</summary>
+static class PushDelivery
+{
+    public static Task<(bool Ok, string Error)> SendAsync(WebPushSender webPush, string user, PushChannelConfig channel, PushMessage message, CancellationToken ct)
+    {
+        var type = (channel?.Type ?? "").Trim().ToLowerInvariant();
+        return type == "webpush"
+            ? webPush.SendAsync(user, channel!, message, ct)
+            : PushSenders.SendAsync(channel!, message, ct);
+    }
+}
+
+/// <summary>
 /// 每 30 秒扫一遍 userdata/push/*.json，到点就发。
 /// 判据全部在 RunOnceAsync 里：开关 → 今天是否已发 → 是否到点 → 是否还在宽限期 → 退避。
 /// </summary>
@@ -7254,12 +7826,14 @@ sealed class PushScheduler : BackgroundService
 {
     private readonly PushConfigStore _store;
     private readonly UserDataStore _userData;
+    private readonly WebPushSender _webPush;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public PushScheduler(PushConfigStore store, UserDataStore userData)
+    public PushScheduler(PushConfigStore store, UserDataStore userData, WebPushSender webPush)
     {
         _store = store;
         _userData = userData;
+        _webPush = webPush;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -7358,7 +7932,7 @@ sealed class PushScheduler : BackgroundService
                 var message = PushMessageBuilder.Build(cfg, digest, now);
                 if (message is null) { report.Skipped++; continue; }
 
-                var (ok, error) = await PushSenders.SendAsync(cfg.Channel, message, ct);
+                var (ok, error) = await PushDelivery.SendAsync(_webPush, user, cfg.Channel, message, ct);
                 if (ok)
                 {
                     cfg.LastSentDate = todayKey;

@@ -11785,6 +11785,22 @@ function refreshExamHistoryCard() {
    结构：lead 一句话说明落地位置和额度；steps 具体操作；link 一键打开获取页；
    hint 是地址输入框下面那行短提示（保持简短，长内容放 steps）。 */
 const PUSH_TYPE_INFO = {
+  /* 浏览器通知：唯一不需要装 App、不需要第三方账号的渠道。
+     它没有「地址」也没有「令牌」—— 凭据是每台设备各一份订阅，靠下面的「绑定本机」按钮产生。
+     hideUrl 让地址输入框整行消失，devices 让设备列表那一行出现。 */
+  webpush: {
+    lead: "直接推到这台设备的通知栏，不用装 App，也不用注册任何第三方账号。",
+    steps: [
+      "点下面的「绑定本机」，浏览器会弹一个「允许通知」的询问，选「允许」。",
+      "想收在哪台设备上，就在那台设备上打开本站再点一次「绑定本机」—— 手机和电脑可以同时绑。",
+      "iPhone 要先把这个站「添加到主屏幕」，从主屏幕图标打开后再绑定（iOS 16.4 起才支持）。",
+    ],
+    hint: "",
+    token: false,
+    template: false,
+    hideUrl: true,
+    devices: true,
+  },
   /* 两个「直接进个人微信」的渠道放最前面 —— 这是绝大多数人想要的「推送到微信」。
      它们只需要一串 key，接口地址固定，所以地址留空即可（后端会补默认值）。 */
   serverchan: {
@@ -11921,19 +11937,156 @@ let pushPreviewTimer = null;
 function refreshPushTypeFields() {
   const type = $("pushType")?.value || "bark";
   const info = PUSH_TYPE_INFO[type] || PUSH_TYPE_INFO.bark;
-  setText("pushUrlLabel", info.label);
+  setText("pushUrlLabel", info.label || "");
   const url = $("pushUrl");
-  if (url) url.placeholder = info.placeholder;
-  setText("pushUrlHint", info.hint);
+  if (url) url.placeholder = info.placeholder || "";
+  setText("pushUrlHint", info.hint || "");
+  /* 浏览器通知既没有地址也没有令牌，地址行整行收起 —— 留一个空输入框只会让人
+     以为自己少填了什么。 */
+  $("pushUrl")?.closest(".push-row")?.classList.toggle("hidden", !!info.hideUrl);
+  $("pushUrlHint")?.classList.toggle("hidden", !!info.hideUrl || !info.hint);
   setText("pushTokenLabel", info.tokenLabel || "访问令牌");
   $("pushTokenRow")?.classList.toggle("hidden", !info.token);
   $("pushTemplateRow")?.classList.toggle("hidden", !info.template);
+  $("pushDeviceRow")?.classList.toggle("hidden", !info.devices);
+  if (info.devices) renderPushDevices(pushLoadedConfig);
   renderPushGuide(info);
 }
 
 function refreshPushStyleHint() {
   const style = $("pushStyle")?.value || "milestone";
   setText("pushStyleHint", PUSH_STYLE_HINT[style] || "");
+}
+
+/* ── 浏览器通知的绑定 ────────────────────────────────────────────────────────
+   订阅是**每台设备一份**凭据，所以它不跟设置表单一起整包保存，而是单独
+   POST /api/push/subscribe。服务端把订阅存进同一个配置文件、并且顺手把渠道切成 webpush。 */
+
+/* 能不能绑。iOS 上标签页里 PushManager 也存在，但 subscribe 会失败 ——
+   必须先「添加到主屏幕」再打开（display-mode: standalone）。 */
+function webPushSupport() {
+  if (!window.isSecureContext) {
+    return { ok: false, reason: "浏览器通知要求 HTTPS（或本机 localhost）。当前不是安全连接，绑不了。" };
+  }
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    return { ok: false, reason: "这个浏览器不支持通知推送。换 Chrome / Edge / Safari 16.4+ 试试。" };
+  }
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  if (isIOS && !standalone) {
+    return { ok: false, reason: "iPhone / iPad 上要先把本站「添加到主屏幕」，从主屏幕图标打开后再绑定（iOS 16.4 起支持）。" };
+  }
+  return { ok: true };
+}
+
+/* VAPID 公钥是 base64url，PushManager 要的是 Uint8Array。 */
+function urlBase64ToUint8Array(base64) {
+  const padded = (base64 + "=".repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(padded);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
+/* 设备名用 UA 摘要（服务端已经缩成「Chrome · Android」这种），没有才退回推送域名。 */
+function renderPushDevices(cfg) {
+  const list = $("pushDeviceList");
+  if (!list) return;
+  const subs = cfg?.channel?.subscriptions || [];
+  list.replaceChildren();
+  for (const sub of subs) {
+    const li = document.createElement("li");
+    li.className = "push-device-item";
+    const main = document.createElement("div");
+    main.className = "push-device-main";
+    const name = document.createElement("span");
+    name.className = "push-device-name";
+    name.textContent = sub.userAgent || sub.host || "已绑定设备";
+    const meta = document.createElement("span");
+    meta.className = "push-device-meta";
+    meta.textContent = [sub.host, sub.createdAt ? `绑定于 ${sub.createdAt}` : ""].filter(Boolean).join(" · ");
+    main.append(name, meta);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "解除";
+    btn.setAttribute("aria-label", `解除「${name.textContent}」的绑定`);
+    btn.onclick = () => { unbindWebPush(sub.id, btn); };
+    li.append(main, btn);
+    list.appendChild(li);
+  }
+  const support = webPushSupport();
+  const bindBtn = $("pushBindBtn");
+  if (bindBtn) bindBtn.disabled = !support.ok;
+  const hint = $("pushDeviceHint");
+  if (hint) {
+    hint.textContent = support.ok
+      ? (subs.length
+        ? `已绑定 ${subs.length} 台。换设备就在那台设备上再点一次「绑定本机」。`
+        : "还没绑定设备。点「绑定本机」把通知开到这台设备上。")
+      : support.reason;
+  }
+}
+
+async function bindWebPush() {
+  const support = webPushSupport();
+  if (!support.ok) { toast(support.reason); return; }
+  const button = $("pushBindBtn");
+  const hint = $("pushDeviceHint");
+  if (button) button.disabled = true;
+  try {
+    /* 顺序：先订阅再保存。反过来不行 —— 启用状态的 webpush 配置在「一台设备都没绑」
+       时会被服务端拒绝保存（Validate），而订阅本身不要求启用。 */
+    if (Notification.permission === "denied") {
+      throw new Error("这台设备已经把本站的通知权限拒掉了。要去浏览器的站点设置里重新允许，之后才能绑定。");
+    }
+    if (Notification.permission !== "granted") {
+      const granted = await Notification.requestPermission();
+      if (granted !== "granted") throw new Error("没有拿到通知权限，绑定没完成。");
+    }
+    if (hint) hint.textContent = "正在绑定…";
+    const reg = await navigator.serviceWorker.ready;
+    const { publicKey } = await api("/api/push/vapid");
+    if (!publicKey) throw new Error("服务端没有可用的推送公钥，暂时绑不了浏览器通知。");
+    /* 同一台设备重复点「绑定本机」会拿到同一个 endpoint，服务端按 endpoint 去重，
+       所以这里直接复用已有订阅，避免每次都新建。 */
+    const existing = await reg.pushManager.getSubscription();
+    const sub = existing || await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    });
+    const cfg = await api("/api/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(sub.toJSON()),
+    });
+    pushLoadedConfig = cfg;
+    if ($("pushType")) $("pushType").value = "webpush";
+    renderPushForm(cfg);
+    toast("已绑定这台设备");
+  } catch (err) {
+    if (hint) hint.textContent = `绑定失败：${err.message || "未知原因"}`;
+    toast(err.message || "绑定失败");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function unbindWebPush(id, button) {
+  if (!confirm("解除后这台设备就收不到每日提醒了，确定解除吗？")) return;
+  if (button) button.disabled = true;
+  try {
+    const res = await api("/api/push/unsubscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ id }),
+    });
+    pushLoadedConfig = res.config || pushLoadedConfig;
+    renderPushForm(pushLoadedConfig);
+    toast(res.removed ? "已解除绑定" : "这台设备已经不在了");
+  } catch (err) {
+    toast(err.message || "解除失败");
+    if (button) button.disabled = false;
+  }
 }
 
 function renderPushStatus(cfg) {
@@ -13497,6 +13650,8 @@ if ($("pushModal")) {
   $("pushStyle")?.addEventListener("change", refreshPushStyleHint);
   $("pushSaveBtn").onclick = () => { savePushSettings(); };
   $("pushTestBtn").onclick = () => { testPushSettings(); };
+  /* 「绑定本机」必须由用户点击触发 —— 浏览器只在用户手势里允许申请通知权限。 */
+  $("pushBindBtn").onclick = () => { bindWebPush(); };
 }
 if ($("conflictModal")) {
   $("conflictCloseBtn").onclick = keepLocalConflictDraft;
