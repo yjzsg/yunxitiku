@@ -11691,13 +11691,23 @@ function refreshExamHistoryCard() {
    「按现在的设置，下次会这样发」走 /api/push/preview：服务端把**它自己算的**
    到期数 / 连续天数 / 距考试天数摊开显示。这是 REVIEW_INTERVAL_DAYS 双份实现
    （app.js:180 与 PushDigestReader）的探针 —— 一旦漂移，这里和错题本的数字当场对不上。 */
+/* 每个渠道都写清楚「去哪儿拿、拿什么、填在哪」，因为这一步是绑定时唯一会卡住的地方。
+   结构：lead 一句话说明落地位置和额度；steps 具体操作；link 一键打开获取页；
+   hint 是地址输入框下面那行短提示（保持简短，长内容放 steps）。 */
 const PUSH_TYPE_INFO = {
   /* 两个「直接进个人微信」的渠道放最前面 —— 这是绝大多数人想要的「推送到微信」。
      它们只需要一串 key，接口地址固定，所以地址留空即可（后端会补默认值）。 */
   serverchan: {
     label: "接口地址（可留空）",
     placeholder: "https://sctapi.ftqq.com",
-    hint: "在 sct.ftqq.com 用 GitHub 登录，把 SendKey 填到下面的令牌里。免费版每天 5 条，一天一条够用；地址留空就走官方接口。",
+    hint: "地址留空就走官方接口，不用改。",
+    lead: "消息直接发到你的微信。免费版每天 5 条 —— 一天只推一条，够用。",
+    steps: [
+      "打开 sct.ftqq.com，用 GitHub 账号登录（没有 GitHub 就现注册一个，免费）。",
+      "进入「SendKey」页面，复制那一串（以 SCT 开头）。",
+      "粘到下面「SendKey」，再点「发送测试」，微信收到就说明绑好了。",
+    ],
+    link: { href: "https://sct.ftqq.com", text: "打开 Server酱拿 SendKey" },
     token: true,
     tokenLabel: "SendKey",
     template: false,
@@ -11705,7 +11715,14 @@ const PUSH_TYPE_INFO = {
   pushplus: {
     label: "接口地址（可留空）",
     placeholder: "https://www.pushplus.plus/send",
-    hint: "在 pushplus.plus 微信扫码登录，把 token 填到下面的令牌里。消息直接进微信；地址留空就走官方接口。",
+    hint: "地址留空就走官方接口，不用改。",
+    lead: "消息直接发到你的微信。免费版每天 200 条，最不容易被额度卡住。",
+    steps: [
+      "打开 pushplus.plus，用微信扫码登录。",
+      "进「一对一推送」，复制那串 32 位的 token。",
+      "粘到下面「token」，点「发送测试」。第一次要在公众号里点一下「启用」才会收到。",
+    ],
+    link: { href: "https://www.pushplus.plus", text: "打开 PushPlus 拿 token" },
     token: true,
     tokenLabel: "token",
     template: false,
@@ -11713,34 +11730,98 @@ const PUSH_TYPE_INFO = {
   wechat: {
     label: "群机器人地址",
     placeholder: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…",
-    hint: "企业微信群里「添加群机器人」后复制它的 Webhook 地址。注意：消息发到企业微信群，不是个人微信。",
+    hint: "整条 Webhook 地址都粘进来，别只粘 key。",
+    lead: "发到企业微信的群里，不是个人微信 —— 群成员都能看到。",
+    steps: [
+      "在企业微信群里点右上角「…」→「添加群机器人」→ 新建一个。",
+      "复制它给的 Webhook 地址，形如 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx。",
+      "整条粘到下面，点「发送测试」，群里出现消息就成。",
+    ],
     token: false,
     template: false,
   },
   bark: {
     label: "推送地址",
     placeholder: "https://api.day.app/你的设备Key",
-    hint: "在 iPhone 的 Bark App 里复制「服务器地址 + Key」这一整条地址。",
+    hint: "Bark App 首页复制的那一整条地址，含 Key 部分。",
+    lead: "iPhone 上装 Bark，通知走苹果推送通道，最快。",
+    steps: [
+      "在 App Store 搜 Bark 装上，打开。",
+      "首页会显示一条 https://api.day.app/xxxxx 的地址，点右边的复制。",
+      "粘到下面即可，不需要令牌。用自建服务器就把 api.day.app 换成自己的域名。",
+    ],
     token: false,
     template: false,
   },
   ntfy: {
     label: "推送地址",
     placeholder: "https://ntfy.sh/你的主题名",
-    hint: "填到主题名那一级；自建服务器换成自己的域名。只有私有主题才需要下面的令牌。",
+    hint: "地址要写到主题名这一级，例如 https://ntfy.sh/yunxi-8f3k2。",
+    lead: "安卓装 ntfy 订阅一个主题名，消息推到那个主题；也能自建服务器。",
+    steps: [
+      "手机装 ntfy App（应用商店或 F-Droid 都有）。",
+      "想一个别人猜不到的主题名，比如 yunxi-8f3k2 —— 公共服务器上同名主题谁都能看到。",
+      "在 App 里订阅这个主题名；这里的地址填 https://ntfy.sh/主题名。",
+      "自建服务器就把 https://ntfy.sh 换成自己的域名。服务器要求登录时，把它的访问令牌填到下面的令牌里（按 Bearer 发）。",
+    ],
     token: true,
     tokenLabel: "访问令牌",
     template: false,
   },
   webhook: {
     label: "接口地址",
-    placeholder: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…",
-    hint: "企业微信 / 飞书 / Server酱 / PushDeer 都能用。模板里的 {{title}} {{body}} {{url}} 会被替换（已做 JSON 转义）。",
+    placeholder: "https://你的服务/push",
+    hint: "一个能收 POST 的地址就行。",
+    lead: "往你自己的地址 POST 一段 JSON。飞书、钉钉、自建服务都能接。",
+    steps: [
+      "填一个能收 POST 的地址（http 或 https）。",
+      "请求体模板里可以写 {{title}} {{body}} {{url}}，发送时会被替换成实际内容（已做 JSON 转义）。",
+      "模板留空 = 发 {\"title\":…,\"body\":…,\"url\":…}。",
+      "超时 10 秒；返回非 2xx 会记成失败并在设置页显示原因。",
+    ],
     token: false,
     template: true,
   },
 };
 
+/* 「内容风格」的说明跟着选项走 —— 三个选项的差别不看解释很难选对。 */
+const PUSH_STYLE_HINT = {
+  milestone: "没练的日子到点催一条；练过的日子只在连续 7/30/60 天、或当天全对时才推。",
+  remind: "只在没练的日子推。练了完全不打扰。",
+  digest: "每天都推一条今日成果（做几题、正确率、连续天数）。",
+};
+
+function renderPushGuide(info) {
+  const box = $("pushGuide");
+  if (!box) return;
+  box.replaceChildren();
+  if (info.lead) {
+    const p = document.createElement("p");
+    p.className = "push-guide-lead";
+    p.textContent = info.lead;
+    box.appendChild(p);
+  }
+  if (info.steps && info.steps.length) {
+    const ol = document.createElement("ol");
+    ol.className = "push-guide-steps";
+    for (const step of info.steps) {
+      const li = document.createElement("li");
+      li.textContent = step;
+      ol.appendChild(li);
+    }
+    box.appendChild(ol);
+  }
+  if (info.link) {
+    const a = document.createElement("a");
+    a.className = "push-guide-link";
+    a.href = info.link.href;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = info.link.text;
+    box.appendChild(a);
+  }
+  box.classList.toggle("hidden", box.childElementCount === 0);
+}
 let pushLoadedConfig = null;
 /* 令牌是「打码回传」的：输入框留空 = 不改，所以必须记住用户有没有真的动过它，
    否则每次保存都会把已经设好的令牌抹掉。 */
@@ -11757,6 +11838,12 @@ function refreshPushTypeFields() {
   setText("pushTokenLabel", info.tokenLabel || "访问令牌");
   $("pushTokenRow")?.classList.toggle("hidden", !info.token);
   $("pushTemplateRow")?.classList.toggle("hidden", !info.template);
+  renderPushGuide(info);
+}
+
+function refreshPushStyleHint() {
+  const style = $("pushStyle")?.value || "milestone";
+  setText("pushStyleHint", PUSH_STYLE_HINT[style] || "");
 }
 
 function renderPushStatus(cfg) {
@@ -11788,6 +11875,7 @@ function renderPushForm(cfg) {
   if ($("pushStyle")) $("pushStyle").value = c.style || "milestone";
   pushTokenDirty = false;
   refreshPushTypeFields();
+  refreshPushStyleHint();
   renderPushStatus(c);
 }
 
@@ -13320,6 +13408,7 @@ if ($("pushModal")) {
   for (const id of ["pushStyle", "pushBaseUrl"]) {
     $(id)?.addEventListener("change", schedulePushPreview);
   }
+  $("pushStyle")?.addEventListener("change", refreshPushStyleHint);
   $("pushSaveBtn").onclick = () => { savePushSettings(); };
   $("pushTestBtn").onclick = () => { testPushSettings(); };
 }

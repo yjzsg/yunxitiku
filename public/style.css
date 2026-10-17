@@ -14852,3 +14852,44 @@ textarea,
     padding: 16px;
   }
 }
+
+/* 渠道绑定说明：用户卡住的地方全在「去哪儿拿这串 key」，所以给成编号步骤而不是一句提示。
+   放在渠道下拉和地址输入框之间 —— 先看怎么拿，再填。 */
+.push-guide {
+  margin: -2px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+.push-guide.hidden { display: none; }
+.push-guide-lead {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-weight: 600;
+}
+.push-guide-steps {
+  margin: 0;
+  padding-left: 18px;
+}
+.push-guide-steps li { margin: 2px 0; }
+.push-guide-steps li::marker { color: var(--text-3); font-weight: 700; }
+.push-guide-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--primary-ink);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.push-guide-link:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+/* 触屏上链接也是点击目标，抬到 44px 命中区。 */
+@media (pointer: coarse) {
+  .push-guide-link { min-height: 44px; display: inline-flex; align-items: center; }
+}

@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261017-push3"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261017-push4"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -421,6 +421,7 @@
         <div class="push-row">
           <span class="push-label">提醒时间</span>
           <input id="pushTime" type="time" value="20:00" aria-label="提醒时间">
+          <small class="push-hint">到点还没练才推。超过 6 小时没发出去（比如设备关机）就跳过这一天，不补发。</small>
         </div>
 
         <div class="push-row">
@@ -434,6 +435,8 @@
             <option value="webhook">自定义 webhook</option>
           </select>
         </div>
+
+        <div id="pushGuide" class="push-guide"></div>
 
         <div class="push-row">
           <span class="push-label" id="pushUrlLabel">推送地址</span>
@@ -464,6 +467,7 @@
             <option value="remind">只催没练</option>
             <option value="digest">每天都报今日成果</option>
           </select>
+          <small id="pushStyleHint" class="push-hint"></small>
         </div>
 
         <div class="push-preview">
@@ -483,7 +487,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261017-push3"></script>
+  <script src="/app.js?v=20261017-push4"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     // `?v=` 跟着 public/sw.js 的 CACHE 版本走（v2 = 白名单缓存 + 不再缓存 /assets/）：
