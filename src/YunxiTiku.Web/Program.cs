@@ -560,6 +560,104 @@ app.MapPost("/api/user/save", async (HttpContext context, string? user, UserData
     }
 });
 
+app.MapPost("/api/user/import", async (HttpContext context, string? user, UserDataStore userData) =>
+{
+    /* 恢复用户自己导出的备份。
+       以前「导出我的数据」导出的 JSON 没有任何回灌路径 —— 全站文件输入只收 .zip（管理员用），
+       用户以为存了备份，真出事时恢复不了。这个端点补上另一半。
+
+       与 /api/user/save 的三点不同：
+         1. 接受导出包 {exportedAt,user,revision,data}，剥掉外层只落 data（也接受裸 data 对象）；
+         2. 默认**不覆盖**已有数据 —— 必须显式带 force=1 才覆盖，否则 409。
+            覆盖会丢掉「导出之后新做的题」，这是不可逆的，不能靠一个默认真值决定；
+         3. 覆盖时仍然走 If-Match，前端拿的是导入前的 revision，与页面上的编辑并发安全。 */
+    var request = context.Request;
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    if (request.ContentLength > 32L * 1024 * 1024)
+    {
+        return Results.Json(new { ok = false, error = "备份文件超过 32MB" }, statusCode: 400);
+    }
+    using var reader = new StreamReader(request.Body, Encoding.UTF8);
+    var body = await reader.ReadToEndAsync();
+    if (Encoding.UTF8.GetByteCount(body) > 32 * 1024 * 1024)
+    {
+        return Results.Json(new { ok = false, error = "备份文件超过 32MB" }, statusCode: 400);
+    }
+    if (string.IsNullOrWhiteSpace(body)) return Results.Json(new { ok = false, error = "备份文件是空的" }, statusCode: 400);
+
+    JsonDocument doc;
+    try { doc = JsonDocument.Parse(body); }
+    catch (JsonException ex) { return Results.Json(new { ok = false, error = "备份文件不是有效 JSON：" + ex.Message }, statusCode: 400); }
+    using (doc)
+    {
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return Results.Json(new { ok = false, error = "备份文件必须是 JSON 对象" }, statusCode: 400);
+
+        JsonElement data;
+        string exportedFrom = "";
+        if (root.TryGetProperty("data", out var inner) && inner.ValueKind == JsonValueKind.Object)
+        {
+            data = inner;
+            if (root.TryGetProperty("user", out var fromUser) && fromUser.ValueKind == JsonValueKind.String)
+            {
+                exportedFrom = (fromUser.GetString() ?? "").Trim();
+            }
+        }
+        else
+        {
+            // 裸 data：管理员 zip 里就是这个形状，也允许直接贴。
+            data = root;
+        }
+
+        /* 拦一次明显贴错的东西：导出包里一定有 courses（哪怕为空对象）。
+           没有就说明这是别的 JSON，落盘只会把用户进度换成垃圾。 */
+        if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("courses", out _))
+        {
+            return Results.Json(new { ok = false, error = "这不是云习题库的备份文件（缺少 courses 字段）" }, statusCode: 400);
+        }
+
+        var force = (Convert.ToString(request.Query["force"], CultureInfo.InvariantCulture) ?? "").Trim() is "1" or "true" or "True";
+        string expectedRevision = "";
+        if (request.Headers.TryGetValue("If-Match", out var ifMatchValues))
+        {
+            var tag = ifMatchValues.ToString().Trim();
+            if (tag != "*") expectedRevision = tag.Trim('"').Trim();
+        }
+
+        // 先看现有数据：没有就直接写；有就要求 force。
+        /* ⚠️ 「有没有数据」不能用类型判断：首次用户 LoadAsync 回的是空 Dictionary，
+           而落盘读回来的可能是 JsonObject / JsonElement / Dictionary，形状不固定。
+           统一按「JSON 对象里有没有键」判，另外把 revision 为空也算作没有数据。 */
+        var existing = await userData.LoadAsync(clean);
+        var hasExisting = existing.Revision.Length > 0 && HasAnyProperty(existing.Data);
+        if (hasExisting && !force)
+        {
+            return Results.Json(new
+            {
+                ok = false,
+                code = "user_data_exists",
+                error = exportedFrom.Length > 0 && !exportedFrom.Equals(clean, StringComparison.OrdinalIgnoreCase)
+                    ? $"这个备份来自账号「{exportedFrom}」，导入会把「{clean}」现有的进度整体替换掉"
+                    : "导入会把这个账号现有的进度整体替换掉",
+                revision = existing.Revision,
+                exportedFrom,
+            }, statusCode: 409);
+        }
+
+        try
+        {
+            var revision = await userData.SaveAsync(clean, data.GetRawText(), expectedRevision, expectEmpty: false);
+            return Results.Json(new { ok = true, user = clean, revision, importedFrom = exportedFrom });
+        }
+        catch (UserDataConflictException)
+        {
+            return Results.Json(new { ok = false, error = "用户数据已在其他页面更新，请刷新后重试", code = "user_data_conflict" }, statusCode: 409);
+        }
+    }
+});
+
 app.MapPost("/api/admin/user-action", async (HttpRequest request, string? user, AuthStore auth, SessionStore sessionStore, UserDataStore userData) =>
 {
     var admin = CleanUserName(user);
@@ -936,24 +1034,9 @@ app.MapGet("/api/chapter-map", (ChapterMapStore chapterMap) =>
     return Results.Json(new { ok = true, generatedAt = map.GeneratedAt, chapters = map.Chapters, map = map.Map });
 });
 
-app.MapGet("/api/admin/chapter-map/status", (HttpContext context, string? user, ChapterMapStore chapterMap) =>
-{
-    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
-    return Results.Json(chapterMap.Status());
-});
-
-app.MapPost("/api/admin/chapter-map/rebuild", (HttpContext context, string? user, ChapterMapStore chapterMap) =>
-{
-    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
-    try
-    {
-        return Results.Json(chapterMap.Rebuild());
-    }
-    catch (Exception ex)
-    {
-        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
-    }
-});
+/* 这里原有 /api/admin/chapter-map/status 与 /rebuild 两个端点，前端从未调用过：
+   章节映射的重建由启动自检、换题库、保存题目三处内部触发，管理员没有手动重建的需要。
+   已删除（保留 ChapterMapStore 内部实现）。 */
 
 app.MapGet("/api/admin/data/download", (HttpContext context, string? user, string? type) =>
 {
@@ -1013,6 +1096,55 @@ app.MapPost("/api/admin/data/upload", async (HttpRequest request, string? user, 
     finally
     {
         TryDeleteFile(tempFile);
+    }
+});
+
+/* ── 备份列表 / 下载 / 回滚 ────────────────────────────────────────────────
+   背景：「自动备份」这件事以前只做了一半 —— 换题库、导入用户数据、删题目这些
+   破坏性动作都会在 `data/_backups` 或 `userdata/_backups` 里留一份，但界面上只有
+   「N 个备份」这个数字，既看不到是什么时候的、也拿不回来。出事时用户只能看着数字
+   干瞪眼（提交记录里用户原话：「自动备份」写着但无恢复入口 = 只是在制造自己的备份）。
+
+   这里补上三段：列 → 下载（先自己存一份）→ 回滚。
+   回滚**复用** ImportUserData / ImportBank 的提交逻辑，因此自动继承它们的
+   「先把当前状态再备份一次 + 两阶段可撤销」。 */
+app.MapGet("/api/admin/backups", (HttpContext context, AppPaths paths) =>
+{
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        return Results.Json(new { ok = true, items = AdminDataTransfer.ListBackups(paths) });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
+    }
+});
+
+app.MapGet("/api/admin/backups/download", (HttpContext context, AppPaths paths, string name) =>
+{
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    var file = AdminDataTransfer.ResolveBackup(paths, name);
+    if (file is null) return Results.Json(new { ok = false, error = "备份不存在或已过保留期清理" }, statusCode: 404);
+    // 直接给文件流：备份可能有几百 MB，不能 ReadAllBytes 进内存。
+    return Results.File(file.Value.Path, "application/octet-stream", file.Value.DownloadName);
+});
+
+app.MapPost("/api/admin/backups/restore", (HttpContext context, AppPaths paths, AuthStore auth, UserDataStore userData, ChapterMapStore chapterMap) =>
+{
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    try
+    {
+        var name = (context.Request.Query["name"].ToString() ?? "").Trim();
+        if (name.Length == 0) return Results.Json(new { ok = false, error = "缺少 name 参数" }, statusCode: 400);
+        var result = AdminDataTransfer.RestoreBackup(paths, auth, userData, name);
+        // 题库换了，章节映射必须重建，否则学员端会拿旧映射配新库
+        chapterMap.TryRebuildQuietly("回滚备份");
+        return result;
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = SafeError(ex) }, statusCode: 400);
     }
 });
 
@@ -1348,14 +1480,9 @@ app.MapGet("/api/push/preview", async (HttpContext context, PushConfigStore stor
     });
 });
 
-/* 管理员手动跑一轮（跳过时间判断），用来验证调度本身。
-   仍然遵守 enabled —— 给关掉提醒的人发消息不叫「验证」。 */
-app.MapPost("/api/push/run", async (HttpContext context, PushScheduler scheduler) =>
-{
-    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
-    var report = await scheduler.RunOnceAsync(CancellationToken.None, ignoreTime: true, onlyUser: null);
-    return Results.Json(new { ok = true, sent = report.Sent, skipped = report.Skipped, failed = report.Failed, details = report.Details });
-});
+/* 这里原有 POST /api/push/run（管理员强制跑一轮）。删除理由：/api/push/test 已经能
+   验证「能不能发出去」，而「为什么今天没发」看 docker logs 里调度器那几行更直接。
+   留着它多一个能群发全站提醒的接口，收益不抵风险。 */
 
 // 未知的 /api/* 要回 404 JSON，而不是掉进下面的 SPA 回退：
 // 回退会给出 200 + HTML，容易被误判成「端点还在」。
@@ -1401,6 +1528,30 @@ internal static string ReadString(JsonElement element, string name)
            && value.ValueKind == JsonValueKind.String
         ? (value.GetString() ?? "")
         : "";
+}
+
+/// <summary>
+/// 反序列化出来的用户数据里有没有任何字段。
+/// 形状不固定（首次用户是空 Dictionary，落盘读回来可能是 JsonObject / JsonElement），
+/// 所以只能按「各自的对象模型数一下键」来判断，不能靠类型分支。
+/// </summary>
+internal static bool HasAnyProperty(object? data)
+{
+    switch (data)
+    {
+        case null:
+            return false;
+        case System.Text.Json.Nodes.JsonObject node:
+            return node.Count > 0;
+        case JsonElement element:
+            return element.ValueKind == JsonValueKind.Object && element.EnumerateObject().Any();
+        case System.Collections.IDictionary dict:
+            return dict.Count > 0;
+        case System.Collections.IEnumerable seq:
+            return seq.Cast<object?>().Any();
+        default:
+            return true;
+    }
 }
 
 internal static string GetBodyString(Dictionary<string, object?> body, string name)
@@ -2647,6 +2798,133 @@ static class BackupRetention
 
 static class AdminDataTransfer
 {
+    /// <summary>
+    /// 两个备份根的条目清单，新的在前。
+    ///
+    /// 形状差异很大，所以各自归类后再并成一条流：
+    ///   - `userdata/_backups/*.zip`  —— 用户数据整包（ImportUserData 每次导入前自动留）
+    ///   - `data/_backups/<目录>`     —— 题库快照（换库、删题、拉课都会留一个目录）
+    /// 目录类备份只有名字能看出做了什么，所以把名字里的类型前缀拆出来当 kind 显示。
+    /// </summary>
+    public static List<object> ListBackups(AppPaths paths)
+    {
+        var items = new List<(DateTime Updated, object Item)>();
+
+        void Collect(string root, string kind, bool isDirectory)
+        {
+            if (!Directory.Exists(root)) return;
+            foreach (var path in Directory.EnumerateFileSystemEntries(root))
+            {
+                var info = isDirectory ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
+                if (isDirectory != info is DirectoryInfo) continue;   // 只取自己那一种
+                var name = info.Name;
+                // Uploads 等临时目录不算备份
+                if (name.StartsWith(".", StringComparison.Ordinal)) continue;
+                items.Add((info.LastWriteTime, new
+                {
+                    name,
+                    kind,
+                    isDirectory,
+                    updatedAt = info.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                    size = isDirectory ? DirectorySize(path) : ((FileInfo)info).Length,
+                    // 能否回滚：zip 式的用户数据可以；题库目录要认得结构才行，交给 restore 端点判
+                    restorable = kind is "userdata" or "bank"
+                }));
+            }
+        }
+
+        Collect(Path.Combine(paths.UserDataRoot, "_backups"), "userdata", false);
+        var bankRoot = Path.Combine(Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot, "_backups");
+        Collect(bankRoot, "bank", true);
+
+        return items.OrderByDescending(entry => entry.Updated).Select(entry => entry.Item).ToList();
+    }
+
+    /// <summary>
+    /// 把前端传来的备份名解析成真实文件路径 —— **必须**拒绝一切路径分隔符。
+    /// 否则 `name=../../etc/passwd` 就能把服务器上的任意文件读下来。
+    /// 只允许 `_backups` 根目录下的一层名字，且必须是之前列出来的那种。
+    /// </summary>
+    public static (string Path, string DownloadName)? ResolveBackup(AppPaths paths, string name)
+    {
+        var clean = (name ?? "").Trim();
+        if (clean.Length == 0) return null;
+        if (clean.Contains('/') || clean.Contains('\\') || clean.Contains("..")) return null;
+        if (clean.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+
+        var userZip = Path.Combine(paths.UserDataRoot, "_backups", clean);
+        if (clean.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) && File.Exists(userZip))
+            return (userZip, clean);
+
+        var bankRoot = Path.Combine(Directory.GetParent(paths.SqlitePath)?.FullName ?? paths.BaseRoot, "_backups");
+        var bankDir = Path.Combine(bankRoot, clean);
+        if (Directory.Exists(bankDir)) return (bankDir, clean);
+
+        return null;
+    }
+
+    private static long DirectorySize(string path)
+    {
+        try
+        {
+            return new DirectoryInfo(path).EnumerateFiles("*", SearchOption.AllDirectories).Sum(file => file.Length);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// 从一个已有备份回滚。两类备份走不同通道，但**都必须先给当前状态再留一份**——
+    /// 用户点回滚多半是刚发现数据不对，这时候如果回滚本身再出错就是二次事故。
+    ///
+    ///   userdata/*.zip  → 拷贝到临时 .zip 后丢给 ImportUserData（它会自己再备份当前状态，
+    ///                     并把「覆盖/删除现有文件」做成两阶段可撤销）
+    ///   bank/&lt;目录&gt;    → 目录里就是 question-bank.db + assets，交给 PublishBank，
+    ///                     健康检查不过会自动撤回到原题库
+    /// </summary>
+    public static IResult RestoreBackup(AppPaths paths, AuthStore auth, UserDataStore userData, string name)
+    {
+        var resolved = ResolveBackup(paths, name);
+        if (resolved is null) return Results.Json(new { ok = false, error = "备份不存在或已过保留期清理" }, statusCode: 404);
+        var (source, downloadName) = resolved.Value;
+
+        if (File.Exists(source) && source.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            var temp = Path.Combine(Path.GetTempPath(), $"yunxi-restore-{Guid.NewGuid():N}.zip");
+            try
+            {
+                File.Copy(source, temp, true);
+                var result = ImportUserData(paths, auth, userData, temp, downloadName);
+                return Results.Json(result);
+            }
+            finally
+            {
+                TryDeleteFile(temp);
+            }
+        }
+
+        if (!Directory.Exists(source)) return Results.Json(new { ok = false, error = "备份不存在" }, statusCode: 404);
+        var stagedDb = FindQuestionDb(source)
+                       ?? throw new InvalidOperationException("这个备份目录里没有 question-bank.db，无法回滚题库");
+        // 备份目录里的 assets 可能直接就是 assets/，也可能和 db 同级，统一按 FindAssetsDirectory 找
+        var stagedAssets = FindAssetsDirectory(source, stagedDb);
+        if (stagedAssets is null || !Directory.Exists(stagedAssets))
+            throw new InvalidOperationException("这个备份目录里没有 assets，无法回滚题库（图片会全丢）");
+
+        var publishName = "restore-" + TimestampUnique();
+        BankPublish.PublishBank(paths, publishName, stagedDb, stagedAssets);
+        return Results.Json(new
+        {
+            ok = true,
+            type = "bank",
+            message = "题库已回滚到该备份",
+            restored = name,
+            status = GetStatus(paths)
+        });
+    }
+
     /// <summary>
     /// 导入之后的广告清洗 —— 整包上传（<see cref="ImportBank"/>）与单课导入
     /// （<see cref="ImportCourseBank"/>）都走这里。
@@ -6806,8 +7084,16 @@ sealed class PushConfigStore
         /* 默认给 webpush：新用户最省事的渠道（不用装 App、不用第三方账号）。
            已有配置里写了具体 type 的照旧，不受影响。
            ⚠️ "bark" 必须**显式列出**：它原来是兜底值，改成 webpush 兜底之后，
-           漏掉它会让选 Bark 的人静默变成浏览器通知（校验还会报「先绑定设备」）。 */
-        return value is "bark" or "ntfy" or "webhook" or "wechat" or "serverchan" or "pushplus" or "webpush" ? value : "webpush";
+           漏掉它会让选 Bark 的人静默变成浏览器通知（校验还会报「先绑定设备」）。
+
+           ⚠️ ntfy / serverchan / wechat 仍在白名单里：界面上这三个已经并入
+           bark / pushplus / webhook（三者功能完全重复，只会让选择变难），
+           但**老配置里存着这些值**。不认它们 = 用户某次更新后保存一次设置，
+           渠道就被悄悄改成 webpush，每天的提醒从此发不出去且没人报错。
+           收界面选项和收后端能力是两件事，这里只做前者。 */
+        return value is "bark" or "ntfy" or "webhook" or "wechat" or "serverchan" or "pushplus" or "webpush"
+            ? value
+            : "webpush";
     }
 
     private static string NormalizeStyle(string? style)
@@ -7855,7 +8141,7 @@ sealed class PushScheduler : BackgroundService
         {
             try
             {
-                await RunOnceAsync(stoppingToken, ignoreTime: false, onlyUser: null);
+                await RunOnceAsync(stoppingToken);
             }
             catch (OperationCanceledException)
             {
@@ -7878,10 +8164,10 @@ sealed class PushScheduler : BackgroundService
     }
 
     /// <summary>
-    /// 跑一轮。<paramref name="ignoreTime"/> = 管理员手动触发，跳过「到点 / 宽限期 / 退避」，
-    /// 但仍然遵守开关（给关掉提醒的人发消息不叫验证）。
+    /// 跑一轮。只有调度器调用 —— 之前还有个「管理员手动触发」的入口，连同
+    /// ignoreTime / onlyUser 两个参数一起删了（见 /api/push/run 处的说明）。
     /// </summary>
-    public async Task<PushRunReport> RunOnceAsync(CancellationToken ct, bool ignoreTime, string? onlyUser)
+    public async Task<PushRunReport> RunOnceAsync(CancellationToken ct)
     {
         var report = new PushRunReport();
         await _gate.WaitAsync(ct);
@@ -7893,15 +8179,11 @@ sealed class PushScheduler : BackgroundService
 
             foreach (var (user, cfg) in _store.ReadAll())
             {
-                if (onlyUser is not null && !user.Equals(CleanUserName(onlyUser), StringComparison.OrdinalIgnoreCase)) continue;
                 if (!cfg.Enabled) { report.Skipped++; continue; }
 
-                /* 「今天已经发过」必须**无论是否手动触发**都判。
-                   ignoreTime 的语义只是「跳过到点/宽限期/退避」，不是「允许重复发」——
-                   否则管理员点两下「立即运行」就给所有人推两条一样的。 */
+                // 今天已经发过就跳过 —— 调度器每 30 秒来一次，这里是唯一的防重发闸门。
                 if (cfg.LastSentDate == todayKey) { report.Skipped++; continue; }
 
-                if (!ignoreTime)
                 {
                     if (!TryParseTime(cfg.Time, out var hour, out var minute)) { report.Skipped++; continue; }
                     var target = today.AddHours(hour).AddMinutes(minute);

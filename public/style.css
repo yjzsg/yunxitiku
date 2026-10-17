@@ -2833,8 +2833,17 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   white-space: nowrap;
 }
 
+/* 训练入口从 4 张卡收成 3 张（今日训练 / 专项练习 / 错题本）：
+   2 列会排成 2+1，最后一张孤零零占半行；3 张卡就该三列排满。
+   ≤1100px 落到 2 列（3 张 → 2+1 但宽度够，可读），≤760px 单列见下方断点。 */
 .training-card-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1100px) {
+  .training-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .training-card {
@@ -3293,6 +3302,12 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   box-shadow: var(--shadow-sm);
 }
 
+/* 备份卡片横跨整行。上面三张是「一份数据的概况」，一行三个正好；
+   备份是列表，塞进 360px 的列里文件名和按钮会互相挤。 */
+.admin-backup-card {
+  grid-column: 1 / -1;
+}
+
 .admin-data-card-head {
   display: flex;
   align-items: flex-start;
@@ -3378,6 +3393,89 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
 .admin-data-card small {
   color: var(--muted);
   line-height: 1.6;
+}
+
+/* ── 备份列表 ──────────────────────────────────────────────────────────────
+   一行一份：左边名字 + 元信息，右边下载/回滚。
+   用 grid 而不是 flex 让长文件名先压缩、按钮不被挤走（备份名带时间戳，很长）。 */
+.admin-backup-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-backup-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 9px 11px;
+}
+
+.admin-backup-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.admin-backup-main b {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-backup-main span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-backup-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.admin-backup-actions button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.admin-backup-restore {
+  border-color: var(--danger, #b4443b);
+  color: var(--danger, #b4443b);
+}
+
+.admin-backup-empty {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* 触屏：两个按钮都要够得着 */
+@media (pointer: coarse) {
+  .admin-backup-actions button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 560px) {
+  .admin-backup-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-backup-actions button {
+    flex: 1;
+  }
 }
 
 .bank-editor-panel {
@@ -14978,4 +15076,78 @@ textarea,
 @media (pointer: coarse) {
   .push-bind-btn,
   .push-device-item button { min-height: 44px; }
+}
+/* ── 专项练习二级选择 ──────────────────────────────────────────────────
+   「同类题型 / 考前冲刺」两张卡收成一张「专项练习」，点开在这里二选一。
+   两个选项是**卡片式按钮**而不是下拉或原生 confirm：需要同时显示题量构成
+   （「24 题 · 同章同型」），原生 confirm 展示不了，下拉又要先展开才知道选哪个。
+   刻意不写 !important，也不复用 .training-card（那张卡是 grid + space-between，
+   高度会跟着描述行数变化，两个选项对不齐）。 */
+.special-pick-panel {
+  width: min(520px, 100%);
+}
+
+.special-pick-list {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 4px;
+}
+
+.special-pick {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  text-align: left;
+  padding: 14px 16px;
+  min-height: var(--control-h);
+  border: 1px solid var(--border-2);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.special-pick b {
+  font-size: 15px;
+  color: var(--primary-ink);
+}
+
+.special-pick em {
+  font-style: normal;
+  font-size: 13px;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.special-pick small {
+  font-size: 12.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+@media (hover: hover) {
+  .special-pick:not(:disabled):hover {
+    border-color: var(--primary);
+    background: var(--surface-3);
+  }
+}
+
+.special-pick:not(:disabled):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* 没题可练时置灰但仍**留在原位**：删掉它会让用户以为这个练法不存在了。
+   与 .training-card button:disabled 同一套观感。 */
+.special-pick.is-off {
+  opacity: 0.55;
+  cursor: default;
+}
+
+@media (pointer: coarse) {
+  .special-pick {
+    min-height: 44px;
+    padding: 16px;
+  }
 }

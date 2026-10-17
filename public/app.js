@@ -104,6 +104,9 @@ const state = {
   // current, total, detail, percent, queued, unknown, elapsedSeconds, done, ok, error, finishedAtLocal}
   adminBankPulls: {},
   adminDataStatus: null,
+  adminBackups: null,
+  adminBackupsError: "",
+  adminBackupBusy: "",
   adminCleanAdsResult: "",
   adminEditorCourseId: 0,
   adminEditorChapterId: 0,
@@ -6579,11 +6582,23 @@ function renderTraining() {
   const smartPreview = previewPracticePlan("smart", courseStore, previewContext);
   const similarPreview = previewPracticePlan("similar", courseStore, previewContext);
   const sprintPreview = previewPracticePlan("sprint", courseStore, previewContext);
-  /* 「今日错题复习」卡的可读原因：0 道可复习时不再只是一个死按钮 + 点了才弹的 toast，
-     而是把原因直接写在卡上（和「今日计划」按钮的置灰风格保持一致）。 */
-  const duePreview = dueLeft
-    ? (dueLeft === dueTotal ? `${dueLeft} 道到期` : `${dueLeft} 道可复习 · 共 ${dueTotal} 道到期`)
-    : (dueTotal ? `今天到期的 ${dueTotal} 道都练完了` : "今天没有到期错题");
+  /* 「专项练习」卡只有一个入口，两种练法的描述写进弹窗，卡上的 meta 就要说明
+     「点进去还能选」，否则用户会以为这张卡就是练同章同型。
+     两种都没题时，把两边的「没有」都说清（这里显示的是不可点的原因）。 */
+  const specialAny = previewCounts.similar > 0 || previewCounts.sprint > 0;
+  const specialPreview = specialAny
+    ? (previewCounts.similar > 0 && previewCounts.sprint > 0
+      ? `${similarPreview} / ${sprintPreview} · 二选一`
+      : `${previewCounts.similar > 0 ? similarPreview : sprintPreview} · 仅一种可选`)
+    : "当前科目暂无可用题目";
+  /* 「错题本」卡的 meta：错题总量 + 今天到期几道。
+     原来「今日错题复习」是独立一张卡（显示到期数），现在并进错题本 ——
+     到期数仍要出现在卡片上，否则用户看不出「今天有没有该复习的」，
+     还得点进去才知道。 */
+  const wrongTotalForCard = getWrongRecordsForCurrentCourse(courseStore).length;
+  const wrongPreview = wrongTotalForCard
+    ? `共 ${wrongTotalForCard} 道 · ${dueTotal ? `${dueTotal} 道今天到期` : "今天没有到期"}`
+    : "还没有错题";
   /* 「继续上次」和 hero 共用同一个判据（resumableTrainingSession），
      所以同屏不会再出现两个都能点、却各指一条题单的「继续」。
      hero 的文案据实而写：有可续的题单就说「继续」（且点下去续的就是这条），
@@ -6655,19 +6670,12 @@ function renderTraining() {
         <div><b>${Math.max(0, items.length - stats.done)}</b><span>未做题</span></div>
       </div>
       <div class="training-card-grid">
-        ${renderTrainingCard("smart", "今日强化", "错题、薄弱章节和未做题自动混合；「新题」= 累计从没答过的题（可能同时算在薄弱章节里）。", smartPreview, "开始训练")}
-        ${renderTrainingCard("due", "今日错题复习", "按记忆周期推送今天该复习的错题，避免错题堆积。", duePreview, "开始复习", {
-          disabled: dueLeft === 0,
-          reason: duePreview,
+        ${renderTrainingCard("smart", "今日训练", "到期错题、反复错、薄弱章节、未做题自动成一张卷子 —— 不知道练什么就点这个。", smartPreview, "开始训练")}
+        ${renderTrainingCard("special", "专项练习", "只练一类：同章同型（照着你错得最多的题扩展），或考前冲刺组合。", specialPreview, "选择专项", {
+          disabled: previewCounts.similar === 0 && previewCounts.sprint === 0,
+          reason: "当前科目暂无可专项练习的题",
         })}
-        ${renderTrainingCard("similar", "同类题型练习", "以你错得最多的题为样本，扩展同章节、同题型的题（大多不是错题），用来把题型练熟。", similarPreview, "开始练习", {
-          disabled: previewCounts.similar === 0,
-          reason: "当前科目暂无可扩展的同类题",
-        })}
-        ${renderTrainingCard("sprint", "考前冲刺", "近 7 天错题、反复错、薄弱章节、未做题组合。", sprintPreview, "开始冲刺", {
-          disabled: previewCounts.sprint === 0,
-          reason: "当前科目暂无可冲刺的题",
-        })}
+        ${renderTrainingCard("wrong", "错题本", "所有答错过的题都在这里，按复习周期 / 错误次数筛选后再练。", wrongPreview, "打开错题本")}
       </div>
       <div class="training-tools">
         <button type="button" id="trainingDashboardBtn">查看学习看板</button>
@@ -6757,11 +6765,87 @@ function bindTrainingActions() {
     btn.onclick = () => {
       const action = btn.dataset.trainingAction;
       if (action === "smart") startSmartPractice().catch((err) => toast(err.message));
-      if (action === "due") startDueWrongReview().catch((err) => toast(err.message));
-      if (action === "similar") startSimilarWrongPractice().catch((err) => toast(err.message));
-      if (action === "sprint") startSprintPractice().catch((err) => toast(err.message));
+      /* "wrong" 是跳转而不是开练：错题本有自己的筛选（复习周期 / 错误次数 / 状态），
+         先筛再练比在这里替用户决定题池更合理。 */
+      if (action === "wrong") switchMode("wrong");
+      if (action === "special") openSpecialPracticePicker("similar").catch((err) => toast(err.message));
+      /* 兼容旧缓存里的卡片（?v= 没抬时可能还是 similar/sprint 两个按钮）。
+         新卡片一律走 "special"，这里保留旧分支只为不出现「点了没反应」。 */
+      if (action === "similar" || action === "sprint") openSpecialPracticePicker(action).catch((err) => toast(err.message));
     };
   });
+}
+
+/* 「专项练习」二级选择。
+   原来同类题型 / 考前冲刺是两张并列的卡，加上今日强化、今日错题复习一共四张 ——
+   四张卡的题池互相重叠（今日强化本身就含到期复习段），用户要在四个说法里猜
+   「今天该点哪个」。现在收成一张卡，点进来再二选一，两个选项的差别写清。
+   弹窗结构与 askExamDraftQuestionGap 同一套（modal-backdrop + modal-panel +
+   data-* 分发），保持全站对话框一致，不另造组件。 */
+function pickSpecialPractice() {
+  return new Promise((resolve) => {
+    const courseStore = userCourseStore();
+    const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+    /* 不能用 renderTrainingDashboard 里的 previewCounts / previewMix —— 那两个是
+       该函数的局部变量，弹窗在它之外打开，直接引用会 ReferenceError（按钮点了没反应，
+       错误被 .catch(toast) 吞掉）。这里按同一口径自己算一次，代价是再遍历一遍题库
+       （这个弹窗一次点击才走一次，可以接受）。 */
+    const sprintPlan = buildSprintPracticePlan(courseStore);
+    const counts = {
+      similar: Math.min(80, buildSimilarWrongIds(courseStore).length),
+      sprint: sprintPlan.ids.length,
+    };
+    const ctx = { items, analysisReady: true, counts, mix: { sprint: sprintPlan.counts } };
+    const similarMeta = previewPracticePlan("similar", courseStore, ctx);
+    const sprintMeta = previewPracticePlan("sprint", courseStore, ctx);
+    const similarOff = counts.similar === 0;
+    const sprintOff = counts.sprint === 0;
+    const row = (value, title, meta, desc, off) => `
+      <button type="button" class="special-pick${off ? " is-off" : ""}"
+        data-special-pick="${value}"${off ? " disabled aria-disabled=\"true\"" : ""}>
+        <b>${escapeHtml(title)}</b>
+        <em>${escapeHtml(off ? "当前科目暂无可用题目" : meta)}</em>
+        <small>${escapeHtml(desc)}</small>
+      </button>`;
+    const host = document.createElement("div");
+    host.id = "specialPickModal";
+    host.className = "modal-backdrop";
+    host.innerHTML = `
+      <div class="modal-panel conflict-modal special-pick-panel" role="dialog" aria-modal="true" aria-labelledby="specialPickTitle">
+        <div class="modal-head">
+          <strong id="specialPickTitle">专项练习</strong>
+          <button type="button" data-special-pick="cancel">关闭</button>
+        </div>
+        <p class="conflict-message">两种都从「你错得最多的题」出发，区别是范围：</p>
+        <div class="special-pick-list">
+          ${row("similar", "同章同型", similarMeta, "只出和错题同章节、同题型的题（大多不是错题本身），用来把题型练熟。", similarOff)}
+          ${row("sprint", "考前冲刺", sprintMeta, "近 7 天错题 + 反复错 + 薄弱章节 + 未做，范围更大、更杂。", sprintOff)}
+        </div>
+      </div>`;
+    const finish = (choice) => {
+      host.remove();
+      resolve(choice === "cancel" ? "" : choice);
+    };
+    host.querySelectorAll("[data-special-pick]").forEach((btn) => {
+      btn.onclick = () => finish(btn.dataset.specialPick);
+    });
+    host.addEventListener("click", (event) => {
+      if (event.target === host) finish("cancel");
+    });
+    document.addEventListener("keydown", function onSpecialPickKey(event) {
+      if (event.key !== "Escape") return;
+      document.removeEventListener("keydown", onSpecialPickKey, true);
+      finish("cancel");
+    }, true);
+    document.body.appendChild(host);
+  });
+}
+
+async function openSpecialPracticePicker(initial) {
+  const pick = await pickSpecialPractice();
+  if (!pick) return;
+  if (pick === "similar") await startSimilarWrongPractice();
+  if (pick === "sprint") await startSprintPractice();
 }
 
 /* 从课本章名里拆出「可区分的尾部」，给窄屏用（见 renderWeakChapterCard）。
@@ -8488,9 +8572,88 @@ function exportUserData() {
   toast("已导出备份文件");
 }
 
+/* 从备份恢复（导出按钮的另一半）。
+   以前只能导出、没有回灌路径 —— 全站文件输入只收 .zip（管理员专用），
+   用户以为存了备份，真要恢复时没有任何入口。
+
+   流程：选文件 → 本地先粗校验形状 → 让用户确认「会覆盖」→ POST /api/user/import?force=1
+   → 成功后整页重新读一遍数据（不就地改 state.storage，避免和内存里那套缓存不同步）。 */
+function importUserDataFromFile() {
+  const input = $("importDataInput");
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
+async function handleImportFile(file) {
+  if (!file) return;
+  if (file.size > 32 * 1024 * 1024) {
+    toast("备份文件超过 32MB");
+    return;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch (err) {
+    toast("不是有效的 JSON 文件");
+    return;
+  }
+  const data = payload && typeof payload === "object" && payload.data && typeof payload.data === "object"
+    ? payload.data
+    : payload;
+  /* 形状不对就别发请求了：落盘会把进度换成垃圾，这一层比服务端那道更早拦住手滑。 */
+  if (!data || typeof data !== "object" || Array.isArray(data) || !("courses" in data)) {
+    toast("这不是云习题库的备份文件");
+    return;
+  }
+  const fromUser = typeof payload?.user === "string" ? payload.user.trim() : "";
+  const exportedAt = typeof payload?.exportedAt === "string" ? payload.exportedAt : "";
+  const courseCount = Object.keys(data.courses || {}).length;
+  const wrongCount = Object.keys(data.wrong || {}).length;
+  const lines = [
+    "恢复备份会**整体替换**当前账号的进度，之后新做的题会丢失。",
+    "",
+    `备份来自：${fromUser || "未知账号"}${exportedAt ? `（${exportedAt.slice(0, 10)} 导出）` : ""}`,
+    `内容：${courseCount} 门科目 · ${wrongCount} 条错题记录`,
+    "",
+    "建议先点「导出我的数据」把当前进度存一份，再恢复。",
+    "",
+    "确定继续吗？",
+  ];
+  if (!confirm(lines.join("\n"))) return;
+
+  const btn = $("importDataBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "正在恢复…"; }
+  try {
+    const res = await api(`/api/user/import?force=1&user=${encodeURIComponent(state.user)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "If-Match": `"${state.storageRevision || ""}"` },
+      body: JSON.stringify(data),
+    });
+    if (!res?.ok) throw new Error(res?.error || "恢复失败");
+    /* 整页重读：内存里的 courses/answers/questionChapter 缓存都要按新数据重建，
+       就地改 state.storage 会留下对不上号的旧缓存。 */
+    toast("备份已恢复，正在重新加载…");
+    setTimeout(() => window.location.reload(), 600);
+  } catch (err) {
+    toast(err?.message || "恢复失败");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "从备份恢复"; }
+  }
+}
+
 function bindAccountMenuActions() {
   const btn = $("exportDataBtn");
   if (btn) btn.onclick = () => exportUserData();
+  const importBtn = $("importDataBtn");
+  const importInput = $("importDataInput");
+  if (importBtn) importBtn.onclick = importUserDataFromFile;
+  if (importInput) {
+    importInput.onchange = () => {
+      const file = importInput.files && importInput.files[0];
+      handleImportFile(file);
+    };
+  }
 }
 
 /* 「近期正确率趋势」的数据源解析。
@@ -10421,8 +10584,94 @@ function renderAdminDataPanel() {
           ? escapeHtml(state.adminCleanAdsResult)
           : "拉取题库时会自动清洗；此处用于清理库中已经存在的历史广告。执行前会自动备份数据库，只改动命中广告的题目。"}</small>
       </section>
+
+      <section class="admin-data-card admin-backup-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>备份</b>
+            <span>换题库、导入数据、删题之前系统自动留的快照；可以下载，也可以一键回滚</span>
+          </div>
+          <span class="status-pill ${backupListOf().length ? "active" : "disabled"}">${backupListOf().length ? backupListOf().length + " 份" : "无备份"}</span>
+        </div>
+        ${renderBackupRows()}
+        <small>回滚前系统会先把「当前状态」再备份一份，所以回滚本身也能撤回；题库回滚会做健康检查，读不出来自动退回原库。只保留最近 20 份、超过 30 天的会被清理。</small>
+      </section>
     </div>
   `;
+}
+
+/* 备份列表。state.adminBackups 由 loadAdminBackups() 填；没加载过就先显示「读取中」，
+   加载失败会写进 state.adminBackupsError（不弹 toast，因为进后台时同时会拉 status）。 */
+function backupListOf() {
+  return Array.isArray(state.adminBackups) ? state.adminBackups : [];
+}
+
+function renderBackupRows() {
+  if (state.adminBackupsError) {
+    return `<div class="admin-backup-empty">读取备份列表失败：${escapeHtml(state.adminBackupsError)}</div>`;
+  }
+  if (!Array.isArray(state.adminBackups)) {
+    return `<div class="admin-backup-empty">正在读取备份列表...</div>`;
+  }
+  if (!state.adminBackups.length) {
+    return `<div class="admin-backup-empty">还没有备份。换题库、导入用户数据、删题时会自动留一份。</div>`;
+  }
+  return `<ul class="admin-backup-list">${state.adminBackups.map((item) => {
+    const kindText = item.kind === "userdata" ? "用户数据" : "题库";
+    const restorable = item.restorable !== false;
+    return `<li class="admin-backup-row">
+      <div class="admin-backup-main">
+        <b>${escapeHtml(item.name)}</b>
+        <span>${kindText} · ${escapeHtml(item.updatedAt || "")} · ${formatFileSize(item.size || 0)}</span>
+      </div>
+      <div class="admin-backup-actions">
+        <button type="button" data-backup-download="${escapeHtml(item.name)}">下载</button>
+        <button type="button" class="admin-backup-restore" data-backup-restore="${escapeHtml(item.name)}" ${restorable ? "" : "disabled"}>回滚</button>
+      </div>
+    </li>`;
+  }).join("")}</ul>`;
+}
+
+async function loadAdminBackups(refresh = false) {
+  if (!isAdmin()) return [];
+  if (!refresh && Array.isArray(state.adminBackups)) return state.adminBackups;
+  state.adminBackupsError = "";
+  try {
+    const result = await api(`/api/admin/backups?user=${encodeURIComponent(state.user)}`);
+    state.adminBackups = Array.isArray(result.items) ? result.items : [];
+  } catch (err) {
+    state.adminBackups = [];
+    state.adminBackupsError = err.message || "未知错误";
+  }
+  if (state.adminView === "data") renderAdminRows(state.adminRows, state.adminFailedCount);
+  return state.adminBackups;
+}
+
+async function restoreAdminBackup(name) {
+  if (!isAdmin() || !name) return;
+  const kindText = String(name).endsWith(".zip") ? "用户数据" : "题库";
+  // 回滚是破坏性动作：说清代价再让用户点。confirm 文案里带上备份名，避免点错行。
+  const ok = confirm(`确定把${kindText}回滚到这一份备份吗？\n\n${name}\n\n当前状态会先自动再备份一份，回滚后可以再撤回来。`);
+  if (!ok) return;
+  state.adminBackupBusy = name;
+  if (state.adminView === "data") renderAdminRows(state.adminRows, state.adminFailedCount);
+  try {
+    const result = await api(`/api/admin/backups/restore?user=${encodeURIComponent(state.user)}&name=${encodeURIComponent(name)}`, { method: "POST" });
+    toast(result.message || "已回滚");
+    state.adminDataStatus = null;
+    state.adminBackups = null;   // 回滚本身又产生一份备份，列表要重读
+    state.adminCourses = [];
+    state.courses = [];
+    await loadAdminDataStatus(true).catch(() => {});
+    await loadAdminBackups(true).catch(() => {});
+    // 题库变了，章节映射和科目列表都得重来
+    if (kindText === "题库") await loadCourses().catch(() => {});
+  } catch (err) {
+    toast(err.message || "回滚失败");
+  } finally {
+    state.adminBackupBusy = "";
+    if (state.adminView === "data") renderAdminRows(state.adminRows, state.adminFailedCount);
+  }
 }
 
 async function loadAdminDataStatus(refresh = false) {
@@ -10443,6 +10692,29 @@ function bindAdminDataActions() {
   document.querySelectorAll("[data-admin-clean-ads]").forEach((btn) => {
     btn.onclick = () => cleanAdsInBank(btn).catch((err) => toast(err.message));
   });
+  document.querySelectorAll("[data-backup-download]").forEach((btn) => {
+    btn.onclick = () => downloadAdminBackup(btn.dataset.backupDownload);
+  });
+  document.querySelectorAll("[data-backup-restore]").forEach((btn) => {
+    btn.onclick = () => restoreAdminBackup(btn.dataset.backupRestore);
+  });
+  // 进后台「数据」页时才拉列表：它要跑一遍目录枚举，没必要每次开后台都读
+  if (state.adminView === "data" && !Array.isArray(state.adminBackups) && !state.adminBackupsError) {
+    loadAdminBackups().catch(() => {});
+  }
+}
+
+/* 直接用链接下载，不走 api()：备份可能几百 MB，走 fetch 再 blob 会在内存里多存一份。
+   token 在 cookie 里，链接点击天然带得上。 */
+function downloadAdminBackup(name) {
+  if (!name) return;
+  const url = `/api/admin/backups/download?name=${encodeURIComponent(name)}`;
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 async function cleanAdsInBank(btn) {
@@ -11934,6 +12206,27 @@ let pushLoadedConfig = null;
 let pushTokenDirty = false;
 let pushPreviewTimer = null;
 
+/* 渠道收敛：选项从 7 个收成 4 个（浏览器通知 / Bark / 微信 / 自定义 webhook）。
+   被合并掉的三个**后端仍然认得**，所以老配置不会突然发不出去；只是在界面上
+   不再作为独立选项出现，选到它们时给一句「这属于哪个」，并把输入框按新渠道摆：
+     ntfy    → 和 Bark 一样是「一整条地址」，共用地址框即可
+     serverchan → 和 PushPlus 一样是「一串 key」，共用令牌框
+     wechat  → 就是往一个地址 POST JSON，按 webhook 摆 */
+const PUSH_LEGACY = {
+  ntfy: {
+    group: "bark",
+    note: "ntfy 已并入「Bark」：两者都是填一整条推送地址，用法完全一样（原来是单独一项，功能重复）。填好地址直接保存即可，不用改选。",
+  },
+  serverchan: {
+    group: "pushplus",
+    note: "Server酱已并入「微信」：和 PushPlus 一样是填一串 key，用法完全一样（原来是单独一项，功能重复）。把 SendKey 填在下面令牌里直接保存即可。",
+  },
+  wechat: {
+    group: "webhook",
+    note: "企业微信群机器人已并入「自定义 webhook」：它本来就是往一个地址 POST 一段 JSON。把那条 Webhook 地址填在下面直接保存即可。",
+  },
+};
+
 function refreshPushTypeFields() {
   const type = $("pushType")?.value || "bark";
   const info = PUSH_TYPE_INFO[type] || PUSH_TYPE_INFO.bark;
@@ -11951,6 +12244,34 @@ function refreshPushTypeFields() {
   $("pushDeviceRow")?.classList.toggle("hidden", !info.devices);
   if (info.devices) renderPushDevices(pushLoadedConfig);
   renderPushGuide(info);
+}
+
+/* 老配置里存着已合并的渠道值：下拉框里没有那个 option，直接赋 value 会变成空选择。
+   这里在下拉里临时补一个「当前正在用」的选项，让用户看到真实值 + 提示，
+   但**不写回**（保存时仍按原 type 发，后端照旧认得，绑定关系不丢）。 */
+function reconcilePushType(cfg) {
+  const select = $("pushType");
+  const legacyBox = $("pushTypeLegacy");
+  if (!select) return;
+  select.querySelectorAll("option[data-legacy]").forEach((opt) => opt.remove());
+  const type = String(cfg?.channel?.type || "");
+  const legacy = PUSH_LEGACY[type];
+  if (!legacy) {
+    legacyBox?.classList.add("hidden");
+    if (legacyBox) setText("pushTypeLegacy", "");
+    return;
+  }
+  const option = document.createElement("option");
+  option.value = type;
+  // 文案只标「已合并」，具体该换哪个由下面那句提示说清 —— 选项里塞长句子会撑爆下拉宽度
+  option.textContent = `${type}（已合并）`;
+  option.dataset.legacy = "1";
+  select.appendChild(option);
+  select.value = type;
+  if (legacyBox) {
+    legacyBox.classList.remove("hidden");
+    setText("pushTypeLegacy", legacy.note);
+  }
 }
 
 function refreshPushStyleHint() {
@@ -12107,6 +12428,10 @@ function renderPushForm(cfg) {
   const channel = c.channel || {};
   if ($("pushEnabled")) $("pushEnabled").checked = !!c.enabled;
   if ($("pushTime")) $("pushTime").value = c.time || "20:00";
+  /* 顺序不能反：reconcile 会为「已合并」的老渠道补一条临时 option，
+     必须在赋 value 之前补好，否则 value 落空、下拉框显示第一项，
+     而用户看到的和实际保存的 type 不一致。 */
+  reconcilePushType(c);
   if ($("pushType")) $("pushType").value = channel.type || "bark";
   if ($("pushUrl")) $("pushUrl").value = channel.url || "";
   if ($("pushToken")) {

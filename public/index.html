@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261018-wp1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261018-simp1"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -114,6 +114,9 @@
           </div>
           <button id="pushSettingsBtn" type="button">每日提醒</button>
           <button id="exportDataBtn" type="button">导出我的数据</button>
+          <!-- 导入是「导出」的另一半：以前只能导出、没有回灌路径，备份等于废纸。 -->
+          <button id="importDataBtn" type="button">从备份恢复</button>
+          <input id="importDataInput" type="file" accept=".json,application/json" hidden>
           <button id="logoutBtn" type="button">退出登录</button>
         </div>
       </div>
@@ -429,13 +432,11 @@
           <span class="push-label">推送方式</span>
           <select id="pushType" aria-label="推送方式">
             <option value="webpush">浏览器通知（不用装 App）</option>
-            <option value="serverchan">微信 · Server酱</option>
-            <option value="pushplus">微信 · PushPlus</option>
-            <option value="wechat">企业微信群机器人</option>
             <option value="bark">Bark（iPhone）</option>
-            <option value="ntfy">ntfy（安卓 / 可自建）</option>
+            <option value="pushplus">微信</option>
             <option value="webhook">自定义 webhook</option>
           </select>
+          <small id="pushTypeLegacy" class="push-hint hidden"></small>
         </div>
 
         <div id="pushGuide" class="push-guide"></div>
@@ -498,7 +499,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261018-wp1"></script>
+  <script src="/app.js?v=20261018-simp1"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     // `?v=` 跟着 public/sw.js 的 CACHE 版本走（v2 = 白名单缓存 + 不再缓存 /assets/）：
@@ -506,7 +507,7 @@
     // 老 cache（可能含受保护题图）由新 SW 的 activate 清掉。
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
-        navigator.serviceWorker.register("/sw.js?v=20261018-wp1").catch(function (err) {
+        navigator.serviceWorker.register("/sw.js?v=20261018-simp1").catch(function (err) {
           console.warn("service worker 注册失败", err);
         });
       });
