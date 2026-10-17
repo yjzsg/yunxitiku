@@ -11684,6 +11684,247 @@ function refreshExamHistoryCard() {
   bindExamHistoryActions();
 }
 
+/* ── 每日提醒设置 ────────────────────────────────────────────────────────────
+   配置存在**服务端**（userdata/push/<user>.json），到点由 PushScheduler 自己发，
+   页面关着也照发。这里只做三件事：把配置读出来填表、把表单存回去、发一条测试。
+
+   「按现在的设置，下次会这样发」走 /api/push/preview：服务端把**它自己算的**
+   到期数 / 连续天数 / 距考试天数摊开显示。这是 REVIEW_INTERVAL_DAYS 双份实现
+   （app.js:180 与 PushDigestReader）的探针 —— 一旦漂移，这里和错题本的数字当场对不上。 */
+const PUSH_TYPE_INFO = {
+  /* 两个「直接进个人微信」的渠道放最前面 —— 这是绝大多数人想要的「推送到微信」。
+     它们只需要一串 key，接口地址固定，所以地址留空即可（后端会补默认值）。 */
+  serverchan: {
+    label: "接口地址（可留空）",
+    placeholder: "https://sctapi.ftqq.com",
+    hint: "在 sct.ftqq.com 用 GitHub 登录，把 SendKey 填到下面的令牌里。免费版每天 5 条，一天一条够用；地址留空就走官方接口。",
+    token: true,
+    tokenLabel: "SendKey",
+    template: false,
+  },
+  pushplus: {
+    label: "接口地址（可留空）",
+    placeholder: "https://www.pushplus.plus/send",
+    hint: "在 pushplus.plus 微信扫码登录，把 token 填到下面的令牌里。消息直接进微信；地址留空就走官方接口。",
+    token: true,
+    tokenLabel: "token",
+    template: false,
+  },
+  wechat: {
+    label: "群机器人地址",
+    placeholder: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…",
+    hint: "企业微信群里「添加群机器人」后复制它的 Webhook 地址。注意：消息发到企业微信群，不是个人微信。",
+    token: false,
+    template: false,
+  },
+  bark: {
+    label: "推送地址",
+    placeholder: "https://api.day.app/你的设备Key",
+    hint: "在 iPhone 的 Bark App 里复制「服务器地址 + Key」这一整条地址。",
+    token: false,
+    template: false,
+  },
+  ntfy: {
+    label: "推送地址",
+    placeholder: "https://ntfy.sh/你的主题名",
+    hint: "填到主题名那一级；自建服务器换成自己的域名。只有私有主题才需要下面的令牌。",
+    token: true,
+    tokenLabel: "访问令牌",
+    template: false,
+  },
+  webhook: {
+    label: "接口地址",
+    placeholder: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…",
+    hint: "企业微信 / 飞书 / Server酱 / PushDeer 都能用。模板里的 {{title}} {{body}} {{url}} 会被替换（已做 JSON 转义）。",
+    token: false,
+    template: true,
+  },
+};
+
+let pushLoadedConfig = null;
+/* 令牌是「打码回传」的：输入框留空 = 不改，所以必须记住用户有没有真的动过它，
+   否则每次保存都会把已经设好的令牌抹掉。 */
+let pushTokenDirty = false;
+let pushPreviewTimer = null;
+
+function refreshPushTypeFields() {
+  const type = $("pushType")?.value || "bark";
+  const info = PUSH_TYPE_INFO[type] || PUSH_TYPE_INFO.bark;
+  setText("pushUrlLabel", info.label);
+  const url = $("pushUrl");
+  if (url) url.placeholder = info.placeholder;
+  setText("pushUrlHint", info.hint);
+  setText("pushTokenLabel", info.tokenLabel || "访问令牌");
+  $("pushTokenRow")?.classList.toggle("hidden", !info.token);
+  $("pushTemplateRow")?.classList.toggle("hidden", !info.template);
+}
+
+function renderPushStatus(cfg) {
+  const box = $("pushStatus");
+  if (!box) return;
+  const parts = [];
+  if (cfg?.lastSentDate) {
+    parts.push(`上次推送 ${cfg.lastSentDate}${cfg.lastResult === "ok" ? "（成功）" : ""}`);
+  }
+  if (cfg?.lastResult === "fail" && cfg.lastError) parts.push(`最近一次失败：${cfg.lastError}`);
+  box.textContent = parts.join(" · ");
+  box.classList.toggle("hidden", parts.length === 0);
+  box.classList.toggle("is-error", cfg?.lastResult === "fail");
+}
+
+function renderPushForm(cfg) {
+  const c = cfg || {};
+  const channel = c.channel || {};
+  if ($("pushEnabled")) $("pushEnabled").checked = !!c.enabled;
+  if ($("pushTime")) $("pushTime").value = c.time || "20:00";
+  if ($("pushType")) $("pushType").value = channel.type || "bark";
+  if ($("pushUrl")) $("pushUrl").value = channel.url || "";
+  if ($("pushToken")) {
+    $("pushToken").value = "";
+    $("pushToken").placeholder = channel.tokenSet ? `已设置（${channel.token || "****"}），留空不改` : "没有就留空";
+  }
+  if ($("pushTemplate")) $("pushTemplate").value = channel.template || "";
+  if ($("pushBaseUrl")) $("pushBaseUrl").value = c.baseUrl || "";
+  if ($("pushStyle")) $("pushStyle").value = c.style || "milestone";
+  pushTokenDirty = false;
+  refreshPushTypeFields();
+  renderPushStatus(c);
+}
+
+function collectPushForm() {
+  const tokenInput = ($("pushToken")?.value || "").trim();
+  const hadToken = !!pushLoadedConfig?.channel?.tokenSet;
+  /* 没动过输入框 → 回传 `****`（后端约定：以 **** 开头 = 保留原值）；
+     动过且清空 → 空串 = 明确清除。 */
+  const token = pushTokenDirty ? tokenInput : (hadToken ? "****" : "");
+  return {
+    enabled: !!$("pushEnabled")?.checked,
+    time: $("pushTime")?.value || "20:00",
+    style: $("pushStyle")?.value || "milestone",
+    baseUrl: ($("pushBaseUrl")?.value || "").trim(),
+    channel: {
+      type: $("pushType")?.value || "bark",
+      url: ($("pushUrl")?.value || "").trim(),
+      token,
+      template: ($("pushTemplate")?.value || "").trim(),
+    },
+  };
+}
+
+async function refreshPushPreview() {
+  const style = $("pushStyle")?.value || "milestone";
+  const baseUrl = ($("pushBaseUrl")?.value || "").trim();
+  const query = new URLSearchParams({ style, baseUrl });
+  try {
+    const res = await api(`/api/push/preview?${query.toString()}`);
+    const message = res.message;
+    if (!res.willSend || !message) {
+      setText("pushPreviewTitle", "这条不发");
+      setText("pushPreviewBody", style === "remind"
+        ? "只催没练：今天已经练过了，所以不发。"
+        : "今天已经练过，而且没到里程碑，所以不发。");
+    } else {
+      setText("pushPreviewTitle", message.title || "（无标题）");
+      setText("pushPreviewBody", message.body || "（无正文）");
+    }
+    const d = res.digest || {};
+    const bits = [`到期 ${d.due} 道`, `错题 ${d.wrongTotal} 道`, `今天已练 ${d.doneToday} 题`, `连续 ${d.streak} 天`];
+    if (d.daysLeft >= 0) bits.push(`距考试 ${d.daysLeft} 天`);
+    setText("pushPreviewMeta", `服务端算的：${bits.join(" · ")}`);
+  } catch (err) {
+    setText("pushPreviewTitle", "预览失败");
+    setText("pushPreviewBody", err.message || "");
+    setText("pushPreviewMeta", "");
+  }
+}
+
+function schedulePushPreview() {
+  clearTimeout(pushPreviewTimer);
+  pushPreviewTimer = setTimeout(() => { refreshPushPreview(); }, 250);
+}
+
+function openPushModal() {
+  const modal = $("pushModal");
+  if (!modal) return;
+  // 账号下拉还开着的话先收起，否则它会压在遮罩后面
+  document.querySelector(".account-box")?.classList.remove("open");
+  $("accountMenu")?.classList.add("hidden");
+  $("accountMenuBtn")?.setAttribute("aria-expanded", "false");
+  modal.classList.remove("hidden");
+  pushLoadedConfig = null;
+  setText("pushPreviewTitle", "读取中…");
+  setText("pushPreviewBody", "");
+  setText("pushPreviewMeta", "");
+  return api("/api/push/config")
+    .then((cfg) => {
+      pushLoadedConfig = cfg;
+      renderPushForm(cfg);
+      return refreshPushPreview();
+    })
+    .catch((err) => toast(err.message || "读取提醒设置失败"));
+}
+
+function closePushModal() {
+  $("pushModal")?.classList.add("hidden");
+  clearTimeout(pushPreviewTimer);
+}
+
+async function savePushSettings() {
+  const button = $("pushSaveBtn");
+  if (button) button.disabled = true;
+  try {
+    const cfg = await api("/api/push/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(collectPushForm()),
+    });
+    pushLoadedConfig = cfg;
+    renderPushForm(cfg);
+    await refreshPushPreview();
+    toast(cfg.enabled ? `已保存，每天 ${cfg.time} 提醒` : "已保存，提醒已关闭");
+    return cfg;
+  } catch (err) {
+    toast(err.message || "保存失败");
+    return null;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+/* 「发送测试」先保存再发：测的必须是**屏幕上这套**设置，而不是上一次存下的那套。
+   失败信息直接摊在弹窗里（不只用 toast），因为里面通常带着渠道返回的原因。 */
+async function testPushSettings() {
+  const button = $("pushTestBtn");
+  if (button) button.disabled = true;
+  try {
+    const saved = await savePushSettings();
+    if (!saved) return;
+    const res = await api("/api/push/test", { method: "POST" });
+    const box = $("pushStatus");
+    if (res.ok) {
+      if (box) {
+        box.textContent = "测试消息已发出，去手机上看一眼";
+        box.classList.remove("hidden");
+        box.classList.remove("is-error");
+      }
+      toast("测试消息已发出");
+    } else if (box) {
+      box.textContent = `发送失败：${res.error || "未知原因"}`;
+      box.classList.remove("hidden");
+      box.classList.add("is-error");
+    }
+  } catch (err) {
+    const box = $("pushStatus");
+    if (box) {
+      box.textContent = `发送失败：${err.message || "未知原因"}`;
+      box.classList.remove("hidden");
+      box.classList.add("is-error");
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function openExamHistoryDrawer() {
   const modal = $("examHistoryModal");
   if (!modal) return;
@@ -13066,6 +13307,21 @@ if ($("examHistoryModal")) {
   $("examHistoryModal").addEventListener("click", (event) => {
     if (event.target === $("examHistoryModal")) closeExamHistoryDrawer();
   });
+}
+if ($("pushModal")) {
+  /* 每日提醒设置（账号菜单 →「每日提醒」）。 */
+  $("pushSettingsBtn").onclick = () => openPushModal();
+  $("pushModalCloseBtn").onclick = closePushModal;
+  $("pushModal").addEventListener("click", (event) => {
+    if (event.target === $("pushModal")) closePushModal();
+  });
+  $("pushType").addEventListener("change", refreshPushTypeFields);
+  $("pushToken").addEventListener("input", () => { pushTokenDirty = true; });
+  for (const id of ["pushStyle", "pushBaseUrl"]) {
+    $(id)?.addEventListener("change", schedulePushPreview);
+  }
+  $("pushSaveBtn").onclick = () => { savePushSettings(); };
+  $("pushTestBtn").onclick = () => { testPushSettings(); };
 }
 if ($("conflictModal")) {
   $("conflictCloseBtn").onclick = keepLocalConflictDraft;

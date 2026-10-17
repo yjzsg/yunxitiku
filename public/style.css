@@ -14689,3 +14689,166 @@ textarea,
     min-height: 44px;
   }
 }
+
+/* ⑳ 每日提醒设置弹窗（账号菜单 →「每日提醒」）
+   ──────────────────────────────────────────────────────────────────────────
+   边框/底色一律用 --border-2 / --surface-2 而不是 rgba(--glass-rgb)：
+   墨水屏主题里 --card 和 --glass-rgb 都是纯白，用玻璃色画边框等于没边框。
+   ────────────────────────────────────────────────────────────────────────── */
+.push-modal {
+  width: min(460px, 100%);
+  /* 手机上内容比视口高：弹窗自己限高，中间那段滚动，头尾（标题/按钮）常驻。 */
+  max-height: calc(100dvh - 36px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.push-body {
+  display: grid;
+  gap: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+.push-row {
+  display: grid;
+  gap: 6px;
+}
+
+.push-row-switch {
+  grid-auto-flow: column;
+  justify-content: start;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+}
+
+.push-row-switch input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.push-label {
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.push-row input[type="url"],
+.push-row input[type="time"],
+.push-row input[type="password"],
+.push-row select,
+.push-row textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: var(--control-h);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
+.push-row textarea {
+  min-height: 76px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.push-row input:focus-visible,
+.push-row select:focus-visible,
+.push-row textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.push-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.push-preview {
+  display: grid;
+  gap: 6px;
+  border-top: 1px dashed var(--border-2);
+  padding-top: 10px;
+}
+
+.push-preview-label {
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.push-preview-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 10px 12px;
+}
+
+.push-preview-card strong {
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.push-preview-card p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.push-status {
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 8px 10px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 失败信息不能只靠颜色（色盲 + 墨水屏）：加粗 + 左边一条实线。 */
+.push-status.is-error {
+  border-left: 3px solid var(--danger);
+  color: var(--danger-700);
+  font-weight: 700;
+}
+
+[data-theme="dark"] .push-status.is-error {
+  color: #ffb4b4;
+}
+
+[data-theme="ink"] .push-status.is-error {
+  border-left-color: #000000;
+  color: #000000;
+}
+
+/* 触屏：输入框和按钮都抬到 44px（--control-h 只有 38px）。 */
+@media (pointer: coarse) {
+  .push-row input[type="url"],
+  .push-row input[type="time"],
+  .push-row input[type="password"],
+  .push-row select,
+  .push-modal .modal-actions button {
+    min-height: 44px;
+  }
+}
+
+/* 窄屏：标签行改成上下排（320px 下「内容风格」那行会挤成一列两个字）。 */
+@media (max-width: 420px) {
+  .push-modal {
+    width: 100%;
+    padding: 16px;
+  }
+}

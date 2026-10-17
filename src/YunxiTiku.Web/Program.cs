@@ -70,6 +70,12 @@ builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<UserDataStore>();
 builder.Services.AddSingleton<QuestionBank>();
 builder.Services.AddSingleton<ChapterMapStore>();
+/* 每日推送提醒（见文件末尾 PushConfigStore / PushScheduler）。
+   注册成单例再挂 HostedService，是为了让 /api/push/test 和 /api/push/run 能拿到**同一个**
+   调度器实例（AddHostedService 默认建的是独立实例，端点里注入不到它）。 */
+builder.Services.AddSingleton<PushConfigStore>();
+builder.Services.AddSingleton<PushScheduler>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PushScheduler>());
 /* 反代/隧道部署时按真实客户端 IP 计数（否则限流把所有人算成一个 IP）。
    ⚠️ 默认**只信任回环**，与 docker-compose.yml 默认只把 8787 绑在 127.0.0.1 一致。
    旧配置把 KnownProxies/KnownNetworks 清空 = 信任任何来源的转发头：谁能直连到应用端口，
@@ -1152,6 +1158,116 @@ app.MapGet("/assets/{**relative}", (HttpContext context, string relative) =>
         }
     }
     return Results.Json(new { error = "asset not found" }, statusCode: 404);
+});
+
+/* ── 每日推送提醒 ────────────────────────────────────────────────────────
+   配置存 userdata/push/<user>.json（**子目录**）。为什么不写进用户数据整包、为什么
+   不能放顶层，见文件末尾 PushConfig 的注释。
+   四个端点都走 ResolveRequestedUser：非管理员拿到的永远是自己，管理员可用 ?user= 指定。 */
+app.MapGet("/api/push/config", (HttpContext context, PushConfigStore store, string? user) =>
+{
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    return Results.Json(store.ReadForApi(clean));
+});
+
+app.MapPut("/api/push/config", async (HttpContext context, PushConfigStore store, string? user) =>
+{
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    var body = await new StreamReader(context.Request.Body, Encoding.UTF8).ReadToEndAsync();
+    PushConfig incoming;
+    try { incoming = PushConfigStore.Parse(body); }
+    catch (JsonException ex) { return Results.Json(new { ok = false, error = "推送配置不是有效 JSON：" + ex.Message }, statusCode: 400); }
+    try
+    {
+        return Results.Json(store.Save(clean, incoming));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400);
+    }
+});
+
+/* 「发送测试」：用当前配置立刻发一条，**不写** lastSentDate。
+   开关关着也能测 —— 用户改完地址第一件事就是想验证通不通，不该先逼他打开总开关。 */
+app.MapPost("/api/push/test", async (HttpContext context, PushConfigStore store, UserDataStore userData, string? user) =>
+{
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    var cfg = store.Read(clean);
+    if (string.IsNullOrWhiteSpace(cfg.Channel.Url))
+    {
+        return Results.Json(new { ok = false, error = "还没有填写推送地址" }, statusCode: 400);
+    }
+    var now = DateTime.Now;
+    var digest = await PushDigestReader.ComputeAsync(userData, clean, now) ?? new PushDigest { DaysLeft = -1 };
+    /* 今天已经练过 + style=remind 时 Build 会返回 null（「今天不发」），但用户点的是
+       「发送测试」—— 必须发出去一条，否则他会以为配置坏了。给一条明确的测试消息。 */
+    var message = PushMessageBuilder.Build(cfg, digest, now, test: true)
+        ?? new PushMessage("【测试】提醒已配置好",
+            digest.DoneToday > 0 ? $"今天已练 {digest.DoneToday} 题，之后不会再打扰你" : "正式提醒会在每天 " + cfg.Time + " 发出",
+            PushMessageBuilder.UrlFor(cfg.BaseUrl));
+    var (ok, error) = await PushSenders.SendAsync(cfg.Channel, message, CancellationToken.None);
+    return Results.Json(new
+    {
+        ok,
+        error,
+        message = new { title = message.Title, body = message.Body, url = message.Url }
+    });
+});
+
+/* 「服务端看到什么」：把服务端算出的到期数/已练数/连续天数摊开给前端。
+   这个端点是**双份实现的探针** —— REVIEW_INTERVAL_DAYS 在 app.js:180 和
+   PushDigestReader 各有一份，一旦漂移，这里和错题本的数字会当场对不上。 */
+app.MapGet("/api/push/preview", async (HttpContext context, PushConfigStore store, UserDataStore userData, string? user, string? style, string? baseUrl) =>
+{
+    string clean;
+    try { clean = ResolveRequestedUser(context, user); }
+    catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    var now = DateTime.Now;
+    var cfg = store.Read(clean);
+    /* style / baseUrl 允许用查询参数覆盖：设置页里用户改了「内容风格」但还没保存时，
+       预览要跟着变，否则他得先保存才看得到效果。只影响这一次预览，不落盘。 */
+    if (!string.IsNullOrWhiteSpace(style)) cfg.Style = style.Trim().ToLowerInvariant();
+    if (baseUrl is not null) cfg.BaseUrl = baseUrl.Trim().TrimEnd('/');
+    var digest = await PushDigestReader.ComputeAsync(userData, clean, now);
+    if (digest is null)
+    {
+        return Results.Json(new { ok = false, error = "读取学习数据失败，暂时无法计算今日摘要" }, statusCode: 500);
+    }
+    var message = PushMessageBuilder.Build(cfg, digest, now);
+    return Results.Json(new
+    {
+        ok = true,
+        digest = new
+        {
+            due = digest.Due,
+            wrongTotal = digest.WrongTotal,
+            doneToday = digest.DoneToday,
+            correctToday = digest.CorrectToday,
+            verifiedToday = digest.VerifiedToday,
+            streak = digest.Streak,
+            daysLeft = digest.DaysLeft,
+            dailyTarget = digest.DailyTarget,
+            courseName = digest.CourseName,
+            daysSinceLast = digest.DaysSinceLast
+        },
+        willSend = message is not null,
+        message = message is null ? null : new { title = message.Title, body = message.Body, url = message.Url }
+    });
+});
+
+/* 管理员手动跑一轮（跳过时间判断），用来验证调度本身。
+   仍然遵守 enabled —— 给关掉提醒的人发消息不叫「验证」。 */
+app.MapPost("/api/push/run", async (HttpContext context, PushScheduler scheduler) =>
+{
+    if (!IsAdminRequest(context)) return Results.Json(new { ok = false, error = "admin only" }, statusCode: 403);
+    var report = await scheduler.RunOnceAsync(CancellationToken.None, ignoreTime: true, onlyUser: null);
+    return Results.Json(new { ok = true, sent = report.Sent, skipped = report.Skipped, failed = report.Failed, details = report.Details });
 });
 
 // 未知的 /api/* 要回 404 JSON，而不是掉进下面的 SPA 回退：
@@ -6290,5 +6406,973 @@ sealed class ChapterMapStore
         => row.TryGetValue(key, out var value) && value is not null and not DBNull
             ? Convert.ToString(value, CultureInfo.InvariantCulture) ?? ""
             : "";
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   每日推送提醒
+   ──────────────────────────────────────────────────────────────────────────
+   用户绑一个渠道（Bark / ntfy / 通用 webhook），PushScheduler 每 30 秒 tick 一次，
+   到点就发一条「该练了」。为什么只能做在服务端：页面一关就没有 JS，而 Web Push 需要
+   HTTPS 公网 + VAPID 密钥，本项目是 127.0.0.1 反代、SW 只做静态缓存，不划算。
+
+   数据放哪：userdata/push/<user>.json（**子目录**）。三条理由：
+     1. 用户数据整包 userdata/<user>.json 由**客户端独占整包覆盖写**，服务端要动它
+        必须走 revision/If-Match，每次推送前写一次就是主动制造 409 冲突；
+     2. lastSentDate / failCount 是**服务端状态**，天然不属于客户端数据；
+     3. webhook token 不该进「导出我的数据」的包。
+   为什么必须是子目录：/api/admin/users（Program.cs:356）和 /api/admin/data/status
+   （:2486）都按**顶层** *.json 枚举账号，配置文件放顶层会凭空多出一个账号。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+sealed class PushConfig
+{
+    public bool Enabled { get; set; }
+    public string Time { get; set; } = "20:00";
+    public int GraceHours { get; set; } = 6;
+    public string Style { get; set; } = "milestone";   // remind | milestone | digest
+    public string BaseUrl { get; set; } = "";
+    public PushChannelConfig Channel { get; set; } = new();
+
+    /* 以下全是**服务端状态**：PushConfigStore.Save 只白名单合并用户可编辑字段，
+       客户端改不动它们。否则前端一次误传就能清掉 lastSentDate，同一天重复推送。 */
+    public string LastSentDate { get; set; } = "";
+    public string LastSentAt { get; set; } = "";
+    public string LastResult { get; set; } = "";
+    public string LastError { get; set; } = "";
+    public int FailCount { get; set; }
+    public string NextRetryAt { get; set; } = "";
+    /// <summary>上次已经发过的连续天数里程碑。断签（streak 变小）时归零重来。</summary>
+    public int MilestoneStreak { get; set; }
+}
+
+sealed class PushChannelConfig
+{
+    public string Type { get; set; } = "bark";   // bark | ntfy | webhook
+    public string Url { get; set; } = "";
+    public string Token { get; set; } = "";
+    /// <summary>仅 webhook 用：正文模板，占位符 {{title}} {{body}} {{url}}（会做 JSON 转义）。</summary>
+    public string Template { get; set; } = "";
+}
+
+sealed class PushMessage
+{
+    public PushMessage(string title, string body, string url)
+    {
+        Title = title;
+        Body = body;
+        Url = url;
+    }
+
+    public string Title { get; }
+    public string Body { get; }
+    public string Url { get; }
+}
+
+/// <summary>服务端从用户数据里算出来的「今日摘要」。全部只读，不回写用户数据。</summary>
+sealed class PushDigest
+{
+    public int Due { get; set; }
+    public int WrongTotal { get; set; }
+    public int DoneToday { get; set; }
+    public int CorrectToday { get; set; }
+    public int VerifiedToday { get; set; }
+    public int Streak { get; set; }
+    /// <summary>距最近一场考试的天数；-1 = 没有设置考试日期。</summary>
+    public int DaysLeft { get; set; } = -1;
+    public int DailyTarget { get; set; }
+    public string CourseName { get; set; } = "";
+    /// <summary>距上一次真正练过的天数；-1 = 从来没练过。</summary>
+    public int DaysSinceLast { get; set; } = -1;
+}
+
+sealed class PushRunReport
+{
+    public int Sent { get; set; }
+    public int Skipped { get; set; }
+    public int Failed { get; set; }
+    public List<string> Details { get; } = new();
+}
+
+/// <summary>推送配置的读写。线程安全：每个用户一把锁，写用「临时文件 + 原子替换」。</summary>
+sealed class PushConfigStore
+{
+    internal static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true,
+    };
+
+    private readonly AppPaths _paths;
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new(StringComparer.OrdinalIgnoreCase);
+
+    public PushConfigStore(AppPaths paths)
+    {
+        _paths = paths;
+    }
+
+    public string Root => Path.Combine(_paths.UserDataRoot, "push");
+    public string PathFor(string user) => Path.Combine(Root, CleanUserName(user) + ".json");
+
+    public PushConfig Read(string user)
+    {
+        var path = PathFor(user);
+        try
+        {
+            if (!File.Exists(path)) return new PushConfig();
+            var body = File.ReadAllText(path, Encoding.UTF8);
+            if (body.Trim().Length == 0) return new PushConfig();
+            return JsonSerializer.Deserialize<PushConfig>(body, JsonOptions) ?? new PushConfig();
+        }
+        catch (Exception ex)
+        {
+            /* 配置坏了**不能**让调度器崩，也不能当成「已启用」乱发。回默认值（enabled=false）
+               → 这一轮跳过、日志留痕；用户打开设置页保存一次就自动修好。 */
+            Console.WriteLine($"[push] 读取推送配置失败（本轮按未启用处理）{path}: {ex.Message}");
+            return new PushConfig();
+        }
+    }
+
+    /// <summary>给前端的形状：token 打码，只回后 4 位。</summary>
+    public object ReadForApi(string user)
+    {
+        var cfg = Read(user);
+        return new
+        {
+            ok = true,
+            enabled = cfg.Enabled,
+            time = cfg.Time,
+            graceHours = cfg.GraceHours,
+            style = cfg.Style,
+            baseUrl = cfg.BaseUrl,
+            channel = new
+            {
+                type = cfg.Channel.Type,
+                url = cfg.Channel.Url,
+                token = MaskToken(cfg.Channel.Token),
+                tokenSet = cfg.Channel.Token.Length > 0,
+                template = cfg.Channel.Template,
+            },
+            lastSentDate = cfg.LastSentDate,
+            lastSentAt = cfg.LastSentAt,
+            lastResult = cfg.LastResult,
+            lastError = cfg.LastError,
+        };
+    }
+
+    public static PushConfig Parse(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return new PushConfig();
+        return JsonSerializer.Deserialize<PushConfig>(body, JsonOptions) ?? new PushConfig();
+    }
+
+    /// <summary>保存用户可编辑的部分，保留服务端状态。</summary>
+    public object Save(string user, PushConfig incoming)
+    {
+        var current = Read(user);
+        var channel = incoming.Channel ?? new PushChannelConfig();
+
+        current.Enabled = incoming.Enabled;
+        current.Time = NormalizeTime(incoming.Time);
+        current.GraceHours = incoming.GraceHours <= 0 ? 6 : Math.Clamp(incoming.GraceHours, 0, 23);
+        current.Style = NormalizeStyle(incoming.Style);
+        current.BaseUrl = NormalizeBaseUrl(incoming.BaseUrl);
+        current.Channel = new PushChannelConfig
+        {
+            Type = NormalizeType(channel.Type),
+            Url = (channel.Url ?? "").Trim(),
+            Token = MergeToken(current.Channel.Token, channel.Token),
+            Template = (channel.Template ?? "").Trim(),
+        };
+
+        Validate(current);
+        Write(user, current);
+        return ReadForApi(user);
+    }
+
+    /// <summary>只写服务端状态（调度器用）。</summary>
+    public void SaveState(string user, PushConfig cfg) => Write(user, cfg);
+
+    public IReadOnlyList<(string User, PushConfig Config)> ReadAll()
+    {
+        var list = new List<(string, PushConfig)>();
+        try
+        {
+            if (!System.IO.Directory.Exists(Root)) return list;
+            foreach (var file in System.IO.Directory.EnumerateFiles(Root, "*.json", SearchOption.TopDirectoryOnly))
+            {
+                var name = Path.GetFileNameWithoutExtension(file);
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                var user = CleanUserName(name);
+                list.Add((user, Read(user)));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[push] 枚举推送配置失败：{ex.Message}");
+        }
+        return list;
+    }
+
+    public static string MaskToken(string token)
+    {
+        var value = (token ?? "").Trim();
+        if (value.Length == 0) return "";
+        return value.Length <= 4 ? "****" : "****" + value[^4..];
+    }
+
+    /* 打码值原样回传 = 用户没改，保留原来的 token；空串 = 明确清空。 */
+    private static string MergeToken(string current, string incoming)
+    {
+        var value = (incoming ?? "").Trim();
+        if (value.StartsWith("****", StringComparison.Ordinal)) return current ?? "";
+        return value;
+    }
+
+    private static string NormalizeType(string? type)
+    {
+        var value = (type ?? "").Trim().ToLowerInvariant();
+        return value is "ntfy" or "webhook" or "wechat" or "serverchan" or "pushplus" ? value : "bark";
+    }
+
+    private static string NormalizeStyle(string? style)
+    {
+        var value = (style ?? "").Trim().ToLowerInvariant();
+        return value is "remind" or "digest" ? value : "milestone";
+    }
+
+    private static string NormalizeTime(string? time)
+    {
+        var match = Regex.Match((time ?? "").Trim(), @"^(\d{1,2}):(\d{2})$");
+        if (!match.Success) return "20:00";
+        var hour = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        var minute = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+        if (hour is < 0 or > 23 || minute is < 0 or > 59) return "20:00";
+        return $"{hour:00}:{minute:00}";
+    }
+
+    private static string NormalizeBaseUrl(string? baseUrl)
+    {
+        var value = (baseUrl ?? "").Trim();
+        return value.Length == 0 ? "" : value.TrimEnd('/');
+    }
+
+    private static void Validate(PushConfig cfg)
+    {
+        var url = cfg.Channel.Url;
+        var token = (cfg.Channel.Token ?? "").Trim();
+        /* Server酱 / PushPlus 的接口地址是服务商固定的，用户手里只有一串 key：
+           地址留空 = 走默认接口（发送端会自动补上），所以这里不要求填地址。 */
+        var keyOnly = cfg.Channel.Type is "serverchan" or "pushplus";
+
+        if (keyOnly)
+        {
+            if (token.Length == 0 && cfg.Enabled)
+            {
+                throw new InvalidOperationException(cfg.Channel.Type == "serverchan"
+                    ? "启用前请先填写 Server酱的 SendKey"
+                    : "启用前请先填写 PushPlus 的 token");
+            }
+        }
+        else if (url.Length == 0)
+        {
+            if (cfg.Enabled) throw new InvalidOperationException("启用每日提醒前请先填写推送地址");
+            return;
+        }
+
+        if (url.Length > 0
+            && (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)))
+        {
+            throw new InvalidOperationException("推送地址必须是 http:// 或 https:// 开头的完整 URL");
+        }
+        if (cfg.BaseUrl.Length > 0
+            && (!Uri.TryCreate(cfg.BaseUrl, UriKind.Absolute, out var baseUri)
+                || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)))
+        {
+            throw new InvalidOperationException("「点击跳转」地址必须是 http:// 或 https:// 开头的完整 URL");
+        }
+    }
+
+    private void Write(string user, PushConfig cfg)
+    {
+        var clean = CleanUserName(user);
+        var gate = _locks.GetOrAdd(clean, _ => new SemaphoreSlim(1, 1));
+        gate.Wait();
+        try
+        {
+            System.IO.Directory.CreateDirectory(Root);
+            var path = PathFor(clean);
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temp, JsonSerializer.Serialize(cfg, JsonOptions), new UTF8Encoding(false));
+                File.Move(temp, path, true);
+                RestrictFilePermissions(path);
+            }
+            finally
+            {
+                TryDeleteFile(temp);
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+}
+
+/// <summary>从用户数据整包里算今日摘要。只读，一个字节都不写。</summary>
+static class PushDigestReader
+{
+    /// <summary>
+    /// SRS 复习间隔。**必须与 public/app.js:180 的 REVIEW_INTERVAL_DAYS 逐字一致**。
+    /// 这是整个推送功能唯一的逻辑双份实现：改任何一侧都要同时改另一侧，
+    /// 否则推送里的「N 道到期」会和错题本里的数字对不上。
+    /// 漂移由 /api/push/preview 兜住 —— 它把服务端算的数字摊开给前端并排显示。
+    /// </summary>
+    internal static readonly int[] ReviewIntervalDays = { 1, 2, 4, 7, 15, 30 };
+
+    /// <summary>读失败返回 null（调用方据此**不发**，而不是当成「今天还没练」发一条错的）。</summary>
+    public static async Task<PushDigest?> ComputeAsync(UserDataStore userData, string user, DateTime now)
+    {
+        object data;
+        try
+        {
+            (data, _) = await userData.LoadAsync(user);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[push] 读取 {user} 的学习数据失败，本轮跳过：{ex.Message}");
+            return null;
+        }
+        return Compute(data, now);
+    }
+
+    public static PushDigest Compute(object? data, DateTime now)
+    {
+        var root = ToElement(data);
+        var digest = new PushDigest();
+        var today = now.Date;
+        var todayEnd = today.AddDays(1).AddTicks(-1);
+        var todayKey = today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        // ── 错题本：storage.wrong[qid] = {stage, count, lastReviewAt, wrongAt, at, resolved, ...}
+        //    注意它在**顶层**、跨课程；courses[cid].wrong[qid] 只是 true 标记。
+        if (TryGet(root, "wrong", out var wrong) && wrong.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in wrong.EnumerateObject())
+            {
+                var record = prop.Value;
+                if (record.ValueKind != JsonValueKind.Object)
+                {
+                    /* 老数据里可能有布尔值/垃圾值：算「有错题」但算不出到期日，不计入 due。
+                       前端 ensureWrongReviewFields 对这类值的处理等价于「今天刚错、明天到期」，
+                       所以这里跳过 = 同样的结果。 */
+                    digest.WrongTotal++;
+                    continue;
+                }
+                if (Bool(record, "resolved")) continue;
+                digest.WrongTotal++;
+                var stage = Math.Clamp(Int(record, "stage"), 0, ReviewIntervalDays.Length - 1);
+                var anchor = ParseDate(Text(record, "lastReviewAt"))
+                             ?? ParseDate(Text(record, "wrongAt"))
+                             ?? ParseDate(Text(record, "at"));
+                if (anchor is null) continue;
+                if (anchor.Value.AddDays(ReviewIntervalDays[stage]) <= todayEnd) digest.Due++;
+            }
+        }
+
+        // ── 今日活动 + 连续天数：dailyActivity["YYYY-MM-DD"]（只保留 90 天）
+        if (TryGet(root, "dailyActivity", out var daily) && daily.ValueKind == JsonValueKind.Object)
+        {
+            if (daily.TryGetProperty(todayKey, out var day) && day.ValueKind == JsonValueKind.Object)
+            {
+                digest.DoneToday = Int(day, "total");
+                digest.CorrectToday = Int(day, "correct");
+                digest.VerifiedToday = Int(day, "verified");
+            }
+            /* 今天有练就从今天数，没练从**昨天**数 —— 否则每天早上看到的都是「连续 0 天」。 */
+            var cursor = digest.DoneToday > 0 ? today : today.AddDays(-1);
+            while (digest.Streak < 400)
+            {
+                var key = cursor.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                if (!daily.TryGetProperty(key, out var bucket) || bucket.ValueKind != JsonValueKind.Object) break;
+                if (Int(bucket, "total") <= 0) break;
+                digest.Streak++;
+                cursor = cursor.AddDays(-1);
+            }
+            // 最近一次练过的日期（断签提醒用）。90 天窗口内找不到就当「很久没练」。
+            var probe = today;
+            for (var i = 0; i <= 90; i++)
+            {
+                var key = probe.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                if (daily.TryGetProperty(key, out var bucket) && bucket.ValueKind == JsonValueKind.Object && Int(bucket, "total") > 0)
+                {
+                    digest.DaysSinceLast = i;
+                    break;
+                }
+                probe = probe.AddDays(-1);
+            }
+        }
+
+        // ── 考试计划：plans[cid] = {courseId, examDate, dailyTarget, dailyTargetManual, dailyLog}
+        if (TryGet(root, "plans", out var plans) && plans.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var plan in plans.EnumerateObject())
+            {
+                if (plan.Value.ValueKind != JsonValueKind.Object) continue;
+                var examDate = ParseDate(Text(plan.Value, "examDate"));
+                if (examDate is not null)
+                {
+                    var left = (int)Math.Ceiling((examDate.Value.Date - today).TotalDays);
+                    if (left >= 0 && (digest.DaysLeft < 0 || left < digest.DaysLeft)) digest.DaysLeft = left;
+                }
+                var target = Int(plan.Value, "dailyTarget");
+                if (target > 0 && (digest.DailyTarget == 0 || target < digest.DailyTarget)) digest.DailyTarget = target;
+            }
+        }
+
+        // ── 科目名：profile.lastCourseName
+        if (TryGet(root, "profile", out var profile) && profile.ValueKind == JsonValueKind.Object)
+        {
+            digest.CourseName = Text(profile, "lastCourseName");
+        }
+
+        return digest;
+    }
+
+    private static JsonElement ToElement(object? data) => data switch
+    {
+        JsonElement element => element,
+        null => JsonSerializer.SerializeToElement(new Dictionary<string, object?>()),
+        _ => JsonSerializer.SerializeToElement(data),
+    };
+
+    private static bool TryGet(JsonElement root, string name, out JsonElement value)
+    {
+        value = default;
+        return root.ValueKind == JsonValueKind.Object && root.TryGetProperty(name, out value) && value.ValueKind != JsonValueKind.Null;
+    }
+
+    private static string Text(JsonElement element, string name)
+        => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? ""
+            : "";
+
+    private static int Int(JsonElement element, string name)
+        => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
+            ? (value.TryGetInt32(out var number) ? number : (int)Math.Round(value.GetDouble()))
+            : 0;
+
+    private static bool Bool(JsonElement element, string name)
+        => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value)
+           && (value.ValueKind == JsonValueKind.True
+               || (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var n) && n != 0));
+
+    private static DateTime? ParseDate(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var value = text.Trim().Replace('/', '-');
+        if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed)) return parsed;
+        return DateTime.TryParse(value, CultureInfo.CurrentCulture, DateTimeStyles.None, out parsed) ? parsed : null;
+    }
+}
+
+/// <summary>把摘要变成一条通知。返回 null = 今天不发。</summary>
+static class PushMessageBuilder
+{
+    /* 里程碑阈值：7 / 30 / 60 天。
+       为什么不放 100：dailyActivity 只保留 90 天（app.js:5918），连续 100 天在数据上不可达，
+       写上去就是一个永远不会触发的分支。 */
+    private static readonly int[] StreakMilestones = { 7, 30, 60 };
+
+    public static PushMessage? Build(PushConfig cfg, PushDigest d, DateTime now, bool test = false)
+    {
+        var style = (cfg.Style ?? "milestone").Trim().ToLowerInvariant();
+        var prefix = test ? "【测试】" : "";
+        var url = BuildUrl(cfg.BaseUrl);
+
+        if (d.DoneToday == 0)
+        {
+            /* 断签优先：「今天还没开始」对连续 5 天没打开过的人太轻了。 */
+            if (d.DaysSinceLast >= 3)
+            {
+                return new PushMessage(prefix + $"已经 {d.DaysSinceLast} 天没练", Join($"错题堆到 {d.WrongTotal} 道", ExamText(d)), url);
+            }
+            if (d.Due > 0)
+            {
+                return new PushMessage(prefix + $"{d.Due} 道错题到期", Join($"预计 {EstimateMinutes(d.Due)} 分钟", ExamText(d)), url);
+            }
+            return new PushMessage(prefix + "今天还没开始", Join(SuggestText(d), ExamText(d)), url);
+        }
+
+        if (style == "remind") return null;   // 只催没练：今天练过了就一句话都不发
+
+        // ── 里程碑（style = milestone / digest）：从稀有到常见
+        if (IsStreakMilestone(d.Streak) && cfg.MilestoneStreak < d.Streak)
+        {
+            return new PushMessage(prefix + $"连续 {d.Streak} 天", Join($"今天 {d.DoneToday} 题", ExamText(d)), url);
+        }
+        /* 「到期错题清零」本来也在里程碑里，**故意去掉了**：
+           一个每天认真练的人每天都能把到期清零，于是它退化成每天必发的第二条消息，
+           正是这个方案要避免的通知疲劳。留「单日全对」这种真正稀有的。 */
+        if (d.VerifiedToday >= 20 && d.CorrectToday == d.VerifiedToday)
+        {
+            return new PushMessage(prefix + $"今天 {d.VerifiedToday} 题全对", Join($"连续 {d.Streak} 天", ExamText(d)), url);
+        }
+        if (style == "digest")
+        {
+            return new PushMessage(prefix + $"今天 {d.DoneToday} 题", Join($"正确率 {RateText(d)} · 连续 {d.Streak} 天", ExamText(d)), url);
+        }
+        return null;
+    }
+
+    public static bool IsStreakMilestone(int streak) => Array.IndexOf(StreakMilestones, streak) >= 0;
+
+    /// <summary>通知里「点开跳到哪里」的绝对地址；没填就是空串（渠道会忽略）。</summary>
+    public static string UrlFor(string baseUrl) => BuildUrl(baseUrl);
+
+    private static string BuildUrl(string baseUrl)
+    {
+        var value = (baseUrl ?? "").Trim().TrimEnd('/');
+        return value.Length == 0 ? "" : value + "/?from=push";
+    }
+
+    private static string SuggestText(PushDigest d)
+        => d.DailyTarget > 0 ? $"建议 {d.DailyTarget} 题" : "练几道保持手感";
+
+    private static string ExamText(PushDigest d)
+    {
+        if (d.DaysLeft < 0) return "";
+        if (d.DaysLeft == 0) return "今天考试";
+        return $"距考试 {d.DaysLeft} 天";
+    }
+
+    private static string RateText(PushDigest d)
+        => d.VerifiedToday > 0 ? $"{Math.Round(d.CorrectToday * 100.0 / d.VerifiedToday)}%" : "—";
+
+    private static int EstimateMinutes(int count) => Math.Max(1, (int)Math.Ceiling(count * 0.5));
+
+    private static string Join(params string[] parts) => string.Join(" · ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
+}
+
+/// <summary>三个渠道适配器。都只是「拼一个 HTTP 请求」，没有 SDK 依赖。</summary>
+static class PushSenders
+{
+    private static readonly HttpClient Http = new(new SocketsHttpHandler { AllowAutoRedirect = false })
+    {
+        Timeout = TimeSpan.FromSeconds(10),
+    };
+
+    public static async Task<(bool Ok, string Error)> SendAsync(PushChannelConfig channel, PushMessage message, CancellationToken ct)
+    {
+        var type = (channel?.Type ?? "bark").Trim().ToLowerInvariant();
+        var url = (channel?.Url ?? "").Trim();
+        /* Server酱 / PushPlus：接口地址是服务商固定的，用户只填 key。地址留空就补默认值。 */
+        if (url.Length == 0)
+        {
+            if (type == "serverchan") url = "https://sctapi.ftqq.com";
+            else if (type == "pushplus") url = "https://www.pushplus.plus/send";
+        }
+        if (url.Length == 0) return (false, "推送地址为空");
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            return (false, "推送地址必须是 http/https 开头的完整 URL");
+        }
+        try
+        {
+            return type switch
+            {
+                "ntfy" => await SendNtfyAsync(uri, channel!, message, ct),
+                "webhook" => await SendWebhookAsync(uri, channel!, message, ct),
+                "wechat" => await SendWeChatAsync(uri, message, ct),
+                "serverchan" => await SendServerChanAsync(uri, channel!, message, ct),
+                "pushplus" => await SendPushPlusAsync(uri, channel!, message, ct),
+                _ => await SendBarkAsync(uri, message, ct),
+            };
+        }
+        catch (TaskCanceledException)
+        {
+            return (false, "推送超时（10 秒无响应）");
+        }
+        catch (HttpRequestException ex)
+        {
+            return (false, "推送请求失败：" + ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return (false, "推送失败：" + ex.Message);
+        }
+    }
+
+    /* Bark：POST 到用户给的地址（已含 device key），body 是 JSON。
+       ⚠️ Bark 的 HTTP 状态码恒为 200，真正的结果在 body 的 code 字段里。 */
+    private static async Task<(bool, string)> SendBarkAsync(Uri uri, PushMessage message, CancellationToken ct)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["title"] = message.Title,
+            ["body"] = message.Body,
+            ["group"] = "云习题库",
+            ["level"] = "active",
+        };
+        if (message.Url.Length > 0) payload["url"] = message.Url;
+        using var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        using var response = await Http.PostAsync(uri, content, ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode) return (false, $"Bark 返回 HTTP {(int)response.StatusCode}：{Short(text)}");
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("code", out var code)
+                && code.ValueKind == JsonValueKind.Number
+                && code.TryGetInt32(out var number)
+                && number != 200)
+            {
+                return (false, $"Bark 返回 code {number}：{Short(text)}");
+            }
+        }
+        catch (JsonException)
+        {
+            // 自建 Bark / 中间层可能回纯文本，HTTP 2xx 就算成功
+        }
+        return (true, "");
+    }
+
+    /* ntfy：用 **JSON 发布**（POST 到用户填的 https://ntfy.sh/主题名）。
+       ⚠️ 不能用 header 传标题：.NET 的 HttpClient **拒绝非 ASCII 的 header 值**，
+       中文标题会直接抛「Request headers must contain only ASCII characters」——
+       第一版就是拿 `Title` header 传的，实测 100% 失败（HTTP 请求都没发出去）。
+       JSON body 没有这个限制。
+       topic 不写进 JSON：URL 路径里已经有主题，ntfy 在 body 缺 topic 时用路径里那个。 */
+    private static async Task<(bool, string)> SendNtfyAsync(Uri uri, PushChannelConfig channel, PushMessage message, CancellationToken ct)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["title"] = message.Title,
+            ["message"] = message.Body,
+            ["priority"] = 3,
+            ["tags"] = new[] { "books" },
+        };
+        if (message.Url.Length > 0) payload["click"] = message.Url;
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"),
+        };
+        if (!string.IsNullOrWhiteSpace(channel.Token)) request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + channel.Token.Trim());
+        using var response = await Http.SendAsync(request, ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        return response.IsSuccessStatusCode
+            ? (true, "")
+            : (false, $"ntfy 返回 HTTP {(int)response.StatusCode}：{Short(text)}");
+    }
+
+    /* 企业微信群机器人：POST 到群机器人 webhook，body 形状固定。
+       ⚠️ 和 Bark 一样，HTTP 恒 200，真正的结果在 body 的 errcode 里。
+       注意它进的是**企业微信群**，不是个人微信 —— 要发到个人微信得用下面两个。 */
+    private static async Task<(bool, string)> SendWeChatAsync(Uri uri, PushMessage message, CancellationToken ct)
+    {
+        var content = message.Url.Length > 0
+            ? $"{message.Title}\n{message.Body}\n{message.Url}"
+            : $"{message.Title}\n{message.Body}";
+        var payload = new Dictionary<string, object?>
+        {
+            ["msgtype"] = "text",
+            ["text"] = new Dictionary<string, object?> { ["content"] = content },
+        };
+        using var body = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        using var response = await Http.PostAsync(uri, body, ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode) return (false, $"企业微信返回 HTTP {(int)response.StatusCode}：{Short(text)}");
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("errcode", out var code)
+                && code.TryGetInt32(out var number)
+                && number != 0)
+            {
+                return (false, $"企业微信返回 errcode {number}：{Short(text)}");
+            }
+        }
+        catch (JsonException)
+        {
+            // 自建转发层可能回纯文本，HTTP 2xx 就算成功
+        }
+        return (true, "");
+    }
+
+    /* Server酱（个人微信）：POST 表单到 <base>/<SendKey>.send，code==0 才算成功。
+       免费版每天 5 条 —— 一天一条够用。base 可换成 https://<uid>.push.ft07.com/send。 */
+    private static async Task<(bool, string)> SendServerChanAsync(Uri uri, PushChannelConfig channel, PushMessage message, CancellationToken ct)
+    {
+        var key = (channel.Token ?? "").Trim();
+        if (key.Length == 0) return (false, "Server酱缺少 SendKey");
+        var endpoint = uri.AbsoluteUri.TrimEnd('/') + "/" + Uri.EscapeDataString(key) + ".send";
+        var form = new Dictionary<string, string>
+        {
+            ["title"] = message.Title,
+            ["desp"] = message.Url.Length > 0 ? $"{message.Body}\n\n[点这里打开]({message.Url})" : message.Body,
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = new FormUrlEncodedContent(form),
+        };
+        using var response = await Http.SendAsync(request, ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode) return (false, $"Server酱返回 HTTP {(int)response.StatusCode}：{Short(text)}");
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("code", out var code)
+                && code.TryGetInt32(out var number)
+                && number != 0)
+            {
+                return (false, $"Server酱返回 code {number}：{Short(text)}");
+            }
+        }
+        catch (JsonException) { }
+        return (true, "");
+    }
+
+    /* PushPlus（个人微信）：POST JSON，code==200 才算成功。
+       用 template=txt（纯文本），避免正文里的 < > & 需要再做一次 HTML 转义。 */
+    private static async Task<(bool, string)> SendPushPlusAsync(Uri uri, PushChannelConfig channel, PushMessage message, CancellationToken ct)
+    {
+        var token = (channel.Token ?? "").Trim();
+        if (token.Length == 0) return (false, "PushPlus 缺少 token");
+        var payload = new Dictionary<string, object?>
+        {
+            ["token"] = token,
+            ["title"] = message.Title,
+            ["content"] = message.Url.Length > 0 ? $"{message.Body}\n{message.Url}" : message.Body,
+            ["template"] = "txt",
+        };
+        using var body = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        using var response = await Http.PostAsync(uri, body, ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode) return (false, $"PushPlus 返回 HTTP {(int)response.StatusCode}：{Short(text)}");
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("code", out var code)
+                && code.TryGetInt32(out var number)
+                && number != 200)
+            {
+                return (false, $"PushPlus 返回 code {number}：{Short(text)}");
+            }
+        }
+        catch (JsonException) { }
+        return (true, "");
+    }
+
+    /* 通用 webhook：模板里的 {{title}} / {{body}} / {{url}} 会被**JSON 转义后**填入，
+       所以模板本身可以直接写 JSON：
+         {"msgtype":"text","text":{"content":"{{title}}\n{{body}}\n{{url}}"}}
+       一条实现覆盖企业微信 / 飞书 / Server酱 / PushDeer / Telegram Bot。 */
+    private static async Task<(bool, string)> SendWebhookAsync(Uri uri, PushChannelConfig channel, PushMessage message, CancellationToken ct)
+    {
+        var template = (channel.Template ?? "").Trim();
+        var body = template.Length == 0
+            ? JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["title"] = message.Title,
+                ["body"] = message.Body,
+                ["url"] = message.Url,
+            })
+            : template
+                .Replace("{{title}}", JsonEscape(message.Title), StringComparison.Ordinal)
+                .Replace("{{body}}", JsonEscape(message.Body), StringComparison.Ordinal)
+                .Replace("{{url}}", JsonEscape(message.Url), StringComparison.Ordinal);
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+        using var response = await Http.PostAsync(uri, content, ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        return response.IsSuccessStatusCode
+            ? (true, "")
+            : (false, $"webhook 返回 HTTP {(int)response.StatusCode}：{Short(text)}");
+    }
+
+    private static string JsonEscape(string value)
+    {
+        var serialized = JsonSerializer.Serialize(value ?? "");
+        return serialized.Length >= 2 ? serialized[1..^1] : "";
+    }
+
+    private static string Short(string text)
+    {
+        var value = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+        return value.Length <= 200 ? value : value[..200] + "…";
+    }
+}
+
+/// <summary>
+/// 每 30 秒扫一遍 userdata/push/*.json，到点就发。
+/// 判据全部在 RunOnceAsync 里：开关 → 今天是否已发 → 是否到点 → 是否还在宽限期 → 退避。
+/// </summary>
+sealed class PushScheduler : BackgroundService
+{
+    private readonly PushConfigStore _store;
+    private readonly UserDataStore _userData;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
+    public PushScheduler(PushConfigStore store, UserDataStore userData)
+    {
+        _store = store;
+        _userData = userData;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            /* 启动后先等 25 秒：让题库预热、章节映射自检先跑完，别在启动瞬间抢磁盘 IO。
+               顺便也避免「刚部署完重启」触发一轮立刻发送。 */
+            await Task.Delay(TimeSpan.FromSeconds(25), stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await RunOnceAsync(stoppingToken, ignoreTime: false, onlyUser: null);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                // 一轮失败不能让调度器停摆 —— 明天还得发。
+                Console.WriteLine($"[push] 调度轮次异常：{ex}");
+            }
+            try
+            {
+                if (!await timer.WaitForNextTickAsync(stoppingToken)) return;
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 跑一轮。<paramref name="ignoreTime"/> = 管理员手动触发，跳过「到点 / 宽限期 / 退避」，
+    /// 但仍然遵守开关（给关掉提醒的人发消息不叫验证）。
+    /// </summary>
+    public async Task<PushRunReport> RunOnceAsync(CancellationToken ct, bool ignoreTime, string? onlyUser)
+    {
+        var report = new PushRunReport();
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var now = DateTime.Now;
+            var today = now.Date;
+            var todayKey = today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+            foreach (var (user, cfg) in _store.ReadAll())
+            {
+                if (onlyUser is not null && !user.Equals(CleanUserName(onlyUser), StringComparison.OrdinalIgnoreCase)) continue;
+                if (!cfg.Enabled) { report.Skipped++; continue; }
+
+                /* 「今天已经发过」必须**无论是否手动触发**都判。
+                   ignoreTime 的语义只是「跳过到点/宽限期/退避」，不是「允许重复发」——
+                   否则管理员点两下「立即运行」就给所有人推两条一样的。 */
+                if (cfg.LastSentDate == todayKey) { report.Skipped++; continue; }
+
+                if (!ignoreTime)
+                {
+                    if (!TryParseTime(cfg.Time, out var hour, out var minute)) { report.Skipped++; continue; }
+                    var target = today.AddHours(hour).AddMinutes(minute);
+                    if (now < target) { report.Skipped++; continue; }
+                    /* 宽限期：容器半夜重启 / 白天关机，只要在 time + graceHours 内起来就补一条；
+                       超过就不补了，免得晚上十一点弹一句「今天还没练」。 */
+                    if ((now - target).TotalHours > Math.Clamp(cfg.GraceHours, 0, 23)) { report.Skipped++; continue; }
+                    if (cfg.NextRetryAt.Length > 0
+                        && DateTime.TryParse(cfg.NextRetryAt, CultureInfo.InvariantCulture, DateTimeStyles.None, out var retryAt)
+                        && now < retryAt)
+                    {
+                        report.Skipped++;
+                        continue;
+                    }
+                }
+
+                var digest = await PushDigestReader.ComputeAsync(_userData, user, now);
+                if (digest is null)
+                {
+                    report.Failed++;
+                    AddDetail(report, $"{user}：读取学习数据失败，本轮跳过");
+                    continue;
+                }
+
+                // 断签了 → 连续天数的里程碑重新计。
+                if (digest.Streak < cfg.MilestoneStreak) cfg.MilestoneStreak = 0;
+
+                var message = PushMessageBuilder.Build(cfg, digest, now);
+                if (message is null) { report.Skipped++; continue; }
+
+                var (ok, error) = await PushSenders.SendAsync(cfg.Channel, message, ct);
+                if (ok)
+                {
+                    cfg.LastSentDate = todayKey;
+                    cfg.LastSentAt = NowText();
+                    cfg.LastResult = "ok";
+                    cfg.LastError = "";
+                    cfg.FailCount = 0;
+                    cfg.NextRetryAt = "";
+                    if (PushMessageBuilder.IsStreakMilestone(digest.Streak))
+                    {
+                        cfg.MilestoneStreak = Math.Max(cfg.MilestoneStreak, digest.Streak);
+                    }
+                    report.Sent++;
+                    AddDetail(report, $"{user}：已发送「{message.Title}」");
+                }
+                else
+                {
+                    /* 失败**不推进** lastSentDate，但要退避：否则每 30 秒重试一次，
+                       渠道挂了就是一天 2800 次请求。 */
+                    cfg.FailCount++;
+                    cfg.LastResult = "fail";
+                    cfg.LastError = error;
+                    var delayMinutes = Math.Min(Math.Pow(2, Math.Min(cfg.FailCount, 5)), 32);
+                    cfg.NextRetryAt = now.AddMinutes(delayMinutes).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+                    report.Failed++;
+                    AddDetail(report, $"{user}：发送失败 —— {error}");
+                }
+                _store.SaveState(user, cfg);
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+        return report;
+    }
+
+    private static void AddDetail(PushRunReport report, string line)
+    {
+        if (report.Details.Count < 50) report.Details.Add(line);
+    }
+
+    private static bool TryParseTime(string? text, out int hour, out int minute)
+    {
+        hour = 20;
+        minute = 0;
+        var match = Regex.Match((text ?? "").Trim(), @"^(\d{1,2}):(\d{2})$");
+        if (!match.Success) return false;
+        hour = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        minute = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+        return hour is >= 0 and <= 23 && minute is >= 0 and <= 59;
+    }
 }
 

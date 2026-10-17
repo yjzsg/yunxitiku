@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261017-ink1"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261017-push2"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -112,6 +112,7 @@
               <button type="button" data-theme-set="auto" title="跟随系统" aria-label="跟随系统">跟</button>
             </div>
           </div>
+          <button id="pushSettingsBtn" type="button">每日提醒</button>
           <button id="exportDataBtn" type="button">导出我的数据</button>
           <button id="logoutBtn" type="button">退出登录</button>
         </div>
@@ -402,8 +403,86 @@
       <small class="exam-history-modal-hint">删除一场记录后，本场的成绩与逐题明细都不再保留，也无法恢复。</small>
     </div>
   </div>
+  <!-- 每日提醒：由**服务端**定时推一条（Bark / ntfy / webhook）。
+       为什么不能只在前端做：页面一关就没有 JS，浏览器通知发不出去；
+       Web Push 又要 HTTPS 公网 + VAPID 密钥，这套部署（127.0.0.1 反代）用不上。 -->
+  <div id="pushModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="pushModalTitle">
+    <div class="modal-panel push-modal">
+      <div class="modal-head">
+        <strong id="pushModalTitle">每日提醒</strong>
+        <button id="pushModalCloseBtn" type="button">关闭</button>
+      </div>
+      <div class="push-body">
+        <label class="push-row push-row-switch">
+          <input id="pushEnabled" type="checkbox">
+          <span>每天提醒我练习</span>
+        </label>
+
+        <div class="push-row">
+          <span class="push-label">提醒时间</span>
+          <input id="pushTime" type="time" value="20:00" aria-label="提醒时间">
+        </div>
+
+        <div class="push-row">
+          <span class="push-label">推送方式</span>
+          <select id="pushType" aria-label="推送方式">
+            <option value="serverchan">微信 · Server酱</option>
+            <option value="pushplus">微信 · PushPlus</option>
+            <option value="wechat">企业微信群机器人</option>
+            <option value="bark">Bark（iPhone）</option>
+            <option value="ntfy">ntfy（安卓 / 可自建）</option>
+            <option value="webhook">自定义 webhook</option>
+          </select>
+        </div>
+
+        <div class="push-row">
+          <span class="push-label" id="pushUrlLabel">推送地址</span>
+          <input id="pushUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" aria-labelledby="pushUrlLabel">
+        </div>
+        <small id="pushUrlHint" class="push-hint"></small>
+
+        <div class="push-row hidden" id="pushTokenRow">
+          <span class="push-label" id="pushTokenLabel">访问令牌</span>
+          <input id="pushToken" type="password" autocomplete="off" placeholder="没有就留空" aria-label="访问令牌">
+        </div>
+
+        <div class="push-row hidden" id="pushTemplateRow">
+          <span class="push-label">请求体模板</span>
+          <textarea id="pushTemplate" rows="3" spellcheck="false" aria-label="请求体模板"></textarea>
+        </div>
+
+        <div class="push-row">
+          <span class="push-label">点击跳转</span>
+          <input id="pushBaseUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://192.168.123.6:8787" aria-label="点击跳转地址">
+        </div>
+
+        <div class="push-row">
+          <span class="push-label">内容风格</span>
+          <select id="pushStyle" aria-label="内容风格">
+            <option value="milestone">没练就催，练了只在里程碑报</option>
+            <option value="remind">只催没练</option>
+            <option value="digest">每天都报今日成果</option>
+          </select>
+        </div>
+
+        <div class="push-preview">
+          <span class="push-preview-label">按现在的设置，下次会这样发</span>
+          <div class="push-preview-card">
+            <strong id="pushPreviewTitle">—</strong>
+            <p id="pushPreviewBody">—</p>
+          </div>
+          <small id="pushPreviewMeta" class="push-hint"></small>
+        </div>
+        <div id="pushStatus" class="push-status hidden" role="status"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="pushTestBtn" type="button">发送测试</button>
+        <button id="pushSaveBtn" type="button" class="primary-action">保存</button>
+      </div>
+    </div>
+  </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261017-wr1"></script>
+  <script src="/app.js?v=20261017-push2"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     // `?v=` 跟着 public/sw.js 的 CACHE 版本走（v2 = 白名单缓存 + 不再缓存 /assets/）：
