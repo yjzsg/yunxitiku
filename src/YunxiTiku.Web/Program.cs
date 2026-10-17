@@ -359,9 +359,8 @@ app.MapGet("/api/health", () =>
 // 登录页不再需要它——它靠 /api/auth/session 判断"上次登录的人还是不是有效会话"。
 app.MapGet("/api/admin/users", () =>
 {
-    var users = Directory.GetFiles(paths.UserDataRoot, "*.json")
+    var users = AppHelpers.EnumerateUserFiles(paths)
         // 排除会话存储：它不是用户（否则界面会一直冒出一个叫 sessions 的账号）
-        .Where(path => !SessionStore.IsSessionFile(path))
         .Select(Path.GetFileNameWithoutExtension)
         .Where(name => !string.IsNullOrWhiteSpace(name))
         .Select(name => CleanUserName(name!))
@@ -1575,6 +1574,20 @@ internal static string UserDataPath(AppPaths paths, string user) => Path.Combine
 internal static string NowText() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
 /// <summary>
+/// 账号文件清单（顶层 <c>*.json</c>，排除会话文件）。**账号数的唯一来源**：
+/// 旧实现有三份各算一遍（/api/admin/users 的列表、/api/admin/data/status 的计数、
+/// 前端账号页的 rows.length），任何一处改了判据都会让同屏两个数字打架。
+/// 调用方要列表就 <c>ToList()</c>，要数字就 <c>Count()</c>。
+/// </summary>
+internal static IEnumerable<string> EnumerateUserFiles(AppPaths paths)
+    => Directory.Exists(paths.UserDataRoot)
+        ? Directory.EnumerateFiles(paths.UserDataRoot, "*.json", SearchOption.TopDirectoryOnly)
+            .Where(path => !SessionStore.IsSessionFile(path))
+        : Enumerable.Empty<string>();
+
+internal static int CountUserFiles(AppPaths paths) => EnumerateUserFiles(paths).Count();
+
+/// <summary>
 /// 备份名用：秒级时间戳 + 短随机后缀。同秒内两次备份不再撞名
 /// （旧实现是纯秒级 <c>Timestamp()</c>，zip 走 FileMode.CreateNew 会直接抛，目录则被静默覆盖 ——
 /// 编辑同一道题同一秒连存两次会覆盖同一份快照，所以那个纯秒级的实现已删除）。
@@ -2605,8 +2618,7 @@ static class AdminDataTransfer
                 path = paths.UserDataRoot,
                 files = userRoot is null ? 0 : CountFiles(userRoot.FullName, path => !IsUnderBackup(path, userBackupRoot)),
                 size = userRoot is null ? 0 : DirectorySize(userRoot.FullName, path => !IsUnderBackup(path, userBackupRoot)),
-                users = userRoot is null ? 0 : Directory.EnumerateFiles(userRoot.FullName, "*.json", SearchOption.TopDirectoryOnly)
-                    .Count(path => !SessionStore.IsSessionFile(path)),
+                users = userRoot is null ? 0 : AppHelpers.CountUserFiles(paths),
                 auth = File.Exists(paths.AuthDataPath),
                 updatedAt = LatestWriteTime(paths.UserDataRoot, path => !IsUnderBackup(path, userBackupRoot))
             },

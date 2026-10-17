@@ -3318,6 +3318,12 @@ function failQuestionLoad(err, keptList = false) {
   updateQuestionStaleBanner();
 }
 
+/* 「重试读取」的唯一实现：顶部陈旧横幅和加载失败空态各有一个按钮，
+   原来各写一份一模一样的 loadQuestions().catch(...)，合并到这里。 */
+function retryQuestionLoad() {
+  return loadQuestions().catch((err) => toast(err.message));
+}
+
 /* 顶部常驻横幅：写清「这是上次缓存、什么条件、什么时候」。不给关闭按钮 ——
    这不是「提示一下就好」的状态：屏上的内容可能已经不是当前筛选的结果。 */
 function updateQuestionStaleBanner() {
@@ -3336,7 +3342,7 @@ function updateQuestionStaleBanner() {
     <button type="button" id="questionStaleRetryBtn">重试读取</button>
   `;
   const btn = $("questionStaleRetryBtn");
-  if (btn) btn.onclick = () => loadQuestions().catch((err) => toast(err.message));
+  if (btn) btn.onclick = retryQuestionLoad;
 }
 
 /* 屏上是陈旧题单时，按**整份题单**生效的写操作一律拦掉。
@@ -3374,7 +3380,7 @@ function renderQuestionLoadState() {
       ${state.mode === "practice" ? "" : '<button type="button" id="emptyBackToPracticeBtn">返回考试题库</button>'}
     </div>`;
   const retry = $("questionLoadRetryBtn");
-  if (retry) retry.onclick = () => loadQuestions().catch((err) => toast(err.message));
+  if (retry) retry.onclick = retryQuestionLoad;
   bindEmptyStateActions();
   return true;
 }
@@ -3846,14 +3852,13 @@ function takeFreshByChapter(items, courseStore, quota, blocked, seen, randomize 
   return out;
 }
 
-/* 今日强化的选题预算表。返回 { ids, counts }，counts 给卡片文案用。
-   装填顺序：到期复习 → 反复错 → 薄弱章节 → 未做题保底 → 余量填充。
-   每一段都有上限，且任何一段装不满都不会浪费位置（后面的段顺延吃余量）。 */
-function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
-  const randomize = !!options.randomize;
-  const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
-  const seen = buildSeenIndex();
-  const servedToday = todayServedIds();
+/* ── 组题单的三个共用零件 ────────────────────────────────────────────
+   「今日强化」(buildSmartPracticePlan) 和「考前冲刺」(buildSprintPracticePlan)
+   原来各写一份去重器 / 薄弱章段 / 新题段，逻辑逐字相同，只有配额常量不同。
+   抽到这里，改轮换策略或去重口径时只改一处。 */
+
+/* 去重器：push 保证一批内不重复，take 额外跳过「今天已经出现过」的题。 */
+function createPracticePicker(servedToday) {
   const ids = [];
   const picked = new Set();
   const push = (id) => {
@@ -3873,6 +3878,49 @@ function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
     }
     return added;
   };
+  return { ids, picked, push, take };
+}
+
+/* 「薄弱章节」段：前 N 个弱章各分一份配额，章内按跨天轮换排序。
+   按**课本章名**筛（跨卷册、一题多章 —— 见 textbookChapterKeys），
+   并排除已答对的题（没做对的才值得再练）。 */
+function takeWeakChapterIds({ allItems, courseStore, weakChapters, quota, take, seen }) {
+  const perChapter = Math.max(1, Math.ceil(quota / Math.max(1, weakChapters.length)));
+  let added = 0;
+  weakChapters.forEach((chapter) => {
+    if (added >= quota) return;
+    const candidates = allItems
+      .filter((item) => textbookChapterKeys(item).includes(chapter.key))
+      .filter((item) => !courseStore.correct?.[item.id])
+      .map((item) => item.id);
+    added += take(orderCandidates(candidates, seen), Math.min(perChapter, quota - added));
+  });
+  return added;
+}
+
+/* 「未做题保底」段：先扣出保底量，再按剩余空间继续取（新题不再是余数）。
+   按二级章节轮转，避免整批新题砸在同一个章节。 */
+function takeFreshIds({ allItems, courseStore, quota, picked, servedToday, seen, randomize, take }) {
+  const pool = takeFreshByChapter(
+    allItems,
+    courseStore,
+    quota,
+    new Set([...picked, ...servedToday]),
+    seen,
+    randomize,
+  );
+  return take(pool, quota);
+}
+
+/* 今日强化的选题预算表。返回 { ids, counts }，counts 给卡片文案用。
+   装填顺序：到期复习 → 反复错 → 薄弱章节 → 未做题保底 → 余量填充。
+   每一段都有上限，且任何一段装不满都不会浪费位置（后面的段顺延吃余量）。 */
+function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
+  const randomize = !!options.randomize;
+  const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const seen = buildSeenIndex();
+  const servedToday = todayServedIds();
+  const { ids, picked, take } = createPracticePicker(servedToday);
 
   const records = getWrongRecordsForCurrentCourse(courseStore);
   const cmpStale = staleRank(seen);
@@ -3894,32 +3942,18 @@ function buildSmartPracticePlan(courseStore = userCourseStore(), options = {}) {
 
   /* ③ 薄弱章节：top5 章均分配额，章内按轮换排序。
      旧实现是章内 slice(0,10) 取题序最前 10 道，薄弱章节不变则那 10 道永远不变。 */
-  const weakChapters = getWeakChapterRows(courseStore, allItems).slice(0, 5);
-  const perChapter = Math.max(1, Math.ceil(SMART_QUOTA.weak / Math.max(1, weakChapters.length)));
-  let weakAdded = 0;
-  weakChapters.forEach((chapter) => {
-    if (weakAdded >= SMART_QUOTA.weak) return;
-    /* 按「课本章名」筛，跨卷册、一题多章 —— 见 textbookChapterKeys */
-    const candidates = allItems
-      .filter((item) => textbookChapterKeys(item).includes(chapter.key))
-      .filter((item) => !courseStore.correct?.[item.id])
-      .map((item) => item.id);
-    weakAdded += take(orderCandidates(candidates, seen), Math.min(perChapter, SMART_QUOTA.weak - weakAdded));
-  });
-  counts.weak = weakAdded;
-
-  /* ④ 未做题保底：先扣出保底量，再按剩余空间继续取（新题不再是「余数」）。
-     按二级章节轮转，避免整批新题砸在同一个章节。 */
-  const freshQuota = Math.max(SMART_PRACTICE_FLOOR_NEW, SMART_PRACTICE_SIZE - ids.length);
-  const freshPool = takeFreshByChapter(
+  counts.weak = takeWeakChapterIds({
     allItems,
     courseStore,
-    freshQuota,
-    new Set([...picked, ...servedToday]),
+    weakChapters: getWeakChapterRows(courseStore, allItems).slice(0, 5),
+    quota: SMART_QUOTA.weak,
+    take,
     seen,
-    randomize,
-  );
-  counts.fresh = take(freshPool, freshQuota);
+  });
+
+  /* ④ 未做题保底 */
+  const freshQuota = Math.max(SMART_PRACTICE_FLOOR_NEW, SMART_PRACTICE_SIZE - ids.length);
+  counts.fresh = takeFreshIds({ allItems, courseStore, quota: freshQuota, picked, servedToday, seen, randomize, take });
 
   /* ⑤ 余量填充：题库做完了（未做题取尽）时用剩余弱项补满，不留下短题单。 */
   if (ids.length < SMART_PRACTICE_SIZE) {
@@ -4065,20 +4099,24 @@ function activeScopedAnswerSession() {
   return activeSmartTrainingSession() || activeWrongPracticeSession();
 }
 
-function currentPracticeAnswerStore() {
+/* 当前这一轮该读/写哪一份「作答」与「判定」。
+   训练轮（智能训练 / 错题训练）用**会话自己**的一份，普通练习用 courseStore 的。
+   两份存储的键名不同（会话是 answers / verifiedAnswers），所以传一对键名进来，
+   而不是写两个只差字段名的函数。 */
+function currentScopedStore(sessionKey, courseKey) {
   const session = activeScopedAnswerSession();
-  if (session) return session.answers;
+  if (session) return session[sessionKey];
   const courseStore = userCourseStore();
-  courseStore.answers ||= {};
-  return courseStore.answers;
+  courseStore[courseKey] ||= {};
+  return courseStore[courseKey];
+}
+
+function currentPracticeAnswerStore() {
+  return currentScopedStore("answers", "answers");
 }
 
 function currentPracticeVerifiedStore() {
-  const session = activeScopedAnswerSession();
-  if (session) return session.verifiedAnswers;
-  const courseStore = userCourseStore();
-  courseStore.verified ||= {};
-  return courseStore.verified;
+  return currentScopedStore("verifiedAnswers", "verified");
 }
 
 /* ── 训练会话：终态 + 「继续上次」的唯一判据 ────────────────────────────
@@ -4118,9 +4156,19 @@ function sessionLastTouchedAt(session) {
    找，用户的原话是「继续上次就该是上次」。终态（completed / abandoned /
    expired）仍按 isTrainingSessionOpen 排除；真正废弃由 SESSION_ABANDON_DAYS
    在 sweepTrainingSessionStates 里收口。
-   返回的会话不一定是今天的 → 按钮/提示要用 sessionResumeDayText 带上日期。 */
-function resumableTrainingSession(courseId = state.currentCourse?.id) {
+   返回的会话不一定是今天的 → 按钮/提示要用 sessionResumeDayText 带上日期。
+
+   options.mode / options.type 用来把「可续」收窄到某一族会话。错题本面板要的是
+   「上一轮**错题本**训练」，不能把「今日错题复习」（type:"due"，mode 同样是 "wrong"）
+   也算进来 —— 两个入口的题池不同（错题本 = 当前筛选结果，错题复习 = 只到期），
+   混在一起会让错题本的「继续上轮」续到一条题池完全不同的会话上（实测：做完
+   今日错题复习后，错题本显示「继续上轮（已答 0/3）」并指向 due 会话）。 */
+function resumableTrainingSession(courseId = state.currentCourse?.id, options = {}) {
+  const wantMode = options.mode || "";
+  const wantType = options.type || "";
   for (const session of getTrainingSessionsForCourse(courseId)) {
+    if (wantMode && session.mode !== wantMode) continue;
+    if (wantType && session.type !== wantType) continue;
     if (!normalizeSessionIds(session.ids).length) continue;
     if (!isTrainingSessionOpen(session)) continue;
     /* syncTrainingSessionStats 可能顺手把它标成 completed（本轮题全确认完了），
@@ -4403,6 +4451,26 @@ function saveSmartPracticeSession(ids, sourceTitle = "智能推荐", options = {
   return session;
 }
 
+/* 新建一条智能训练题单并进入智能练习视图。
+   6 个入口（收藏分组 / 信心·错因 / 今日强化 / 薄弱章节 / 同类题 / 考前冲刺）原来各写一遍
+   「resetGeneratedPracticeFilters → saveSmartPracticeSession → state.mode="smart" →
+   setCoursePicker(false) → loadQuestions」，而「清 smartLeftCourseName」只有 3 处写了：
+   切过科目后再从收藏/同类题/冲刺入口开新题单，空态会错说「上一轮属于「X」科目」
+   （见 buildEmptyMessage）。统一到这里，少一处遗漏就少一句错话。 */
+async function enterSmartPractice({ ids, sourceTitle, type, limit = 0, extra = null, toastText = "" }) {
+  const list = limit > 0 ? ids.slice(0, limit) : ids;
+  resetGeneratedPracticeFilters();
+  const session = saveSmartPracticeSession(list, sourceTitle, { type });
+  if (extra) extra(session);
+  state.mode = "smart";
+  state.smartLeftCourseName = "";
+  state.smartLeftCourseId = 0;
+  setCoursePicker(false);
+  await loadQuestions();
+  if (toastText) toast(toastText);
+  return session;
+}
+
 function findStartIndex(items, subjectId) {
   if (!items.length) return -1;
   const index = items.findIndex((item) => item.id === subjectId);
@@ -4585,6 +4653,16 @@ function renderAll() {
   }
 }
 
+/* 「返回考试题库」的唯一实现。三个入口共用：
+   · 训练页工具行的 #trainingPracticeBtn
+   · 空态/读取失败态里的 #emptyBackToPracticeBtn
+   · 错题本等模块内的「回题库」按钮
+   原来这几处各写一份，且都**不递增 modeTransitionId**（在途请求回来照样写屏）、
+   也不统一 setPanelPage。现在一律走 switchMode。 */
+function backToPractice() {
+  return switchMode("practice");
+}
+
 /* 空态里也可能有操作按钮（比如错题本「一道都没到期」时的「立即训练全部 N 道」、
    智能练习空态里的「开始今日强化」）。innerHTML 每渲染一次都会重建按钮，所以每次都要重新绑。 */
 function bindEmptyStateActions() {
@@ -4592,17 +4670,9 @@ function bindEmptyStateActions() {
   if (wrongBtn) wrongBtn.onclick = () => startWrongBookPractice({ ignoreReview: true }).catch((err) => toast(err.message));
   const smartBtn = $("emptyStartSmartBtn");
   if (smartBtn) smartBtn.onclick = () => startSmartPractice().catch((err) => toast(err.message));
-  /* 收藏空态 / 题单读取失败的错误态共用这个出口：回考试题库（走和训练页
-     「返回考试题库」同一条路径：换 mode → 重新读题单）。 */
+  /* 收藏空态 / 题单读取失败的错误态共用这个出口：回考试题库。 */
   const backBtn = $("emptyBackToPracticeBtn");
-  if (backBtn) {
-    backBtn.onclick = async () => {
-      state.mode = "practice";
-      setCoursePicker(false);
-      renderMode();
-      await loadQuestions().catch((err) => toast(err.message));
-    };
-  }
+  if (backBtn) backBtn.onclick = backToPractice;
   /* 收藏有内容、但被「题型」筛空时的出口：清掉题型筛选再读一次
      （收藏是 id 列表模式，章节/标签不参与，能挡住它的只有题型）。 */
   const clearTypeBtn = $("emptyClearTypeBtn");
@@ -6239,6 +6309,18 @@ function pauseExamOnLeave() {
   return !!state.storage.settings?.pauseExamOnLeave;
 }
 
+/* 「离开考场」的唯一实现。切模块 / 切到后台 / 刷新关页三处做的是同一件事：
+   勾了「离开页面时暂停计时」才暂停，然后存草稿。**先暂停再存草稿** ——
+   顺序反了草稿里就没有 pausedAt，续考时会把离开的这段时间也算成考试时间。
+   默认（未勾）时间照走：草稿存的是 endsAt，续考按真实时间算剩余。
+   （「回到前台」那条不能并进来：它要 resumeExamTimer / syncExamTimer。） */
+function suspendExam(reason) {
+  if (state.mode !== "exam" || !state.exam || state.submitted) return false;
+  if (pauseExamOnLeave()) pauseExamTimer(reason);
+  saveExamDraft();
+  return true;
+}
+
 function renderVerifyModeControls() {
   state.verifyMode = currentVerifyMode();
   const isExam = state.mode === "exam";
@@ -6563,7 +6645,7 @@ function renderTraining() {
             <b>${planOverview.task.ids.length} 题 · 距离考试 ${planOverview.days} 天</b>
             <small>复习 ${planOverview.task.counts.review || 0} · 强化 ${planOverview.task.counts.weak || 0} · 新题 ${planOverview.task.counts.new || 0} · 欠账 ${planOverview.debt}</small>
           </div>
-          <button id="trainingPlanBtn" type="button" ${planOverview.task.ids.length && !planOverview.todayCompleted ? "" : "disabled"}>${planOverview.todaySession && !planOverview.todayCompleted ? "继续今日计划" : planOverview.todayCompleted ? "今日计划已完成" : "开始今日计划"}</button>
+          <button id="trainingPlanBtn" type="button" ${planButtonDisabled(planOverview) ? "disabled" : ""}>${planButtonLabel(planOverview)}</button>
         </div>
       ` : ""}
       <div class="training-summary-grid">
@@ -6588,7 +6670,6 @@ function renderTraining() {
         })}
       </div>
       <div class="training-tools">
-        <button type="button" id="trainingContinueSmartBtn" ${resumable ? "" : "disabled"}>继续上次${resumeDay ? `（${resumeDay}）` : ""}：${resumable ? escapeHtml(resumable.sourceTitle || "智能训练") : `暂无可继续的题单`}</button>
         <button type="button" id="trainingDashboardBtn">查看学习看板</button>
         <button type="button" id="trainingWrongBtn">查看错题本</button>
         <button type="button" id="trainingPracticeBtn">返回考试题库</button>
@@ -6662,25 +6743,16 @@ function previewPracticePlan(type, courseStore, context = {}) {
 
 function bindTrainingActions() {
   $("trainingSmartBtn").onclick = () => startSmartPractice().catch((err) => toast(err.message));
-  $("trainingContinueSmartBtn").onclick = () => continueSmartPractice().catch((err) => toast(err.message));
+  /* 工具行原来还有一个「继续上次：<题单名>」按钮，和上面 hero 的「继续上次训练」
+     是同一个动作（都走 startSmartPractice → 续同一条会话），只是文案多带了题单名。
+     同屏两个「继续上次」按 A/B 审计的结论删掉工具行那个：题单名在下面的
+     「个人训练看板」每一行里都有（行内也有自己的「继续」）。 */
   if ($("trainingPlanBtn")) $("trainingPlanBtn").onclick = () => startTodayReviewPlan().catch((err) => toast(err.message));
-  $("trainingDashboardBtn").onclick = async () => {
-    state.mode = "progress";
-    setCoursePicker(false);
-    renderMode();
-    await loadQuestions();
-  };
-  $("trainingWrongBtn").onclick = async () => {
-    leaveActiveTrainingSession();
-    resetWrongBookPageFilter();
-    state.mode = "wrong";
-    await loadQuestions();
-  };
-  $("trainingPracticeBtn").onclick = async () => {
-    leaveActiveTrainingSession();
-    state.mode = "practice";
-    await loadQuestions();
-  };
+  /* 训练页底部的三个出口原来各手抄一份「切 mode」逻辑（都不递增
+     modeTransitionId → 在途请求回来照样写屏）。现在统一走 switchMode。 */
+  $("trainingDashboardBtn").onclick = () => switchMode("progress");
+  $("trainingWrongBtn").onclick = () => switchMode("wrong");
+  $("trainingPracticeBtn").onclick = backToPractice;
   document.querySelectorAll("[data-training-action]").forEach((btn) => {
     btn.onclick = () => {
       const action = btn.dataset.trainingAction;
@@ -6791,7 +6863,8 @@ function renderStudyDashboard(courseStore, stats, items) {
   const allWeak = getWeakChapterRows(courseStore, items);
   const weak = allWeak.slice(0, 3);
   const weakBelowCount = allWeak.filter((row) => isWeakRow(row)).length;
-  const report = getTodayReport() || buildDailyReport(courseStore, stats, items);
+  const savedReport = getTodayReport();
+  const report = savedReport || buildDailyReport(courseStore, stats, items);
   const today = getTodayActivity();
   const reportText = report
     ? `已记录快照：累计已做 ${report.done} 题 · 确认正确率 ${report.rate}% · ${escapeHtml(report.focus || "继续保持")}`
@@ -6818,7 +6891,7 @@ function renderStudyDashboard(courseStore, stats, items) {
       ${renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount)}
       <div class="study-card">
         <span>学习日报</span>
-        <b>${report.todayTotal || today.total} 题</b>
+        <b>${savedReport ? "今日已记录" : "今日未记录"}</b>
         <small>${escapeHtml(report.tomorrow || "明天继续保持节奏")}</small>
         <button id="dailyReportBtn" type="button">更新日报</button>
       </div>
@@ -7216,12 +7289,13 @@ async function startSignalPractice(type, label) {
       toast("当前分组没有收藏题");
       return;
     }
-    resetGeneratedPracticeFilters();
-    saveSmartPracticeSession(match.ids.slice(0, 80), `收藏：${label}`, { type: "favorite" });
-    state.mode = "smart";
-    setCoursePicker(false);
-    await loadQuestions();
-    toast(`已生成「${label}」收藏练习`);
+    await enterSmartPractice({
+      ids: match.ids,
+      sourceTitle: `收藏：${label}`,
+      type: "favorite",
+      limit: 80,
+      toastText: `已生成「${label}」收藏练习`,
+    });
     return;
   }
   const source = type === "confidence" ? state.storage.confidence : state.storage.wrongReasons;
@@ -7231,12 +7305,13 @@ async function startSignalPractice(type, label) {
     toast("当前科目没有匹配题目");
     return;
   }
-  resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(match.ids.slice(0, 80), `${type === "confidence" ? "信心" : "错因"}：${label}`, { type });
-  state.mode = "smart";
-  setCoursePicker(false);
-  await loadQuestions();
-  toast(`已生成「${label}」专项练习`);
+  await enterSmartPractice({
+    ids: match.ids,
+    sourceTitle: `${type === "confidence" ? "信心" : "错因"}：${label}`,
+    type,
+    limit: 80,
+    toastText: `已生成「${label}」专项练习`,
+  });
 }
 
 /* hero「开始/继续今日强化」。续哪条、开新的，都走 resumableTrainingSession ——
@@ -7258,14 +7333,12 @@ async function startSmartPractice(options = {}) {
     toast("暂无可生成的智能练习");
     return;
   }
-  resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids, "今日强化", { type: "smart" });
-  state.mode = "smart";
-  state.smartLeftCourseName = "";
-  state.smartLeftCourseId = 0;
-  setCoursePicker(false);
-  await loadQuestions();
-  toast(`已生成今日强化（${state.questions.length || ids.length} 题）`);
+  await enterSmartPractice({
+    ids,
+    sourceTitle: "今日强化",
+    type: "smart",
+    toastText: `已生成今日强化（${state.questions.length || ids.length} 题）`,
+  });
 }
 
 /* 学习看板「薄弱章节」卡 →「只练这一章」。
@@ -7293,14 +7366,12 @@ async function startWeakChapterPractice(chapterKey) {
   /* sourceTitle 要能认出是哪一章（「继续上次」/智能练习卡直接显示它）。
      前缀跟着卡上的展示判断走：真低于门槛才写「薄弱章节」，只是相对最弱就照实说。 */
   const prefix = row && chapterMastery(row).level !== "weak" ? "相对最弱章节" : "薄弱章节";
-  resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids, `${prefix}：${name}`, { type: "weak" });
-  state.mode = "smart";
-  state.smartLeftCourseName = "";
-  state.smartLeftCourseId = 0;
-  setCoursePicker(false);
-  await loadQuestions();
-  toast(`已生成「${name}」专项练习（${state.questions.length || ids.length} 题）`);
+  await enterSmartPractice({
+    ids,
+    sourceTitle: `${prefix}：${name}`,
+    type: "weak",
+    toastText: `已生成「${name}」专项练习（${state.questions.length || ids.length} 题）`,
+  });
 }
 
 async function exitSmartPractice() {
@@ -7371,18 +7442,19 @@ function nextWrongBookSessionId(courseId = state.currentCourse?.id) {
   return `${base}-${Date.now()}`;
 }
 
-/* 本科目下**未完成**的错题训练（最近更新的一条）。判据与
-   resumableTrainingSession 一致：不限于今天 —— 昨天没做完的一轮照样该能续。
+/* 本科目下**未完成**的错题本训练（最近更新的一条）。
+   判据与 resumableTrainingSession 完全一致（不限于今天、终态排除、completed 收敛），
+   只把范围收窄到「错题本训练」这一族：mode="wrong" 且 type="wrong"。
+
+   ⚠️ 为什么必须带 type：`startDueWrongReview` 造的「今日错题复习」也是 mode="wrong"，
+   只筛 mode 的话错题本会把它当成「上一轮错题本训练」—— 实测做完今日错题复习后，
+   错题本面板显示「继续上轮（已答 0/3）」并续到 due 会话上，而用户以为续的是
+   自己按筛选建的那一轮。两个入口题池不同（筛选结果 vs 只到期），不能互相冒充。
+
    用途：错题本面板分「继续上轮」/「按筛选新建」两个动作、以及 startWrongBookPractice
    在没显式要求新建时续上它。**不用于取题**：取题只看指针（见 getModeQuestionIds）。 */
 function wrongBookSessionForCourse(courseId = state.currentCourse?.id) {
-  for (const session of getTrainingSessionsForCourse(courseId)) {
-    if (session.mode !== "wrong") continue;
-    if (!normalizeSessionIds(session.ids).length) continue;
-    syncTrainingSessionStats(session);
-    if (isTrainingSessionOpen(session)) return session;
-  }
-  return null;
+  return resumableTrainingSession(courseId, { mode: "wrong", type: "wrong" });
 }
 
 /* 题池 = 当前筛选结果（复用 wrongRecordMatchesFilter，与错题本列表同一套口径）。
@@ -7442,6 +7514,41 @@ function spreadByChapter(ids, recordById) {
   return out;
 }
 
+/* 错题训练单的唯一构造处。错题本「按筛选新建」和训练页「今日错题复习」原来
+   各写一份字面量（字段一一对应），差别只有 id 生成方式、type 和 sourceTitle。
+   合并后新增字段只改一处，也保证两条入口的作答作用域字段不会漏写
+   （漏了就会拿上一轮的作答当本轮，答案直接摊开）。
+   options.id / type / sourceTitle / ids 必填；currentIndex / lastSubjectId 由这里统一置 0。 */
+function startWrongPracticeSession({ id, type, sourceTitle, ids }) {
+  resetGeneratedPracticeFilters();
+  const session = upsertTrainingSession({
+    id,
+    type,
+    mode: "wrong",
+    sourceTitle,
+    courseId: state.currentCourse.id,
+    courseName: state.currentCourse.name || "",
+    ids,
+    /* 干净的一轮：本轮作答另起一份（见 activeWrongPracticeSession）。
+       answers 必须显式给空对象 —— upsertTrainingSession 是 { ...old, ...session }，
+       不写的话会继承上一次同 id 会话里已经答过的题。 */
+    answers: {},
+    verifiedAnswers: {},
+    results: {},
+    currentIndex: 0,
+    lastSubjectId: 0,
+    status: "active",
+  });
+  state.mode = "wrong";
+  /* 练习刚交卷就跑来练错题时 state.submitted 还是 true（它是**练习那一轮**的运行时状态，
+     既不落盘也不按模式复位）—— 带进训练轮的话 shouldRevealCurrentAnswer 对每道题都返回
+     true，等于把答案全摊开。新的训练轮一律从「未交卷」开始。 */
+  state.submitted = false;
+  state.answerVisible = false;
+  setCoursePicker(false);
+  return session;
+}
+
 async function startWrongBookPractice(options = {}) {
   if (!state.currentCourse) return;
   /* 空态里的「立即训练全部 N 道」= 忽略「复习」这一项开练。页面筛选也必须一起回到
@@ -7479,33 +7586,7 @@ async function startWrongBookPractice(options = {}) {
     return;
   }
   const sessionId = nextWrongBookSessionId();
-  resetGeneratedPracticeFilters();
-  upsertTrainingSession({
-    id: sessionId,
-    type: "wrong",
-    mode: "wrong",
-    sourceTitle: "错题本训练",
-    courseId: state.currentCourse.id,
-    courseName: state.currentCourse.name || "",
-    ids,
-    /* 干净的一轮：本轮作答另起一份（见 activeWrongPracticeSession）。
-       answers 必须显式给空对象 —— upsertTrainingSession 是 { ...old, ...session }，
-       不写的话会继承上一次同 id 会话里已经答过的题。 */
-    answers: {},
-    verifiedAnswers: {},
-    results: {},
-    currentIndex: 0,
-    lastSubjectId: 0,
-    status: "active",
-  });
-  state.mode = "wrong";
-  /* 练习刚交卷就跑来练错题时 state.submitted 还是 true（它是**练习那一轮**的运行时状态，
-     既不落盘也不按模式复位）—— 带进训练轮的话 shouldRevealCurrentAnswer 对每道题都返回
-     true，等于把答案全摊开。新的训练轮一律从「未交卷」开始，和 saveSmartPracticeSession
-     对新批次做的是同一件事。 */
-  state.submitted = false;
-  state.answerVisible = false;
-  setCoursePicker(false);
+  startWrongPracticeSession({ id: sessionId, type: "wrong", sourceTitle: "错题本训练", ids });
   await loadQuestions();
   toast(`已开始错题训练（${ids.length} 道）`);
 }
@@ -7526,25 +7607,7 @@ async function startDueWrongReview() {
     toast(dueIds.length ? `今天到期的 ${dueIds.length} 道错题都已经练过了` : "今天没有到期错题");
     return;
   }
-  resetGeneratedPracticeFilters();
-  upsertTrainingSession({
-    id: trainingSessionId("due"),
-    type: "due",
-    mode: "wrong",
-    sourceTitle: "今日错题复习",
-    courseId: state.currentCourse.id,
-    courseName: state.currentCourse.name || "",
-    ids: fresh,
-    /* 同「开始训练」：本轮作答另起一份，别把上一次的作答当成本轮的（见 activeWrongPracticeSession） */
-    answers: {},
-    verifiedAnswers: {},
-    results: {},
-    status: "active",
-  });
-  state.mode = "wrong";
-  /* 同「开始训练」：练习交卷残留的 state.submitted 不能带进这一轮 */
-  state.submitted = false;
-  state.answerVisible = false;
+  startWrongPracticeSession({ id: trainingSessionId("due"), type: "due", sourceTitle: "今日错题复习", ids: fresh });
   /* 这里**不写** state.wrongFilters.review = "due"。
      旧实现写了，于是「点过今日错题复习 → 切错题本」时错题本的「复习」筛选被留在
      「到期」，今天刚错的题（stage 0 的到期日是次日）在错题本里全都不见 ——
@@ -7570,12 +7633,13 @@ async function startSimilarWrongPractice() {
     toast("暂无可扩展的同类题");
     return;
   }
-  resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids.slice(0, 80), "同类题型练习", { type: "similar" });
-  state.mode = "smart";
-  setCoursePicker(false);
-  await loadQuestions();
-  toast("已生成同类题型练习");
+  await enterSmartPractice({
+    ids,
+    sourceTitle: "同类题型练习",
+    type: "similar",
+    limit: 80,
+    toastText: "已生成同类题型练习",
+  });
 }
 
 function buildSimilarWrongIds(courseStore = userCourseStore()) {
@@ -7684,39 +7748,23 @@ async function startSprintPractice() {
     toast("暂无可生成的冲刺题");
     return;
   }
-  resetGeneratedPracticeFilters();
-  saveSmartPracticeSession(ids.slice(0, 100), "考前冲刺", { type: "sprint" });
-  state.mode = "smart";
-  setCoursePicker(false);
-  await loadQuestions();
-  toast("已生成考前冲刺题");
+  await enterSmartPractice({
+    ids,
+    sourceTitle: "考前冲刺",
+    type: "sprint",
+    limit: 100,
+    toastText: "已生成考前冲刺题",
+  });
 }
 
-/* 考前冲刺的选题预算表。和今日强化同一套机制：每段有上限、新题有保底、跨天轮换。 */
+/* 考前冲刺的选题预算表。和今日强化同一套机制：每段有上限、新题有保底、跨天轮换
+   （去重器 / 薄弱章段 / 新题段都共用 buildSmartPracticePlan 上面那三个零件）。 */
 function buildSprintPracticePlan(courseStore = userCourseStore(), options = {}) {
   const randomize = !!options.randomize;
   const allItems = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
   const seen = buildSeenIndex();
   const servedToday = todayServedIds();
-  const ids = [];
-  const picked = new Set();
-  const push = (id) => {
-    const n = Number(id);
-    if (!n || picked.has(n)) return false;
-    picked.add(n);
-    ids.push(n);
-    return true;
-  };
-  const take = (ordered, quota) => {
-    let added = 0;
-    for (const raw of ordered || []) {
-      if (added >= quota) break;
-      const n = Number(raw);
-      if (picked.has(n) || servedToday.has(n)) continue;
-      if (push(n)) added++;
-    }
-    return added;
-  };
+  const { ids, picked, take } = createPracticePicker(servedToday);
 
   const counts = { wrong: 0, weak: 0, fresh: 0, neverDone: 0 };
 
@@ -7733,31 +7781,18 @@ function buildSprintPracticePlan(courseStore = userCourseStore(), options = {}) 
   counts.wrong = take(orderCandidates(wrongList, seen), SPRINT_QUOTA.wrong);
 
   /* ② 薄弱章节：top6 章均分配额，章内按轮换排序（旧实现同样是 slice(0,10)）。 */
-  const weakChapters = getWeakChapterRows(courseStore, allItems).slice(0, 6);
-  const perChapter = Math.max(1, Math.ceil(SPRINT_QUOTA.weak / Math.max(1, weakChapters.length)));
-  let weakAdded = 0;
-  weakChapters.forEach((chapter) => {
-    if (weakAdded >= SPRINT_QUOTA.weak) return;
-    /* 同 buildSmartPracticePlan：按课本章名筛，跨卷册、一题多章 */
-    const candidates = allItems
-      .filter((item) => textbookChapterKeys(item).includes(chapter.key))
-      .filter((item) => !courseStore.correct?.[item.id])
-      .map((item) => item.id);
-    weakAdded += take(orderCandidates(candidates, seen), Math.min(perChapter, SPRINT_QUOTA.weak - weakAdded));
+  counts.weak = takeWeakChapterIds({
+    allItems,
+    courseStore,
+    weakChapters: getWeakChapterRows(courseStore, allItems).slice(0, 6),
+    quota: SPRINT_QUOTA.weak,
+    take,
+    seen,
   });
-  counts.weak = weakAdded;
 
   /* ③ 未做题保底：冲刺只给错题 25 + 弱章 35，剩下 40 个位置留给没做过的题。 */
   const freshQuota = Math.max(SPRINT_PRACTICE_FLOOR_NEW, SPRINT_PRACTICE_SIZE - ids.length);
-  const freshPool = takeFreshByChapter(
-    allItems,
-    courseStore,
-    freshQuota,
-    new Set([...picked, ...servedToday]),
-    seen,
-    randomize,
-  );
-  counts.fresh = take(freshPool, freshQuota);
+  counts.fresh = takeFreshIds({ allItems, courseStore, quota: freshQuota, picked, servedToday, seen, randomize, take });
 
   if (ids.length < SPRINT_PRACTICE_SIZE) {
     counts.wrong += take(orderCandidates(wrongList, seen), SPRINT_PRACTICE_SIZE - ids.length);
@@ -7773,7 +7808,10 @@ function buildSprintPracticeIds(courseStore = userCourseStore()) {
 }
 
 function renderDeepAnalysis(courseStore, items = state.questions) {
-  const answeredIds = new Set(Object.keys(courseStore.done || {}).map(Number));
+  /* 「做过」的判据与全站统一走 isQuestionDone（done ∪ correct ∪ wrong）：
+     旧实现只看 done，旧版考场交卷（只写 correct/wrong）的题在这张表里
+     全被算成「没做过」，和看板/薄弱章节的「已做」对不上。 */
+  const isDone = (id) => isQuestionDone(courseStore, id);
   const correctIds = new Set(Object.keys(courseStore.correct || {}).map(Number));
   /* 分母取「客观题确认集合」，与 KPI 同一口径（confirmedSets）：
      确认记录必须还对得上当前答案，主观题不进客观正确率表 —— 否则同一屏里
@@ -7815,7 +7853,7 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
       const chapter = ensureChapterRow(node, index + 1);
       if (!chapter) return;
       chapter.total++;
-      if (answeredIds.has(id)) chapter.done++;
+      if (isDone(id)) chapter.done++;
       if (isVerified) chapter.verified++;
       if (isVerified && isCorrect) chapter.correct++;
     });
@@ -7840,7 +7878,7 @@ function renderDeepAnalysis(courseStore, items = state.questions) {
     const typeKey = item.subjectType ?? item.type ?? "题目";
     const type = byType.get(typeKey) || { id: typeKey, name: item.type || "题目", total: 0, done: 0, verified: 0, correct: 0 };
     type.total++;
-    if (answeredIds.has(id)) type.done++;
+    if (isDone(id)) type.done++;
     if (isVerified) type.verified++;
     if (isVerified && isCorrect) type.correct++;
     byType.set(typeKey, type);
@@ -8047,7 +8085,10 @@ function buildReviewPlanPools(courseStore, items) {
   allItems.forEach((item) => {
     const id = Number(item.id);
     if (!id) return;
-    const done = !!courseStore.done?.[id];
+    /* 「做过」的判据与全站其余地方统一走 isQuestionDone（done ∪ correct ∪ wrong）。
+       旧实现只看 done：老数据（尤其**旧版考场交卷**只写 correct/wrong、不写 done）
+       里做过的题会被算成「没做过」，今日计划把它们当新题再发一遍。 */
+    const done = isQuestionDone(courseStore, id);
     const weak = isWeakItem(item);
     if (!done) {
       undoneIds.push(id);
@@ -8070,7 +8111,8 @@ function buildReviewPlanPools(courseStore, items) {
 }
 
 function getReviewPlanCarryoverIds(courseStore) {
-  const done = new Set(Object.keys(courseStore.done || {}).map(Number));
+  /* 同 buildReviewPlanPools：做过 = done ∪ correct ∪ wrong，别只看 done。 */
+  const isDone = (id) => isQuestionDone(courseStore, id);
   const ids = new Set((activeReviewPlan().carryoverIds || []).map(Number).filter(Boolean));
   const today = todayKey();
   (state.storage.trainingSessions || []).forEach((session) => {
@@ -8079,10 +8121,10 @@ function getReviewPlanCarryoverIds(courseStore) {
     const key = session.planKey || dateKey(parseDate(session.createdAt) || new Date());
     if (key >= today || session.status === "completed") return;
     normalizeSessionIds(session.ids).forEach((id) => {
-      if (!done.has(Number(id))) ids.add(Number(id));
+      if (!isDone(id)) ids.add(Number(id));
     });
   });
-  return [...ids].filter((id) => !done.has(Number(id)));
+  return [...ids].filter((id) => !isDone(id));
 }
 
 function suggestDailyTarget(stats, items, pools, days) {
@@ -8168,6 +8210,20 @@ function buildReviewPlanOverview(stats, wrongTotal, items = state.questions) {
   };
 }
 
+/* 「今日计划」按钮的三态文案与禁用判据 —— 训练页卡片和看板复习计划面板
+   各写过一份（表达式逐字相同），合并到这里，改口径时只改一处。 */
+function planButtonLabel(overview) {
+  if (overview.todaySession && !overview.todayCompleted) return "继续今日计划";
+  if (overview.todayCompleted) return "今日计划已完成";
+  return "开始今日计划";
+}
+
+function planButtonDisabled(overview) {
+  /* hasPlan 必须算进来：看板那块面板在没设考试日期时也会渲染，此时 task 是按
+     系统建议临时算出来的，不能点（训练页那张卡整块都不渲染，等价）。 */
+  return !(overview.hasPlan && overview.task.ids.length && !overview.todayCompleted);
+}
+
 function renderReviewPlanPanel(stats, wrongTotal, items = state.questions) {
   const overview = buildReviewPlanOverview(stats, wrongTotal, items);
   const plan = overview.plan;
@@ -8187,7 +8243,7 @@ function renderReviewPlanPanel(stats, wrongTotal, items = state.questions) {
           <input id="dailyTargetInput" type="number" min="1" step="1" value="${escapeHtml(targetValue)}" data-suggested-target="${overview.suggestedTarget}">
         </label>
         <button id="savePlanBtn" type="button">保存计划</button>
-        <button id="startTodayPlanBtn" type="button" ${overview.hasPlan && taskCount && !overview.todayCompleted ? "" : "disabled"}>${overview.todaySession && !overview.todayCompleted ? "继续今日计划" : overview.todayCompleted ? "今日计划已完成" : "开始今日计划"}</button>
+        <button id="startTodayPlanBtn" type="button" ${planButtonDisabled(overview) ? "disabled" : ""}>${planButtonLabel(overview)}</button>
       </div>
       <div class="plan-summary">
         ${overview.hasPlan
@@ -8331,23 +8387,25 @@ async function startTodayReviewPlan() {
     toast("今日计划暂无题目");
     return;
   }
-  resetGeneratedPracticeFilters();
-  const session = saveSmartPracticeSession(ids, "今日计划", { type: "plan" });
-  session.planKey = todayKey();
-  session.taskCounts = overview.task.counts;
-  saveActiveReviewPlan({
-    ...activeReviewPlan(),
-    courseId: state.currentCourse.id,
-    todaySessionId: session.id,
-    lastSuggestedTarget: overview.suggestedTarget,
-    lastRebalancedAt: nowText(),
-    carryoverIds: overview.pools.carryoverIds,
+  await enterSmartPractice({
+    ids,
+    sourceTitle: "今日计划",
+    type: "plan",
+    toastText: "已生成今日计划",
+    extra: (session) => {
+      session.planKey = todayKey();
+      session.taskCounts = overview.task.counts;
+      saveActiveReviewPlan({
+        ...activeReviewPlan(),
+        courseId: state.currentCourse.id,
+        todaySessionId: session.id,
+        lastSuggestedTarget: overview.suggestedTarget,
+        lastRebalancedAt: nowText(),
+        carryoverIds: overview.pools.carryoverIds,
+      });
+      scheduleSave();
+    },
   });
-  scheduleSave();
-  state.mode = "smart";
-  setCoursePicker(false);
-  await loadQuestions();
-  toast("已生成今日计划");
 }
 
 function todayKey() {
@@ -8357,9 +8415,12 @@ function todayKey() {
 function getTodayActivity(courseId = state.currentCourse?.id) {
   const day = state.storage.dailyActivity?.[todayKey()];
   if (!day) return { total: 0, verified: 0, correct: 0, rate: 0, durationMs: 0 };
+  /* 正确率口径统一走 confirmedRate（分母 = 已确认题数），别在这里再手写一份
+     Math.round(correct/verified*100) —— 两处已经各写一份，改口径时会漏。 */
   if (!courseId) {
-    const rate = day.verified ? Math.round(Number(day.correct || 0) / Number(day.verified || 1) * 100) : 0;
-    return { total: Number(day.total || 0), verified: Number(day.verified || 0), correct: Number(day.correct || 0), rate, durationMs: Number(day.durationMs || 0) };
+    const correct = Number(day.correct || 0);
+    const verified = Number(day.verified || 0);
+    return { total: Number(day.total || 0), verified, correct, rate: confirmedRate(correct, verified), durationMs: Number(day.durationMs || 0) };
   }
   const course = day.courses?.[String(courseId)] || {};
   const verified = Number(course.verified || 0);
@@ -8368,7 +8429,7 @@ function getTodayActivity(courseId = state.currentCourse?.id) {
     total: Number(course.total || 0),
     verified,
     correct,
-    rate: verified ? Math.round(correct / verified * 100) : 0,
+    rate: confirmedRate(correct, verified),
     durationMs: Number(course.durationMs || 0),
   };
 }
@@ -8573,12 +8634,21 @@ async function renderAdminDashboard() {
   renderAdminRows(rows, users.length - rows.length);
 }
 
+/* 管理端的正确率：与学员端同一口径 —— 分母优先用「已确认」（verified），
+   老数据没有 verified 时才退回 done。旧实现一律 correct/done，于是同一个人
+   在学员端看到 80%、管理员看到 53%（答过但没确认的题把分母撑大了）。 */
+function adminRate(correct, verified, done) {
+  const denom = Number(verified || 0) || Number(done || 0);
+  return denom ? Math.round((Number(correct || 0) / denom) * 100) : 0;
+}
+
 function buildUserSummary(user, data, meta = {}) {
   const courseStores = Object.values(data.courses || {});
   const done = uniqueCount(courseStores.flatMap((course) => Object.keys(course.done || {})));
+  const verified = uniqueCount(courseStores.flatMap((course) => Object.keys(course.verified || {})));
   const correct = uniqueCount(courseStores.flatMap((course) => Object.keys(course.correct || {})));
   const wrong = uniqueCount(courseStores.flatMap((course) => Object.keys(course.wrong || {})));
-  const rate = done ? Math.round((correct / done) * 100) : 0;
+  const rate = adminRate(correct, verified, done);
   const history = Array.isArray(data.history) ? data.history : [];
   const courseStats = buildUserCourseStats(data);
   return {
@@ -8606,6 +8676,7 @@ function buildUserCourseStats(data) {
     const id = Number(courseId);
     if (!id) return;
     const done = Object.keys(course.done || {}).length;
+    const verified = Object.keys(course.verified || {}).length;
     const correct = Object.keys(course.correct || {}).length;
     const wrong = Object.keys(course.wrong || {}).length;
     const courseName = (data.history || []).find((item) => Number(item.courseId || 0) === id)?.courseName
@@ -8618,7 +8689,8 @@ function buildUserCourseStats(data) {
       done,
       correct,
       wrong,
-      rate: done ? Math.round((correct / done) * 100) : 0,
+      verified,
+      rate: adminRate(correct, verified, done),
       lastSubjectId: course.lastSubjectId || 0,
     };
   });
@@ -9091,8 +9163,9 @@ function renderAdminCourseTable(rows) {
             ${courses.map((course) => {
               const stats = rows.map((row) => row.courseStats?.[course.id]).filter(Boolean);
               const done = stats.reduce((sum, item) => sum + item.done, 0);
+              const verified = stats.reduce((sum, item) => sum + Number(item.verified || 0), 0);
               const correct = stats.reduce((sum, item) => sum + item.correct, 0);
-              const rate = done ? Math.round((correct / done) * 100) : 0;
+              const rate = adminRate(correct, verified, done);
               return `<td><b>${done}</b><span>平均 ${rate}%</span></td>`;
             }).join("")}
           </tr>
@@ -11437,6 +11510,32 @@ function askExamDraftQuestionGap(missingIds, draft) {
   });
 }
 
+/* 考场运行时（state.exam）的唯一构造处。新卷和续考草稿原来各写一份字面量，
+   字段一一对应但已经漂移（草稿多 draftId）；满分重算也是两段一模一样的 reduce。
+   合并到这里：满分一律按**实际题单**重算，不按用户填的数字 —— 题量填得比题库还大时
+   （实测单选池 6727、用户填 7227）旧实现顶栏写「满分 7227 分」而卷子只有 6727 题。
+   分值口径与判分完全一致：每题都过 getQuestionScore（scoreMap 优先）。 */
+function buildExamRuntime({ rule, scoreMap, questions, questionIds, remainingMs, startedAt, draftId }) {
+  const started = Number(startedAt || Date.now());
+  const remaining = Math.max(0, Number(remainingMs || 0));
+  const runtime = {
+    rule: rule || getExamRule(),
+    scoreMap: scoreMap || {},
+    /* 题单随考试对象一起存：saveExamDraft 只认它（见那边的注释）。 */
+    questionIds: questionIds || (questions || []).map((item) => Number(item.id)).filter(Boolean),
+    startedAt: started,
+    endsAt: Date.now() + remaining,
+    remainingMs: remaining,
+    pausedAt: null,
+    pauseReason: "",
+    submittedAt: null,
+    result: null,
+  };
+  if (draftId) runtime.draftId = draftId;
+  runtime.rule.totalScore = (questions || []).reduce((sum, item) => sum + getQuestionScore(item.detail || item), 0);
+  return runtime;
+}
+
 async function resumeExamDraft() {
   const draft = examDraftForCurrentCourse();
   if (!draft) {
@@ -11529,24 +11628,15 @@ async function resumeExamDraft() {
   state.answerVisible = false;
   state.answerCardPage = Number(draft.answerCardPage || 0);
   state.currentIndex = Math.min(Math.max(0, Number(draft.currentIndex || 0)), loaded.length - 1);
-  state.exam = {
+  state.exam = buildExamRuntime({
     rule: draft.rule || getExamRule(),
     scoreMap: draft.scoreMap || {},
-    /* 题单进 state.exam：saveExamDraft 只认它（见那边的注释），
-       恢复后继续答题/切模块也不会把草稿写坏。 */
+    questions: loaded,
     questionIds: ids,
-    startedAt: Number(draft.startedAt || Date.now()),
-    endsAt: Date.now() + remaining,
+    startedAt: draft.startedAt,
     remainingMs: remaining,
-    pausedAt: null,
-    pauseReason: "",
-    submittedAt: null,
-    result: null,
     draftId: draft.id || `${Date.now()}-${flow.courseId}`,
-  };
-  /* 满分按**恢复出来的实际题单**重算：草稿里存的可能是旧题库/旧版本的满分，
-     而顶栏满分必须和判分口径（scoreMap → 题目分值）一致，否则又是「两个都说自己对」。 */
-  state.exam.rule.totalScore = loaded.reduce((sum, item) => sum + getQuestionScore(item.detail || item), 0);
+  });
   renderAll();
   await loadCurrentQuestion().catch((err) => toast(err.message));
   if (!examFlowStillCurrent(flow)) return;
@@ -12479,25 +12569,7 @@ async function generateExamPaper(rule, parts, flow = null) {
   state.currentIndex = 0;
   state.answerCardPage = 0;
   const durationMs = rule.durationMinutes * 60000;
-  state.exam = {
-    rule,
-    scoreMap,
-    /* 题单随考试对象一起存：saveExamDraft 只认它（见那边的注释）。 */
-    questionIds: questions.map((item) => Number(item.id)).filter(Boolean),
-    startedAt: Date.now(),
-    endsAt: Date.now() + durationMs,
-    remainingMs: durationMs,
-    pausedAt: null,
-    pauseReason: "",
-    submittedAt: null,
-    result: null,
-  };
-  /* 满分按**实际出卷结果**重算，不按用户填的数字：题量填得比题库还大时
-     （实测单选池 6727、用户填 7227），旧实现顶栏写「满分 7227 分」、成绩面板写
-     「x / 7227 分」，而卷子只有 6727 题 —— 用户永远拿不到满分。
-     分值口径与判分完全一致：每题都过 getQuestionScore（scoreMap 优先，
-     所以上面必须先落 state.exam）。 */
-  state.exam.rule.totalScore = questions.reduce((sum, item) => sum + getQuestionScore(item.detail || item), 0);
+  state.exam = buildExamRuntime({ rule, scoreMap, questions, remainingMs: durationMs });
   saveExamDraft();
   startExamTimer();
   renderAll();
@@ -13236,74 +13308,88 @@ function handleGlobalShortcuts(event) {
 ensureMobileControls();
 bindQuestionSwipe();
 
+/* 切模块的唯一实现（六个 study 模式之间）。导航项、训练页底部的三个出口、
+   空态里的「返回考试题库」原来各写一份 —— 手抄的那几份都**不递增
+   modeTransitionId**，于是在途的旧请求回来照样写屏（导航路径靠它作废在途请求）。
+   统一到这里，顺带保证 setPanelPage / 离开考场 / 清训练指针 / 清错题筛选
+   这几步在每条入口上都执行。
+
+   这里不提供「不清训练指针」的开关：错题本内部开练走 startWrongPracticeSession
+   （它自己设 mode 和指针），不经过 switchMode。 */
+async function switchMode(nextMode) {
+  if (!nextMode) return;
+  setMobileTools(false);
+  setMobileActions(false);
+  if (isAdmin()) {
+    renderAdminDashboard();
+    return;
+  }
+  const transitionId = (state.modeTransitionId || 0) + 1;
+  state.modeTransitionId = transitionId;
+  state.questionRequestId = (state.questionRequestId || 0) + 1;
+  state.submitToken = (state.submitToken || 0) + 1;
+  state.submitting = false;
+  setPanelPage(nextMode === "exam" || nextMode === "progress" || nextMode === "training");
+  /* 切模块：离开考场时暂停（勾了选项才真暂停）、存草稿、停表。
+     三处「离开考场」共用 suspendExam（见那边的注释）。 */
+  suspendExam("module");
+  if (state.mode === "exam" && nextMode !== "exam") stopExamTimer();
+  if (["practice", "wrong", "favorite"].includes(nextMode)) {
+    leaveActiveTrainingSession();
+  }
+  /* 进错题本一律按「全部」看：见 resetWrongBookPageFilter */
+  if (nextMode === "wrong") resetWrongBookPageFilter();
+  state.mode = nextMode;
+  if (state.mode === "practice") setCoursePicker(shouldAutoOpenCoursePicker());
+  else setCoursePicker(false);
+  renderMode();
+  renderWrongFilters();
+  renderPracticeContextPanel();
+  if (!state.currentCourse) {
+    if (state.mode === "exam") renderExamHome();
+    return;
+  }
+  if (state.mode === "exam") {
+    await enterExamHome(transitionId);
+    return;
+  }
+  if (state.mode === "progress" || state.mode === "training") {
+    $("questionBody").classList.add("hidden");
+    $("emptyState").classList.remove("hidden");
+    $("emptyState").innerHTML = state.mode === "training"
+      ? `<strong>正在生成智能训练</strong><span>正在读取错题、薄弱章节和今日练习建议。</span>`
+      : `<strong>正在生成学习看板</strong><span>正在读取当前科目的进度、训练记录和学习信号。</span>`;
+  }
+  if (!["exam", "progress", "training"].includes(state.mode)) {
+    /* UI-05：切模块的**第一时刻**就收掉上一个模块的题单并给加载占位。
+       不能等 loadQuestions（它排在 loadTypes 之后）——期间屏上会一直挂着
+       别的模块的题目。 */
+    beginQuestionModuleEntry();
+    await loadTypes();
+    if (transitionId !== state.modeTransitionId) return;
+  }
+  await loadQuestions().catch((err) => toast(err.message));
+  if (transitionId !== state.modeTransitionId) return;
+}
+
 document.querySelectorAll(".nav-item[data-mode]").forEach((btn) => {
   btn.onclick = async () => {
-    setMobileTools(false);
-    setMobileActions(false);
-    if (isAdmin()) {
-      renderAdminDashboard();
-      return;
-    }
     const nextMode = btn.dataset.mode;
-    const transitionId = (state.modeTransitionId || 0) + 1;
-    state.modeTransitionId = transitionId;
-    state.questionRequestId = (state.questionRequestId || 0) + 1;
-    state.submitToken = (state.submitToken || 0) + 1;
-    state.submitting = false;
-    setPanelPage(nextMode === "exam" || nextMode === "progress" || nextMode === "training");
-    if (nextMode === "practice" && state.mode === "practice") {
-      /* 已经在题库里，再点底栏「题库」不再往返切面板（S-35）：
-         手机上面板占满整屏（实测 390×844 高 703px），每点一次「题库」都被它拦一道，
-         而唯一的出口是面板底部叫「进入做题」的按钮。
-         现在：还没选科目 → 弹（必须选）；已有科目 → 收起 / 不动作
-         （点的是当前页签，本该没动作）。换科目请点顶栏的科目名。
-         桌面端维持原来的开关行为（面板是并排一栏，不挡题）。 */
+    /* 已经在题库里，再点底栏「题库」不再往返切面板（S-35）：
+       手机上面板占满整屏（实测 390×844 高 703px），每点一次「题库」都被它拦一道，
+       而唯一的出口是面板底部叫「进入做题」的按钮。
+       现在：还没选科目 → 弹（必须选）；已有科目 → 收起 / 不动作
+       （点的是当前页签，本该没动作）。换科目请点顶栏的科目名。
+       桌面端维持原来的开关行为（面板是并排一栏，不挡题）。
+       这一段是**页签独有**的语义（点的是当前页签），所以留在调用方，不进 switchMode。 */
+    if (nextMode === "practice" && state.mode === "practice" && !isAdmin()) {
+      setMobileTools(false);
+      setMobileActions(false);
       setCoursePicker(isPhoneViewport() ? !state.currentCourse : !state.pickerOpen);
       renderMode();
       return;
     }
-    /* 切模块：默认（未勾选项）时间照走 —— 草稿存的是 endsAt，回考场续考按真实时间算。
-       勾了「离开页面时暂停计时」才真暂停，而且必须**先暂停再存草稿**：
-       否则草稿里没有 pausedAt，续考时会把离开的这段时间也算成考试时间。 */
-    if (state.mode === "exam" && nextMode !== "exam" && pauseExamOnLeave()) {
-      pauseExamTimer("module");
-    }
-    if (state.mode === "exam" && state.exam && !state.submitted) saveExamDraft();
-    if (state.mode === "exam" && nextMode !== "exam") stopExamTimer();
-    if (["practice", "wrong", "favorite"].includes(nextMode)) leaveActiveTrainingSession();
-    /* 进错题本一律按「全部」看：见 resetWrongBookPageFilter */
-    if (nextMode === "wrong") resetWrongBookPageFilter();
-    state.mode = nextMode;
-    if (state.mode === "practice") setCoursePicker(shouldAutoOpenCoursePicker());
-    else setCoursePicker(false);
-    renderMode();
-    renderWrongFilters();
-    renderPracticeContextPanel();
-    if (!state.currentCourse) {
-      if (state.mode === "exam") renderExamHome();
-      return;
-    }
-    if (state.mode === "exam") {
-      await enterExamHome(transitionId);
-      return;
-    }
-    if (state.mode === "progress" || state.mode === "training") {
-      $("questionBody").classList.add("hidden");
-      $("emptyState").classList.remove("hidden");
-      $("emptyState").innerHTML = state.mode === "training"
-        ? `<strong>正在生成智能训练</strong><span>正在读取错题、薄弱章节和今日练习建议。</span>`
-        : `<strong>正在生成学习看板</strong><span>正在读取当前科目的进度、训练记录和学习信号。</span>`;
-    }
-    if (!["exam", "progress", "training"].includes(state.mode)) {
-      /* UI-05：切模块的**第一时刻**就收掉上一个模块的题单并给加载占位。
-         不能等 loadQuestions（它排在 loadTypes 之后）——期间屏上会一直挂着
-         别的模块的题目。 */
-      beginQuestionModuleEntry();
-      await loadTypes();
-      if (transitionId !== state.modeTransitionId) return;
-    }
-    await loadQuestions().catch((err) => toast(err.message));
-    if (transitionId !== state.modeTransitionId) return;
+    await switchMode(nextMode);
   };
 });
 
@@ -13445,12 +13531,9 @@ window.addEventListener("resize", debounce(() => {
 }, 120));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    if (state.mode === "exam" && state.exam && !state.submitted) {
-      /* 默认（未勾「离开页面时暂停计时」）只存草稿、不暂停 ——
-         草稿里带着 endsAt，回来续考时按真实时间算剩余，时间照走。 */
-      if (pauseExamOnLeave()) pauseExamTimer("background");
-      saveExamDraft();
-    }
+    /* 默认（未勾「离开页面时暂停计时」）只存草稿、不暂停 ——
+       草稿里带着 endsAt，回来续考时按真实时间算剩余，时间照走。 */
+    suspendExam("background");
     if (state.storageDirty) {
       saveUserData().catch(() => {
         /* 页面已隐藏，弹不出对话框 → 退回 sendBeacon 再存一次；
@@ -13507,11 +13590,8 @@ window.addEventListener("beforeunload", (event) => {
     event.returnValue = "题库编辑区还有未保存的修改";
   }
   syncCurrentTrainingSession();
-  if (state.mode === "exam" && state.exam && !state.submitted) {
-    /* 刷新/关页默认不暂停（时间照走，草稿按 endsAt 续），勾了选项才暂停。 */
-    if (pauseExamOnLeave()) pauseExamTimer("unload");
-    saveExamDraft();
-  }
+  /* 刷新/关页默认不暂停（时间照走，草稿按 endsAt 续），勾了选项才暂停。 */
+  suspendExam("unload");
   if (state.saveTimer) {
     clearTimeout(state.saveTimer);
     state.saveTimer = null;
