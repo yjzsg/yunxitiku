@@ -1233,7 +1233,13 @@ app.MapGet("/api/push/preview", async (HttpContext context, PushConfigStore stor
     /* style / baseUrl 允许用查询参数覆盖：设置页里用户改了「内容风格」但还没保存时，
        预览要跟着变，否则他得先保存才看得到效果。只影响这一次预览，不落盘。 */
     if (!string.IsNullOrWhiteSpace(style)) cfg.Style = style.Trim().ToLowerInvariant();
-    if (baseUrl is not null) cfg.BaseUrl = baseUrl.Trim().TrimEnd('/');
+    /* 空串 = 用户把跳转地址清空了，那按「用服务端默认地址」预览 —— 与真正发送时一致
+       （Save 和 Read 都会把空值补成默认值），否则预览里没链接、实际发出去却有。 */
+    if (baseUrl is not null)
+    {
+        var overridden = baseUrl.Trim().TrimEnd('/');
+        cfg.BaseUrl = overridden.Length == 0 ? store.DefaultBaseUrl : overridden;
+    }
     var digest = await PushDigestReader.ComputeAsync(userData, clean, now);
     if (digest is null)
     {
@@ -6506,10 +6512,22 @@ sealed class PushConfigStore
     private readonly AppPaths _paths;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new(StringComparer.OrdinalIgnoreCase);
 
-    public PushConfigStore(AppPaths paths)
+    public PushConfigStore(AppPaths paths, IConfiguration configuration)
     {
         _paths = paths;
+        /* 推送里「点一下跳回本站」的地址，部署相关，不进仓库：
+           由 App:PublicBaseUrl 提供（docker-compose.override.yml 或 appsettings 里配）。
+           没配就留空 —— 推送照发，只是不带链接，绝不去猜（反代后面拿不到真实 scheme，
+           猜出来就是 http:// 开头，点开是错的）。 */
+        _defaultBaseUrl = (configuration["App:PublicBaseUrl"] ?? "").Trim().TrimEnd('/');
     }
+
+    private readonly string _defaultBaseUrl;
+
+    /// <summary>新建配置时预填的跳转地址（也可以被用户改掉）。</summary>
+    public string DefaultBaseUrl => _defaultBaseUrl;
+
+    private PushConfig NewConfig() => new() { BaseUrl = _defaultBaseUrl };
 
     public string Root => Path.Combine(_paths.UserDataRoot, "push");
     public string PathFor(string user) => Path.Combine(Root, CleanUserName(user) + ".json");
@@ -6519,17 +6537,21 @@ sealed class PushConfigStore
         var path = PathFor(user);
         try
         {
-            if (!File.Exists(path)) return new PushConfig();
+            if (!File.Exists(path)) return NewConfig();
             var body = File.ReadAllText(path, Encoding.UTF8);
-            if (body.Trim().Length == 0) return new PushConfig();
-            return JsonSerializer.Deserialize<PushConfig>(body, JsonOptions) ?? new PushConfig();
+            if (body.Trim().Length == 0) return NewConfig();
+            var cfg = JsonSerializer.Deserialize<PushConfig>(body, JsonOptions) ?? NewConfig();
+            /* 空 = 用服务端默认值。这样「老配置没这一项」和「用户清空了」都落到同一个
+               结果上：点开通知能跳回站点，而不是一个没有链接的消息。 */
+            if (cfg.BaseUrl.Trim().Length == 0) cfg.BaseUrl = _defaultBaseUrl;
+            return cfg;
         }
         catch (Exception ex)
         {
             /* 配置坏了**不能**让调度器崩，也不能当成「已启用」乱发。回默认值（enabled=false）
                → 这一轮跳过、日志留痕；用户打开设置页保存一次就自动修好。 */
             Console.WriteLine($"[push] 读取推送配置失败（本轮按未启用处理）{path}: {ex.Message}");
-            return new PushConfig();
+            return NewConfig();
         }
     }
 
@@ -6577,6 +6599,8 @@ sealed class PushConfigStore
         current.GraceHours = incoming.GraceHours <= 0 ? 6 : Math.Clamp(incoming.GraceHours, 0, 23);
         current.Style = NormalizeStyle(incoming.Style);
         current.BaseUrl = NormalizeBaseUrl(incoming.BaseUrl);
+        // 清空 = 回到服务端默认值（而不是「没有链接」）。
+        if (current.BaseUrl.Length == 0) current.BaseUrl = _defaultBaseUrl;
         current.Channel = new PushChannelConfig
         {
             Type = NormalizeType(channel.Type),

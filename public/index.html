@@ -24,7 +24,7 @@
   </script>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#6265ef">
-  <link rel="stylesheet" href="/style.css?v=20261017-push2"><link rel="stylesheet" href="/drawer.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=20261017-push3"><link rel="stylesheet" href="/drawer.css?v=5">
 </head>
 <body>
   <section id="loginView" class="login-view">
@@ -453,7 +453,8 @@
 
         <div class="push-row">
           <span class="push-label">点击跳转</span>
-          <input id="pushBaseUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://192.168.123.6:8787" aria-label="点击跳转地址">
+          <input id="pushBaseUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://你的域名:端口" aria-label="点击跳转地址">
+          <small class="push-hint">推送里点一下就打开这个地址。留空 = 用本站默认地址。</small>
         </div>
 
         <div class="push-row">
@@ -482,7 +483,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js?v=20261017-push2"></script>
+  <script src="/app.js?v=20261017-push3"></script>
   <script>
     // PWA（S7）：注册 service worker。失败不影响使用（比如 http 环境或隐私模式）。
     // `?v=` 跟着 public/sw.js 的 CACHE 版本走（v2 = 白名单缓存 + 不再缓存 /assets/）：
