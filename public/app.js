@@ -54,8 +54,9 @@ const state = {
   /* 允许删除**已确认内容**对应的草稿：loadUserData 确认了服务端就是这份内容之后，
      才准把对应 draftId 定向删掉（「已确认」的显式凭证）。 */
   draftConfirmations: [],
-  /* 补存定时器只能有一个；冲突保留后排队的那次不能把当前 storage 整包覆盖掉。 */
-  deferredSaveTimer: null,
+  /* 开页时发现有「revision 已过期、补存不了」的草稿：不弹模态，只挂这个入口，
+     用户点账号菜单里的保存状态再打开冲突框（见 openPendingConflict）。 */
+  pendingConflict: null,
   conflictOpen: false,
   conflictLocalSnapshot: null,
   pendingPasswordUser: "",
@@ -1305,6 +1306,14 @@ function initAccountMenu() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") setOpen(false);
   });
+  /* 保存状态在「有补存不了的草稿」时就是入口：开页不再弹模态，用户点这里才打开冲突框
+     （见 openPendingConflict）。没有待处理草稿时它是纯展示，点不动。 */
+  $("saveStatusLabel")?.addEventListener("click", (e) => {
+    if (!state.pendingConflict) return;
+    e.stopPropagation();
+    setOpen(false);
+    openPendingConflict();
+  });
 }
 
 function setMobileActions(open) {
@@ -1632,8 +1641,6 @@ async function logout() {
   localStorage.removeItem(SESSION_TOKEN_KEY);
   clearTimeout(state.saveTimer);
   state.saveTimer = null;
-  clearTimeout(state.deferredSaveTimer);
-  state.deferredSaveTimer = null;
   state.storageDirty = false;
   setSaveStatus("idle");
   state.user = "";
@@ -1674,6 +1681,7 @@ async function loadUserData(user, options = {}) {
   state.draftConfirmations = [];
   state.conflictDraftId = "";
   state.conflictDrafts = null;
+  state.pendingConflict = null;
   const generation = state.loadGeneration;
   let res;
   try {
@@ -1830,7 +1838,12 @@ function updateSaveStatusUi() {
     error: "保存失败",
   };
   /* 只读态：状态文案必须说清楚「不是已同步」，否则用户看到「已同步」以为存上了。 */
-  const label = state.storageReadFailed ? "只读 · 未保存" : (map[status] || map.idle);
+  const pendingCount = state.pendingConflict
+    ? ((state.pendingConflict.drafts || []).length || 1)
+    : 0;
+  const label = state.storageReadFailed
+    ? "只读 · 未保存"
+    : (pendingCount ? `未补存 ${pendingCount} 份 · 点击处理` : (map[status] || map.idle));
   /* 顶栏账号头像上的状态角标。
      同步状态原本只写在账号下拉菜单里（#saveStatusLabel），菜单一关宽度就是 0 ——
      409 之后按「暂时保留本地」时，界面上唯一的「保存失败」提示在看不见的地方。
@@ -1844,6 +1857,9 @@ function updateSaveStatusUi() {
   }
   const el = $("saveStatusLabel");
   if (!el) return;
+  el.classList.toggle("is-actionable", pendingCount > 0);
+  if (pendingCount) el.title = "点这里处理没补存的本地改动";
+  else el.removeAttribute("title");
   if (!state.user) {
     el.textContent = "";
     el.dataset.status = "idle";
@@ -1893,6 +1909,9 @@ const DRAFT_PREFIX = "yunxi-save-draft:";
    ① 「已确认」的（服务端就是这份内容，见 markDraftConfirmed）；② 同一个 tab 自己的旧草稿。
    绝不动别的账号、别的标签页的草稿 —— 那些是它们唯一的恢复点。 */
 const DRAFT_INDEX_MAX = 8;
+/* sendBeacon 的 body 上限（浏览器规范 64KB，取 60KB 留余量）。超过它 sendBeacon
+   返回 false 且一个字节都不发，见 flushPendingSaveBeacon。 */
+const BEACON_MAX_BYTES = 60 * 1024;
 
 function normalizeDraftUser(user) {
   return String(user || "").trim().toLowerCase();
@@ -2179,15 +2198,16 @@ function applyPendingSaveDraft() {
     return false;
   }
   if (String(newest.revision || "") !== String(state.storageRevision || "")) {
-    openConflictDialog(
-      {
-        message: drafts.length > 1
-          ? `本机有 ${drafts.length} 份未保存的改动（最新一份在 ${newest.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。`
-          : `上次有未保存的改动（${newest.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。`,
-      },
-      { user: newest.user, revision: newest.revision || "", storage: newest.storage, at: newest.at || "" },
-      { draftId: newest.id, count: drafts.length, drafts },
-    );
+    /* 服务器已经前进，草稿的 revision 永久过期，不能再拿它补存。
+       ⚠️ 但**开页时不弹模态**：旧实现每次开页都弹同一个「数据冲突」框，
+       用户点「关闭」清不掉、直接刷新也清不掉 —— 表现为「刷新一次弹一次」
+       （实测：答一题后立刻刷新，之后每次刷新都弹，且不再有任何网络请求）。
+       现在只把草稿挂到账号菜单里的「未补存」入口，用户想处理时点一下就是同一个冲突框。 */
+    state.pendingConflict = { drafts, newest };
+    setSaveStatus("error");
+    toast(drafts.length > 1
+      ? `本机有 ${drafts.length} 份改动没补存（服务器已更新），点账号菜单里的「未补存」处理`
+      : `上次有 1 份改动没补存（服务器已更新），点账号菜单里的「未补存」处理`);
     return false;
   }
   pickDraftContent(newest);
@@ -2200,6 +2220,39 @@ function applyPendingSaveDraft() {
     handleUserSaveError(err);
   });
   return true;
+}
+
+/* 开页时不打扰用户，但草稿必须还能处理 —— 这是那个「未补存」入口的落点。
+   点账号菜单里的保存状态就走到这里，弹的是同一个冲突框（导出 / 保留本地 / 加载服务器）。 */
+function openPendingConflict() {
+  const pending = state.pendingConflict;
+  const newest = pending?.newest;
+  if (!newest) return false;
+  const drafts = pending.drafts || [newest];
+  openConflictDialog(
+    {
+      message: drafts.length > 1
+        ? `本机有 ${drafts.length} 份未保存的改动（最新一份在 ${newest.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。`
+        : `上次有未保存的改动（${newest.at || "时间未知"}），但服务器数据已在其他页面更新，没有自动补存。可导出这份草稿备份，或加载服务器最新数据。`,
+    },
+    { user: newest.user, revision: newest.revision || "", storage: newest.storage, at: newest.at || "" },
+    { draftId: newest.id, count: drafts.length, drafts },
+  );
+  return true;
+}
+
+/* 重算「有没有还挂着没补存的草稿」。冲突框关掉后要重算一次：
+   用户点了「加载服务器最新数据」→ 草稿没了 → 入口跟着消失；
+   只点了「关闭」→ 草稿还在 → 入口留着，随时能再打开。 */
+function refreshPendingConflict() {
+  if (!state.user || state.storageReadFailed) {
+    state.pendingConflict = null;
+    return;
+  }
+  const stale = readPendingSaveDrafts().filter((row) => row.dirty
+    && String(row.revision || "") !== String(state.storageRevision || ""));
+  state.pendingConflict = stale.length ? { drafts: stale, newest: stale[0] } : null;
+  if (state.pendingConflict) setSaveStatus("error");
 }
 
 function flushPendingSaveBeacon() {
@@ -2229,6 +2282,16 @@ function flushPendingSaveBeacon() {
       ? `&revision=${encodeURIComponent(state.storageRevision)}`
       : "&expectEmpty=1";
     const blob = new Blob([body], { type: "application/json; charset=utf-8" });
+    /* 实测（真实账号 1MB 左右）：sendBeacon 的 body 上限是 64KB，超了浏览器**直接返回
+       false 且根本不发**。旧实现照样调用 → 每次「改完就刷新」都落一条
+       beacon_rejected 草稿，而那次保存压根没出去，草稿的 revision 从此永久过期 →
+       下次开页必弹「数据冲突」，且用户不点「加载服务器最新数据」就永远弹。
+       大包干脆不发：草稿本身就是恢复点，下一次开页按 revision/内容补存
+       （见 applyPendingSaveDraft）。 */
+    if (blob.size > BEACON_MAX_BYTES) {
+      if (draftId) stashPendingSaveDraft(`unload_toobig:${blob.size}b`, { id: draftId });
+      return false;
+    }
     const ok = navigator.sendBeacon(`/api/user/save?user=${encodeURIComponent(state.user)}${revision}`, blob);
     if (ok) {
       /* 草稿**留着**、dirty 字段**留着**：这份草稿是「已排队未确认」，
@@ -2274,6 +2337,19 @@ function saveUserData() {
       method: "POST",
       headers,
       body: JSON.stringify(context.payload),
+    }).catch((err) => {
+      /* 把「这次被拒的是哪份内容」挂到错误上：409 之后要先拿它跟服务端对账，
+         内容一致就说明是本机另一处已经写进去了，不该弹冲突框（见 handleUserSaveError）。 */
+      if (err && typeof err === "object") {
+        err.savePayload = context.payload;
+        err.saveDraftId = context.inherited?.id || "";
+        /* 用代际判断「这期间 storage 有没有再变过」：payload 是同一个对象引用，
+           就地改字段时 === 照样成立，不能拿来判断。 */
+        err.saveMutation = context.mutation;
+        err.saveGeneration = context.generation;
+        err.saveUser = context.user;
+      }
+      throw err;
     });
     state.storageRevision = result.revision || state.storageRevision;
     /* 这次请求确实被服务端收下了 —— 它发出去的那份内容（= 某条草稿的内容）
@@ -2299,17 +2375,70 @@ function saveUserData() {
     /* 本页唯一一份草稿对应的内容刚刚被服务端收下 → 定向删掉它（compare-and-delete）。
        别的标签页/别的账号的草稿一律不动：它们可能这期间又写过新内容。 */
     if (context.inherited?.id) removeDraftById(context.inherited.id);
+    /* 草稿被定向删掉了，入口要跟着消失（否则「未补存 1 份」会挂在那里骗人）。 */
+    refreshPendingConflict();
     return result;
   };
   state.saveChain = (state.saveChain || Promise.resolve()).catch(() => {}).then(run);
   return state.saveChain;
 }
 
-function handleUserSaveError(err) {
+/* 把一份 storage 序列化成「可逐字节比对」的字符串：键序由 normalizeStorage 钉死。
+   profile.lastLoginAt 每次开页都会被改成 nowText()，跟「内容有没有同步」无关，
+   比对前抹掉 —— 否则永远判成不一致，等于没比。 */
+function comparableStorageJson(data) {
+  let json = "";
+  try {
+    json = JSON.stringify(normalizeStorage(data || {}));
+  } catch (_err) {
+    return "";
+  }
+  return json.replace(/"lastLoginAt":("[^"]*"|null)/g, '"lastLoginAt":""');
+}
+
+/* 409 之后先跟服务端对账，再决定要不要打扰用户。
+   服务端现在那份内容如果**就是**本页刚想存的那份，说明这次 409 来自本机自己：
+   上一页在卸载前发出去的那次保存（或 beacon）已经把同一份内容写进去了。
+   这不是「别的设备改过」，静默对齐即可 —— 旧实现到这里直接弹冲突框，
+   于是「改完立刻刷新」几乎必弹一次。 */
+async function adoptServerIfSameAs(payload) {
+  if (!state.user || !payload || state.storageReadFailed) return false;
+  let res = null;
+  try {
+    res = await api(`/api/user/load?user=${encodeURIComponent(state.user)}`);
+  } catch (_err) {
+    return false;
+  }
+  if (!res || res.ok === false) return false;
+  const serverJson = comparableStorageJson(res.data);
+  if (!serverJson || serverJson !== comparableStorageJson(payload)) return false;
+  state.storageRevision = res.revision || state.storageRevision;
+  return true;
+}
+
+async function handleUserSaveError(err) {
   setSaveStatus("error");
   state.storageDirty = true;
   const now = Date.now();
   if (err?.status === 409 || err?.code === "user_data_conflict") {
+    if (await adoptServerIfSameAs(err?.savePayload)) {
+      /* 服务器上已经是这份内容了。storage 在这期间没再变过 → 就当这次保存成功；
+         变过 → 保留 dirty，用刚对上的 revision 再存一次。 */
+      const stale = err.saveMutation !== state.mutationVersion
+        || err.saveGeneration !== state.loadGeneration
+        || err.saveUser !== state.user;
+      if (!stale) {
+        state.storageDirty = false;
+        setSaveStatus("idle");
+      } else {
+        setSaveStatus("dirty");
+        scheduleSave();
+      }
+      reconcileConfirmedDrafts();
+      if (err?.saveDraftId) removeDraftById(err.saveDraftId);
+      refreshPendingConflict();
+      return;
+    }
     /* 普通 409 的本地改动此前只活在内存里（旧实现），关页/刷新就没了。
        openConflictDialog 会在这一支顺手把它落成一条**独立持久草稿**（ST-04）。 */
     openConflictDialog(err, null, { reason: "save_conflict" });
@@ -2392,6 +2521,8 @@ function closeConflictDialog() {
   state.conflictDraftId = "";
   state.conflictDrafts = null;
   $("conflictModal")?.classList.add("hidden");
+  /* 关掉框不等于问题解决：草稿还在就重新挂上「未补存」入口（见 openPendingConflict）。 */
+  refreshPendingConflict();
 }
 
 /* 导出/恢复入口共用一个「当前这份本地草稿是哪一条」的口径（ST-03/04 的共同地基）。 */
@@ -2448,13 +2579,18 @@ function exportConflictLocalDraft() {
 async function reloadServerUserDataFromConflict() {
   if (!state.user) return;
   const snapshot = state.conflictLocalSnapshot;
+  /* ⚠️ 必须在 loadUserData 之前把草稿清单取出来：loadUserData 会重置
+     state.conflictDrafts / conflictDraftId（那两个字段描述的是「旧基线上的冲突」），
+     取晚了就是空清单 —— 于是「加载服务器最新数据」从来没删掉过草稿，
+     这草稿下次开页又被 applyPendingSaveDraft 翻出来，表现为「怎么点都清不掉」。 */
+  const records = currentConflictDraftRecords();
   try {
     await loadUserData(state.user);
     state.storageDirty = false;
     setSaveStatus("idle");
     /* 用户选了「以服务器为准」→ 这次是**明确放弃**，本页那条草稿可以定向删。
        别的账号、别的标签页的草稿不碰。 */
-    for (const record of currentConflictDraftRecords()) removeDraftById(record.id);
+    for (const record of records) removeDraftById(record.id);
     closeConflictDialog();
     state.conflictDrafts = null;
     state.conflictDraftId = "";
@@ -2511,22 +2647,12 @@ function keepLocalConflictDraft() {
   }
   state.storageDirty = true;
   setSaveStatus("error");
-  /* 草稿**留着**（就是上面那条 draftId）——它是刷新后唯一能把本地改动接回来的东西。 */
-  scheduleDeferredConflictSave();
+  /* 草稿**留着**（就是上面那条 draftId）——它是刷新后唯一能把本地改动接回来的东西。
+     ⚠️ 这里原来还会 scheduleDeferredConflictSave()：1.2 秒后再写一条
+     `conflict_retry` 草稿。那条草稿正文是整包（真实账号 1MB），既把 localStorage
+     配额吃掉一半，又因为排在索引最前面，下一次开页必然又被当成「最新一份」再处理一遍。
+     它的 revision 和 draftId 那条完全一样，留着没有任何额外信息，已删除。 */
   toast("已保留本地改动，暂不覆盖服务器。刷新后仍可恢复，建议先导出草稿");
-}
-
-/* 冲突/补存排队的那次保存：只发 storage，**不**在这里改成「已同步」以外的语义。
-   单独一个定时器，避免 applyPendingSaveDraft 的补存和用户的 scheduleSave 互相顶掉。 */
-function scheduleDeferredConflictSave() {
-  if (!state.user || state.storageReadFailed) return;
-  clearTimeout(state.deferredSaveTimer);
-  state.deferredSaveTimer = setTimeout(() => {
-    state.deferredSaveTimer = null;
-    /* 另写一条草稿、下个 load 再处理：直接 saveUserData 会带着被保留的本地整包
-       去撞 409，弹一个用户刚刚已经处理过的对话框。 */
-    stashPendingSaveDraft("conflict_retry");
-  }, 1200);
 }
 
 /* 死代码清理：这里原来有一个 `switchUser(name)`（189 行前的位置）。
