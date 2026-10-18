@@ -118,15 +118,25 @@ export async function startMockServer(opts = {}) {
     if (p === "/api/user/load") {
       /* 先按请求时刻取快照，再延迟回包 —— 这就是真实竞态的形态：
          服务端读的是旧内容，回包却晚于另一次保存的完成。 */
-      const snapshot = {
-        ok: true, user: USER,
-        data: state.body ? JSON.parse(state.body) : {},
-        revision: state.revision(),
-      };
-      const row = { at: new Date().toISOString().slice(11, 23), rev: snapshot.revision.slice(0, 8), returnedAt: "" };
+      const revision = state.revision();
+      const row = { at: new Date().toISOString().slice(11, 23), rev: revision.slice(0, 8), returnedAt: "", conditional: String(req.headers["if-none-match"] || "") };
       state.loads.push(row);
       if (state.loadDelay > 0) await new Promise((r) => setTimeout(r, state.loadDelay));
       row.returnedAt = new Date().toISOString().slice(11, 23);
+      /* 与真实服务端的条件请求对齐：If-None-Match 精确命中当前 revision → 304、不带 body。
+         `*` 不算命中（那会把「探测有没有数据」变成「拿到空包」）。 */
+      const inm = String(req.headers["if-none-match"] || "");
+      res.setHeader("ETag", `"${revision}"`);
+      if (revision && inm.split(",").some((t) => t.trim() === `"${revision}"`)) {
+        row.notModified = true;
+        res.writeHead(304);
+        return res.end();
+      }
+      const snapshot = {
+        ok: true, user: USER,
+        data: state.body ? JSON.parse(state.body) : {},
+        revision,
+      };
       return json(res, 200, snapshot);
     }
 

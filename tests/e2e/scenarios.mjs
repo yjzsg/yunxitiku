@@ -110,6 +110,50 @@ export const scenarios = [
   },
 
   {
+    name: "conditional-load-304",
+    title: "刷新时内容没变：用 If-None-Match 拿 304，别再把整包下回来",
+    async run({ page, mock, check, sleep }) {
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
+      /* 先让本机缓存跟上服务端：改一笔 → 保存落地 → 缓存 3 秒后写入，等下这个窗口。 */
+      await page.evaluate(`state.storage.settings.e2eConditional = "1"; scheduleSave(); void 0`);
+      await page.waitFor("state.storageDirty === false && state.saveStatus === 'idle'", { label: "保存落地" });
+      await sleep(3500);
+      const revBefore = await page.evaluate("state.storageRevision");
+
+      await page.reload();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision && state.storageDirty === false", { label: "刷新后加载完成" });
+      await sleep(300);
+      const snap = await page.snapshot();
+      const loads = await mock.ctl("/__ctl/loads");
+      const last = loads.at(-1);
+      check(last.notModified === true, "刷新后的读取应命中 304（服务端内容没变）");
+      check(!!last.conditional, "这次读取应带 If-None-Match（说明用了本机缓存做校验）");
+      check(snap.rev === revBefore.slice(0, 8), `304 后页面 revision 应保持 ${revBefore.slice(0, 8)}，实际 ${snap.rev}`);
+      check(snap.drafts.length === 0 && snap.modalVisible === false, "304 路径不该留草稿、不该弹框");
+
+      /* 反向用例：服务端被别的设备改过，校验器对不上 → 必须回全量，且页面要看到新内容。 */
+      const body = JSON.parse((await mock.ctl("/__ctl/body")).body);
+      body.settings.e2eRemote = "written-by-another-device";
+      await mock.ctl("/__ctl/seed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      await page.reload();
+      await page.waitFor("typeof state !== 'undefined' && state.storageDirty === false && !!state.storageRevision", { label: "第二次刷新加载完成" });
+      await sleep(300);
+      const loads2 = await mock.ctl("/__ctl/loads");
+      check(loads2.at(-1).notModified !== true, "服务端内容变了就不该回 304");
+      check(
+        await page.evaluate("state.storage.settings.e2eRemote === 'written-by-another-device'"),
+        "回全量后页面应拿到别的设备写入的内容（不能继续吃旧缓存）",
+      );
+      return snap;
+    },
+  },
+
+  {
     name: "full-save-gzip",
     title: "没有增量基线时退回整包：仍要 gzip 上传",
     async run({ page, mock, check, sleep }) {

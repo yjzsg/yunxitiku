@@ -40,7 +40,7 @@ async function call(path, opts = {}) {
   } catch {
     /* 非 JSON */
   }
-  return { status: res.status, json, text };
+  return { status: res.status, json, text, headers: res.headers };
 }
 
 const sha = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
@@ -180,6 +180,21 @@ const plain = await call("/api/user/save", {
   body: JSON.stringify(load.json?.data || {}),
 });
 ok("明文整包保存 200", plain.status === 200, `status=${plain.status}`);
+
+// ---- 10. 条件请求：ETag / 304（省掉整包 ~1MB 的那条路） ----
+const et1 = await call(`/api/user/load?user=${encodeURIComponent(USER)}`);
+const tag = et1.headers.get("etag") || "";
+ok("load 带 ETag", /^"[0-9a-f]{16,}"$/.test(tag), `etag=${tag}`);
+ok("ETag 就是 revision", tag.replace(/"/g, "") === String(et1.json?.revision || ""), `etag=${tag} rev=${et1.json?.revision}`);
+const et2 = await call(`/api/user/load?user=${encodeURIComponent(USER)}`, { headers: { "If-None-Match": tag } });
+ok("If-None-Match 命中回 304", et2.status === 304, `status=${et2.status}`);
+ok("304 不带 body", et2.text.length === 0, `body=${et2.text.slice(0, 60)}`);
+const et3 = await call(`/api/user/load?user=${encodeURIComponent(USER)}`, { headers: { "If-None-Match": '"deadbeef"' } });
+ok("校验器不匹配回 200 全量", et3.status === 200 && !!et3.json?.data, `status=${et3.status}`);
+/* `*` 是「只要存在就别给我 body」的标准写法。这里必须**不**命中：
+   否则「探测这个账号有没有数据」会拿到 304 空包，前端会把空数据当成基线。 */
+const et4 = await call(`/api/user/load?user=${encodeURIComponent(USER)}`, { headers: { "If-None-Match": "*" } });
+ok("If-None-Match: * 不算命中", et4.status === 200 && !!et4.json?.data, `status=${et4.status}`);
 
 console.log(failures === 0 ? "ALL PASS" : `${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

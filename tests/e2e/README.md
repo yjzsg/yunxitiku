@@ -40,6 +40,7 @@ node tests/e2e/run.mjs --debug         # 打印浏览器 stderr 与中间快照
 | `save-roundtrip` | 改一笔走**增量保存**（`/api/user/patch`：ops 少、线上字节 < 4KB），且合并不丢笔记 / 答题记录 |
 | `full-save-gzip` | 没有增量基线（换账号 / 首次保存 / 刚应用草稿）时退回整包，整包仍要 gzip（线上字节 < 原文 1/3） |
 | `patch-rejected-falls-back` | 服务端拒绝增量（400 `user_data_patch_rejected`）时，这一次改动必须改走整包保存（gzip）、不丢、不弹框 |
+| `conditional-load-304` | 内容没变时刷新：`/api/user/load` 带 `If-None-Match` 得 304、页面照常渲染、不吃旧数据；服务端被别的设备改过后必须回全量 |
 | `unload-beacon-toobig` | 保存还在飞时刷新：大包不发 beacon、续跑那条已在飞的保存、连刷两次都不弹框不留草稿 |
 | `stale-draft-no-popup` | 本机存着过期草稿：开页**不弹模态**、改挂「未补存」入口；点「加载服务器数据」后草稿真被删掉、基线等于服务端；之后继续答题不会 409 |
 
@@ -50,6 +51,13 @@ node tests/e2e/run.mjs --debug         # 打印浏览器 stderr 与中间快照
 现在按 `saveSuccessSeq` 逐轮重读（最多 3 轮）。`stale-draft-no-popup` 里那条
 「加载服务器后基线应等于服务端」的断言就是钉它的：没有这条断言时，同一个 bug
 表现出来只是 30 秒后超时，看不出原因。
+
+### 为什么本机缓存可以直接吃
+
+缓存里存的是上次服务端返回的 `(revision, body)` 整对；`revision` 是落盘全文的 SHA-256，
+所以「304」等价于「逐字节相同」。缓存可能过期，但过期只会多下一次全量 ——
+它**不参与任何写入判断**，服务器一旦有变化校验器就对不上。写入攒 3 秒（答题时别每笔都写 1MB），
+localStorage 配额不足时直接丢弃缓存，优先保住草稿。
 
 ## 写新场景的几条硬规矩
 

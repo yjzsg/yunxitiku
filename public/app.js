@@ -350,6 +350,9 @@ async function api(path, options) {
   } catch (err) {
     throw new Error("网络连接失败，请检查服务是否已启动");
   }
+  /* 304 不是错误：调用方带了 If-None-Match 且服务端内容没变。
+     只有显式声明 allowNotModified 的调用方才会走到这里 —— 其余接口收到 304 仍按失败处理。 */
+  if (res.status === 304 && opts.allowNotModified) return { notModified: true };
   if (!res.ok) {
     const payload = await res.json().catch(() => ({ error: res.statusText }));
     /* `error` 字段历史上出现过**嵌套对象**（后端 SafeError 曾返回 {ok,error}），
@@ -1627,6 +1630,7 @@ async function enterApp(user, options = {}) {
 }
 
 async function logout() {
+  clearUserDataCache();
   /* 保存失败不能静默：以前是 `.catch(() => {})`，结果「答题后点退出」会把本地未保存的改动
      无声丢掉（多标签页场景服务器会返回 409）。现在改为提示，并由用户决定是否继续退出。
 
@@ -1679,6 +1683,55 @@ async function logout() {
    旧实现把 5xx 直接抛给调用方 → 登录页报错；更早的实现把读失败当成空数据 →
    下一次保存把用户真实进度整包覆盖（实测 supa.json 2651 → 700 字节）。
    现在：只在 tolerateFailure 时进**只读态**（能看、能导出，但不保存）；其它错误照旧上抛。 */
+/* 本机数据缓存：**只**用来给 `/api/user/load` 做条件请求 —— 服务端说「还是这一版」
+   （revision 相同 = 落盘全文逐字节相同）时直接复用，省掉那 ~1MB 整包。
+   它不参与任何写入判断：写缓存失败（localStorage 配额满）就当没有缓存，功能不受影响；
+   缓存过期也无害 —— 校验器对不上就是一次普通全量读取。 */
+const USER_DATA_CACHE_KEY = "yt.userDataCache.v1";
+let userDataCacheTimer = 0;
+
+function readUserDataCache(user) {
+  try {
+    const raw = localStorage.getItem(USER_DATA_CACHE_KEY);
+    if (!raw) return null;
+    const cache = JSON.parse(raw);
+    if (!cache || cache.user !== user || typeof cache.body !== "string" || !cache.revision) return null;
+    return cache;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function clearUserDataCache() {
+  clearTimeout(userDataCacheTimer);
+  userDataCacheTimer = 0;
+  try { localStorage.removeItem(USER_DATA_CACHE_KEY); } catch (_err) { /* 清不掉也无害 */ }
+}
+
+function writeUserDataCacheNow() {
+  clearTimeout(userDataCacheTimer);
+  userDataCacheTimer = 0;
+  if (!state.user || !state.storageRevision || !state.syncedBody || state.storageDirty) return;
+  try {
+    localStorage.setItem(USER_DATA_CACHE_KEY, JSON.stringify({
+      user: state.user,
+      revision: state.storageRevision,
+      body: state.syncedBody,
+      at: Date.now(),
+    }));
+  } catch (_err) {
+    /* 配额被草稿占满时优先保住草稿：缓存删掉，下次开页大不了重下一遍。 */
+    try { localStorage.removeItem(USER_DATA_CACHE_KEY); } catch (_err2) { /* 忽略 */ }
+  }
+}
+
+/* 保存很频繁（每答一题一次），别每次都序列化 1MB 写进 localStorage：
+   攒 3 秒再写。缓存本身是「可能过期」的，晚写只会少省一次下载，不会读到错数据。 */
+function scheduleUserDataCacheWrite() {
+  clearTimeout(userDataCacheTimer);
+  userDataCacheTimer = setTimeout(writeUserDataCacheNow, 3000);
+}
+
 async function loadUserData(user, options = {}) {
   /* 换代：这次读数据之后回来的、上一次读数据之前发出的保存响应，一律按过期处理
      （它们带的 revision/账号上下文已经不对了，命中由 saveUserData 的世代比对完成）。 */
@@ -1691,10 +1744,15 @@ async function loadUserData(user, options = {}) {
   state.conflictDrafts = null;
   state.pendingConflict = null;
   const generation = state.loadGeneration;
+  const loadUrl = `/api/user/load?user=${encodeURIComponent(user)}`;
+  /* 本机缓存里就是上次从服务端读到的那份内容：带上它的 revision 做条件请求。
+     同一账号换了设备/别的标签页保存过 → revision 对不上 → 正常回全量，不吃亏。 */
+  const cache = state.storageDirty ? null : readUserDataCache(user);
+  const condOpts = cache ? { headers: { "If-None-Match": `"${cache.revision}"` }, allowNotModified: true } : undefined;
   let res;
   try {
     let savesBefore = state.saveSuccessSeq;
-    res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
+    res = await api(loadUrl, condOpts);
     /* 读的过程中本页可能有保存落地：服务端那份 revision 已经前进，
        而这次读到的是保存**之前**的快照。采用它会把 storageRevision 回退，
        紧接着任何一次保存都会撞 409（用户看到的是「刚选完加载服务器数据，
@@ -1704,7 +1762,14 @@ async function loadUserData(user, options = {}) {
        于是重读本身也可能读到旧值 —— 断点就在这里（e2e 实测 revision 被拽回旧值 → 下一次保存 409）。
        现在按 saveSuccessSeq 逐轮重读，直到「读完这一轮期间没有新保存落地」，最多 3 轮。 */
     for (let attempt = 0; attempt < 3 && state.saveSuccessSeq !== savesBefore; attempt++) { savesBefore = state.saveSuccessSeq;
-      res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
+      res = await api(loadUrl, condOpts);
+    }
+    if (res && res.notModified) {
+      /* 服务端：还是你手里那一版。用缓存直接渲染，这 ~1MB 不用再下一遍。
+         缓存坏了（损坏/被别的版本改过）就退回一次无条件全量读取，不让用户卡住。 */
+      let cachedData = null;
+      try { cachedData = JSON.parse(cache.body); } catch (_err) { cachedData = null; }
+      res = cachedData ? { ok: true, user, data: cachedData, revision: cache.revision } : await api(loadUrl);
     }
   } catch (err) {
     const readFailed = !err?.status || err.status >= 500;
@@ -1744,6 +1809,8 @@ async function loadUserData(user, options = {}) {
     scheduleSave();
   }
   renderUsers();
+  /* 记下这份内容，下次开页（或再点「加载服务器数据」）就能靠 304 省掉整包。 */
+  writeUserDataCacheNow();
   return res;
 }
 
@@ -2529,6 +2596,8 @@ function saveUserData() {
     state.syncedBody = fullText;
     /* 服务端已经是这份内容了：给「在途的 load 快照是否过期」打个记号（见 loadUserData）。 */
     state.saveSuccessSeq += 1;
+    /* 顺手把本机缓存推到这一版（攒 3 秒再写，别每答一题就写 1MB）。 */
+    scheduleUserDataCacheWrite();
     /* 这次请求确实被服务端收下了 —— 它发出去的那份内容（= 某条草稿的内容）
        现在可以按 ID 定向删；导入去重也认这个凭据。 */
     markDraftConfirmed([context.inherited?.id], [context.payload]);

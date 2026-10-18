@@ -30,6 +30,14 @@ internal static class UserDataEndpoints
         try
         {
             var loaded = await userData.LoadAsync(clean);
+            /* 条件请求：revision 就是落盘全文的 SHA-256，天然是强校验器。
+               带 If-None-Match 且与服务端当前一致时回 304、不带那 ~1MB 数据；
+               校验器相同即内容逐字节相同，前端可以直接复用本机缓存。 */
+            context.Response.Headers.ETag = "\"" + loaded.Revision + "\"";
+            if (loaded.Revision.Length > 0 && MatchesETag(context.Request.Headers.IfNoneMatch.ToString(), loaded.Revision))
+            {
+                return Results.StatusCode(StatusCodes.Status304NotModified);
+            }
             return Results.Json(new { ok = true, user = clean, data = loaded.Data, revision = loaded.Revision });
         }
         catch (Exception ex)
@@ -260,5 +268,21 @@ internal static class UserDataEndpoints
             }
         }
     });
+    }
+
+    /* If-None-Match 可能是 `*`、`W/"rev"`、或逗号分隔的一串。
+       只把与当前 revision 精确相等的强校验器当作命中：`*` 不算 ——
+       那样「探测这个账号有没有数据」会变成「拿到 304 空包」，语义正好反了。 */
+    private static bool MatchesETag(string header, string revision)
+    {
+        if (string.IsNullOrEmpty(header)) return false;
+        foreach (var raw in header.Split(','))
+        {
+            var tag = raw.Trim();
+            if (tag.StartsWith("W/", StringComparison.Ordinal)) continue;
+            if (tag.Length >= 2 && tag[0] == '"' && tag[^1] == '"') tag = tag[1..^1];
+            if (tag.Length > 0 && tag.Equals(revision, StringComparison.Ordinal)) return true;
+        }
+        return false;
     }
 }
