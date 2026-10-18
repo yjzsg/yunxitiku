@@ -177,6 +177,64 @@ export async function startMockServer(opts = {}) {
       return json(res, status, out);
     }
 
+    if (p === "/api/user/patch") {
+      /* 与真实 /api/user/patch 对齐：base 必须等于服务端当前 revision（否则 409），
+         在同一段临界区里合并后写回，revision 仍按合并后全文算。
+         这里用 JSON.stringify 重排落盘文本（真实服务端用 System.Text.Json），
+         两者语义相同、字节不同 —— 断言一律走语义比较，不比较字符串。 */
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const wire = Buffer.concat(chunks);
+      const encoding = String(req.headers["content-encoding"] || "").toLowerCase();
+      let raw = wire;
+      try {
+        if (encoding === "gzip") raw = zlib.gunzipSync(wire);
+        else if (encoding === "deflate") raw = zlib.inflateSync(wire);
+        else if (encoding === "br") raw = zlib.brotliDecompressSync(wire);
+      } catch {
+        return json(res, 400, { ok: false, error: "请求体解压失败：Content-Encoding 与实际内容不符" });
+      }
+      let payload;
+      try {
+        payload = JSON.parse(raw.toString("utf8") || "{}");
+      } catch {
+        return json(res, 400, { ok: false, error: "增量保存请求不是有效 JSON" });
+      }
+      if (state.saveDelay > 0) await new Promise((r) => setTimeout(r, state.saveDelay));
+      const base = String(payload?.base || "");
+      const ops = Array.isArray(payload?.ops) ? payload.ops : null;
+      const current = state.revision();
+      const row = {
+        at: new Date().toISOString().slice(11, 23),
+        kind: "patch",
+        ops: ops ? ops.length : 0,
+        wireBytes: wire.length,
+        encoding,
+        expected: base.slice(0, 8),
+        current: current.slice(0, 8),
+        status: 200,
+        channel: "fetch",
+      };
+      if (!base || !ops) {
+        state.saves.push({ ...row, status: 400 });
+        return json(res, 400, { ok: false, error: "增量保存必须带 base 与 ops" });
+      }
+      if (base.toLowerCase() !== current.toLowerCase()) {
+        state.saves.push({ ...row, status: 409 });
+        return json(res, 409, { ok: false, error: "用户数据已在其他页面更新，请刷新后重试", code: "user_data_conflict" });
+      }
+      let merged;
+      try {
+        merged = applyPatchOps(state.body, ops);
+      } catch (err) {
+        state.saves.push({ ...row, status: 400 });
+        return json(res, 400, { ok: false, error: String(err.message || err), code: "user_data_patch_rejected" });
+      }
+      state.body = merged;
+      state.saves.push({ ...row, bytes: Buffer.byteLength(merged) });
+      return json(res, 200, { ok: true, user: USER, revision: state.revision(), applied: ops.length, savedAt: new Date().toISOString() });
+    }
+
     if (p === "/api/courses") return json(res, 200, fixtures.courses);
     if (p === "/api/chapters") return json(res, 200, fixtures.chapters);
     if (p === "/api/types") return json(res, 200, fixtures.types);
@@ -228,4 +286,28 @@ function parsePrecondition(headers, url) {
     expectEmpty = url.searchParams.get("expectEmpty") === "1";
   }
   return { expected, expectEmpty };
+}
+
+/** 复刻 UserDataPatch.Apply：路径分段导航 → set / del / app。语义不对就抛，让端点回 400。 */
+function applyPatchOps(currentBody, ops) {
+  const root = currentBody.trim() ? JSON.parse(currentBody) : {};
+  if (!root || typeof root !== "object" || Array.isArray(root)) throw new Error("当前用户数据不是 JSON 对象");
+  for (const op of ops) {
+    const segs = String(op?.p || "").split("/").slice(1);
+    if (!segs.length || segs.some((s) => s.length === 0)) throw new Error(`ops 的 p 非法：${op?.p}`);
+    let node = root;
+    for (const seg of segs.slice(0, -1)) {
+      if (node[seg] === undefined || node[seg] === null) node[seg] = {};
+      if (typeof node[seg] !== "object" || Array.isArray(node[seg])) throw new Error(`增量路径 ${op.p} 的中间层不是对象`);
+      node = node[seg];
+    }
+    const last = segs[segs.length - 1];
+    if ("v" in op) node[last] = op.v;
+    else if ("d" in op) delete node[last];
+    else if (Array.isArray(op.app)) {
+      if (!Array.isArray(node[last])) node[last] = [];
+      node[last].push(...op.app);
+    } else throw new Error(`ops 的 ${op.p} 缺少 v / d / app`);
+  }
+  return JSON.stringify(root);
 }

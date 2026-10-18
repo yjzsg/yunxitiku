@@ -50,6 +50,10 @@ const state = {
      在它飞的过程中有没有被本页自己的保存超过。
      超过就不能用（那份 revision 已经旧了，拿它去存必然 409）——见 loadUserData 的重读。 */
   saveSuccessSeq: 0,
+  /* 「服务端已知内容」的快照（JSON 文本），用于增量保存算 diff。
+     只在两个时机写：load 成功之后、保存成功之后 —— 它必须始终对应 state.storageRevision，
+     所以一旦 revision 对不上就直接放弃增量、改发整包（见 buildPatchPayload）。 */
+  syncedBody: "",
   /* 冲突弹窗打开时记录「是哪一次 storage 变更触发的」，用来判断恢复后
      storage 是否已经变了（见 applyPendingSaveDraft / keepLocalConflictDraft）。 */
   conflictGeneration: -1,
@@ -1689,14 +1693,17 @@ async function loadUserData(user, options = {}) {
   const generation = state.loadGeneration;
   let res;
   try {
-    const savesBefore = state.saveSuccessSeq;
+    let savesBefore = state.saveSuccessSeq;
     res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
     /* 读的过程中本页可能有保存落地：服务端那份 revision 已经前进，
        而这次读到的是保存**之前**的快照。采用它会把 storageRevision 回退，
        紧接着任何一次保存都会撞 409（用户看到的是「刚选完加载服务器数据，
-       状态条又卡在保存中，草稿还在」）。快照过期就重读一次 —— 第二次读到的
-       一定不早于那次保存，收敛即止，不会无限重试。 */
-    if (state.saveSuccessSeq !== savesBefore) {
+       状态条又卡在保存中，草稿还在」）。快照过期就重读，直到没有新保存落地 —— 见下面那段。 */
+
+    /* 一次重读不够：慢网下保存会一笔接一笔落地（每笔都可能早于本次读的快照），
+       于是重读本身也可能读到旧值 —— 断点就在这里（e2e 实测 revision 被拽回旧值 → 下一次保存 409）。
+       现在按 saveSuccessSeq 逐轮重读，直到「读完这一轮期间没有新保存落地」，最多 3 轮。 */
+    for (let attempt = 0; attempt < 3 && state.saveSuccessSeq !== savesBefore; attempt++) { savesBefore = state.saveSuccessSeq;
       res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
     }
   } catch (err) {
@@ -1721,6 +1728,9 @@ async function loadUserData(user, options = {}) {
   state.user = res.user;
   state.storage = normalizeStorage(res.data || {});
   state.storageRevision = res.revision || "";
+  /* 这份内容就是服务端现在的内容 → 记下来当增量保存的基线（键序由 normalizeStorage 钉死，
+     所以和之后 JSON.stringify(state.storage) 的口径一致）。 */
+  state.syncedBody = JSON.stringify(state.storage);
   state.storageDirty = false;
   setSaveStatus("idle");
   state.zoom = normalizeZoom(state.storage.settings?.zoom);
@@ -2334,8 +2344,7 @@ function flushPendingSaveBeacon() {
    revision 依旧按原文算 —— 协议语义不变。老浏览器 / 压不动时不发这个头，行为与以前一致。 */
 const SAVE_COMPRESS_MIN_BYTES = 32 * 1024;
 
-async function encodeSaveBody(payload) {
-  const text = JSON.stringify(payload);
+async function encodeSaveBody(text) {
   if (typeof CompressionStream !== "function") return { body: text, encoding: "" };
   const bytes = new TextEncoder().encode(text);
   if (bytes.byteLength < SAVE_COMPRESS_MIN_BYTES) return { body: text, encoding: "" };
@@ -2348,6 +2357,131 @@ async function encodeSaveBody(payload) {
     return { body: packed, encoding: "gzip" };
   } catch {
     return { body: text, encoding: "" };
+  }
+}
+
+/* ===== 增量保存 =====
+   线上实测：整包 1,006,956 字节（gzip 106KB），而「答一道题」真正变的只有几百字节
+   （真实数据上实测 4 条 op、gzip 167 字节）。整包上传在移动网络下是几百毫秒的等待，
+   增量后几乎是瞬时的。
+   契约：POST /api/user/patch {base, ops:[{p,v}|{p,d}|{p,app}]}，base 必须等于服务端当前
+   revision（否则同样 409）；服务端在同一把用户锁内合并后原子写回，revision 仍按落盘全文算。
+   任何一步不成立（没有基线 / 结构可疑 / 服务端不认）就退回整包保存 —— 增量只是快路径，
+   绝不能因为算错 diff 而丢数据。 */
+const PATCH_MIN_FULL_BYTES = 8 * 1024;   // 整包本身就很小时不值得走增量
+const PATCH_MAX_OPS = 2000;
+const PATCH_MAX_BYTES = 512 * 1024;
+/* 服务端不认增量（老版本 404 / 合并被拒 400）：本次就退回整包，并且以后别再试。 */
+let patchUnavailable = false;
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function jsonSameValue(a, b) {
+  if (a === b) return true;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+/* 把 base → cur 的差异收集成 ops。path 用 / 分段，键里出现 / 就没法表达（置 unsafe 退回整包）。 */
+function collectPatchOps(base, cur, path, out) {
+  if (out.unsafe || out.ops.length > PATCH_MAX_OPS) return;
+  if (Array.isArray(base) && Array.isArray(cur)) {
+    /* 数组只认「前缀不变 + 尾部追加」这一种增量（history / trainingSessions 都是追加型），
+       其余情况整段替换 —— 猜错数组语义是最容易丢数据的地方。 */
+    let prefix = true;
+    const n = Math.min(base.length, cur.length);
+    for (let i = 0; i < n; i++) {
+      if (!jsonSameValue(base[i], cur[i])) { prefix = false; break; }
+    }
+    if (prefix) {
+      if (cur.length > base.length) out.ops.push({ p: path, app: cur.slice(base.length) });
+      else if (cur.length < base.length) out.ops.push({ p: path, v: cur });
+      return;
+    }
+    out.ops.push({ p: path, v: cur });
+    return;
+  }
+  if (isPlainObject(base) && isPlainObject(cur)) {
+    for (const key of Object.keys(cur)) {
+      if (key.includes("/")) { out.unsafe = true; return; }
+      if (jsonSameValue(base[key], cur[key])) continue;
+      const child = `${path}/${key}`;
+      if (!(key in base)) out.ops.push({ p: child, v: cur[key] });
+      else collectPatchOps(base[key], cur[key], child, out);
+    }
+    for (const key of Object.keys(base)) {
+      if (key.includes("/")) { out.unsafe = true; return; }
+      if (!(key in cur)) out.ops.push({ p: `${path}/${key}`, d: 1 });
+    }
+    return;
+  }
+  if (!jsonSameValue(base, cur)) out.ops.push({ p: path, v: cur });
+}
+
+/* 返回增量请求体文本；返回 "" 表示「这次老老实实发整包」。 */
+function buildPatchPayload(payload, fullText) {
+  if (patchUnavailable) return "";
+  if (!state.storageRevision || !state.syncedBody) return "";
+  if (fullText.length < PATCH_MIN_FULL_BYTES) return "";
+  let base;
+  try {
+    base = JSON.parse(state.syncedBody);
+  } catch {
+    return "";
+  }
+  if (!isPlainObject(base)) return "";
+  const out = { ops: [], unsafe: false };
+  try {
+    collectPatchOps(base, payload, "", out);
+  } catch {
+    return "";
+  }
+  if (out.unsafe || out.ops.length === 0 || out.ops.length > PATCH_MAX_OPS) return "";
+  let text;
+  try {
+    text = JSON.stringify({ base: state.storageRevision, ops: out.ops });
+  } catch {
+    return "";
+  }
+  /* 增量不比整包明显小就没意义：整包还有 gzip，而且少走一条服务端合并路径。 */
+  if (text.length > PATCH_MAX_BYTES || text.length * 2 > fullText.length) return "";
+  return text;
+}
+
+/* 发保存请求。patchText 非空且成功就走增量；服务端不认就当场退回整包（同一次保存内重试）。 */
+async function postUserSave(fullText, patchText) {
+  const usePatch = !!patchText;
+  const headers = { "Content-Type": "application/json; charset=utf-8" };
+  let url;
+  if (usePatch) {
+    url = `/api/user/patch?user=${encodeURIComponent(state.user)}`;
+    headers["If-Match"] = `"${state.storageRevision}"`;
+  } else {
+    url = `/api/user/save?user=${encodeURIComponent(state.user)}`;
+    /* 前置条件**始终**带：revision 为空时用 If-None-Match: *（「只在服务端还没有数据时创建」），
+       不能再省成「无前置条件」—— 服务端在「文件非空但客户端 revision 为空」时按 409 处理，
+       这正是那条「读失败 → 空包覆盖真实进度」的路径的兜底。 */
+    if (state.storageRevision) headers["If-Match"] = `"${state.storageRevision}"`;
+    else headers["If-None-Match"] = "*";
+  }
+  /* 大包走 gzip（见 encodeSaveBody）：1MB → 约 100KB，服务端透明解压。 */
+  const encoded = await encodeSaveBody(usePatch ? patchText : fullText);
+  if (encoded.encoding) headers["Content-Encoding"] = encoded.encoding;
+  try {
+    return await api(url, { method: "POST", headers, body: encoded.body });
+  } catch (err) {
+    const status = err?.status || 0;
+    /* 409 是冲突，绝不能在这里吞掉或改发整包（那会把冲突盖过去）。 */
+    if (usePatch && status !== 409 && (status === 400 || status === 404 || status === 405 || status === 501)) {
+      patchUnavailable = true;
+      return postUserSave(fullText, "");
+    }
+    throw err;
   }
 }
 
@@ -2368,20 +2502,15 @@ function saveUserData() {
       payload: state.storage,
       inherited: state.storageInheritedDraft || null,
     };
-    const headers = { "Content-Type": "application/json; charset=utf-8" };
-    /* 前置条件**始终**带：revision 为空时用 If-None-Match: *（「只在服务端还没有数据时创建」），
-       不能再省成「无前置条件」—— 服务端在「文件非空但客户端 revision 为空」时按 409 处理，
-       这正是那条「读失败 → 空包覆盖真实进度」的路径的兜底。 */
-    if (state.storageRevision) headers["If-Match"] = `"${state.storageRevision}"`;
-    else headers["If-None-Match"] = "*";
-    /* 大包走 gzip（见 encodeSaveBody）：1MB → 约 100KB，服务端透明解压。 */
-    const encoded = await encodeSaveBody(context.payload);
-    if (encoded.encoding) headers["Content-Encoding"] = encoded.encoding;
-    const result = await api(`/api/user/save?user=${encodeURIComponent(state.user)}`, {
-      method: "POST",
-      headers,
-      body: encoded.body,
-    }).catch((err) => {
+    /* 整包文本只序列化一次：既要给 gzip 用，也要给增量 diff 比大小用。 */
+    let fullText = "";
+    try {
+      fullText = JSON.stringify(context.payload);
+    } catch (err) {
+      throw err;
+    }
+    const patchText = buildPatchPayload(context.payload, fullText);
+    const result = await postUserSave(fullText, patchText).catch((err) => {
       /* 把「这次被拒的是哪份内容」挂到错误上：409 之后要先拿它跟服务端对账，
          内容一致就说明是本机另一处已经写进去了，不该弹冲突框（见 handleUserSaveError）。 */
       if (err && typeof err === "object") {
@@ -2396,6 +2525,8 @@ function saveUserData() {
       throw err;
     });
     state.storageRevision = result.revision || state.storageRevision;
+    /* 服务端现在持有的就是这份内容 → 更新增量基线（发的是整包还是增量都一样）。 */
+    state.syncedBody = fullText;
     /* 服务端已经是这份内容了：给「在途的 load 快照是否过期」打个记号（见 loadUserData）。 */
     state.saveSuccessSeq += 1;
     /* 这次请求确实被服务端收下了 —— 它发出去的那份内容（= 某条草稿的内容）

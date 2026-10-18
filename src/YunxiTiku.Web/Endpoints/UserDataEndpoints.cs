@@ -120,6 +120,49 @@ internal static class UserDataEndpoints
         }
     });
 
+    app.MapPost("/api/user/patch", async (HttpContext context, string? user, UserDataStore userData) =>
+    {
+        /* 增量保存：客户端只发「相对服务端那份 revision 变了的部分」。
+           实测一次作答 4 条 op、gzip 167 字节，而整包 gzip 是 106KB —— 移动网络下是几百毫秒的差别。
+           前置条件与 /api/user/save 完全一致（base 对不上就 409），revision 语义不变，
+           所以老客户端不发这个端点也照常工作；新客户端遇到 400/404/405 会退回整包保存。 */
+        var request = context.Request;
+        string clean;
+        try { clean = ResolveRequestedUser(context, user); }
+        catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+        /* 增量请求正常只有几百字节到几十 KB；4MB 上限是防着「客户端算出巨大 diff 还硬发」。 */
+        if (request.ContentLength > 4L * 1024 * 1024) return Results.Json(new { ok = false, error = "增量保存请求超过 4MB，请改用整包保存" }, statusCode: 400);
+        var (body, readError) = await ReadBodyWithLimitAsync(request.Body, 4 * 1024 * 1024, context.RequestAborted);
+        if (readError is not null) return Results.Json(new { ok = false, error = readError }, statusCode: 400);
+        if (body is null) return Results.Json(new { ok = false, error = "增量保存请求超过 4MB，请改用整包保存" }, statusCode: 400);
+
+        string baseRevision;
+        List<UserDataPatchOp> ops;
+        try { (baseRevision, ops) = UserDataPatch.Parse(body); }
+        catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+        catch (JsonException ex) { return Results.Json(new { ok = false, error = "增量保存请求不是有效 JSON：" + ex.Message }, statusCode: 400); }
+
+        try
+        {
+            var (revision, applied) = await userData.PatchAsync(clean, baseRevision, ops);
+            return Results.Json(new { ok = true, user = clean, revision, applied, savedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") });
+        }
+        catch (UserDataConflictException)
+        {
+            return Results.Json(new { ok = false, error = "用户数据已在其他页面更新，请刷新后重试", code = "user_data_conflict" }, statusCode: 409);
+        }
+        catch (InvalidOperationException ex)
+        {
+            /* 结构分叉（中间层不是对象等）：拒绝，且一个字节都没写。客户端收到后应退回整包保存。 */
+            return Results.Json(new { ok = false, error = ex.Message, code = "user_data_patch_rejected" }, statusCode: 400);
+        }
+        catch (Exception ex)
+        {
+            SafeErrorText(ex);
+            return Results.Json(new { ok = false, error = "保存用户数据失败" }, statusCode: 500);
+        }
+    });
+
     app.MapPost("/api/user/import", async (HttpContext context, string? user, UserDataStore userData) =>
     {
         /* 恢复用户自己导出的备份。

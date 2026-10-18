@@ -190,5 +190,49 @@ sealed class UserDataStore
         }
     }
 
+    /// <summary>
+    /// 增量保存：在**同一把用户锁内**读当前内容 → 校验 base revision → 应用 ops → 原子写回。
+    ///
+    /// 与 SaveAsync 的关系：前置条件语义完全相同（base 对不上就抛 UserDataConflictException，
+    /// 路由回 409），revision 仍然按「落盘全文的 SHA256」算，所以草稿、冲突对账、
+    /// 其他设备读到的内容全都不受影响 —— 客户端只是少发了没变的部分。
+    /// </summary>
+    public async Task<(string Revision, int Applied)> PatchAsync(string user, string expectedRevision, IReadOnlyList<UserDataPatchOp> ops)
+    {
+        var clean = CleanUserName(user);
+        var gate = _locks.GetOrAdd(clean, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            Directory.CreateDirectory(_paths.UserDataRoot);
+            var path = UserDataPath(_paths, clean);
+            var currentBody = File.Exists(path) ? await File.ReadAllTextAsync(path, Encoding.UTF8) : "";
+            var currentRevision = currentBody.Length == 0 ? "" : Revision(currentBody);
+            if (!string.Equals(expectedRevision, currentRevision, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UserDataConflictException();
+            }
+            if (ops.Count == 0) return (currentRevision, 0);
+
+            var merged = UserDataPatch.Apply(currentBody, ops);
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                await File.WriteAllTextAsync(temp, merged, new UTF8Encoding(false));
+                File.Move(temp, path, true);
+                RestrictFilePermissions(path);
+            }
+            finally
+            {
+                TryDeleteFile(temp);
+            }
+            return (Revision(merged), ops.Count);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     private static string Revision(string body) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
 }

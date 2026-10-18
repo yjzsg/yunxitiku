@@ -67,9 +67,10 @@ export const scenarios = [
 
   {
     name: "save-roundtrip",
-    title: "改一笔再等 450ms：应正常保存，不该冲突",
+    title: "改一笔再等 450ms：应走增量保存，且服务端内容不被合并写坏",
     async run({ page, mock, check, sleep }) {
       await page.goto();
+      const before = JSON.parse((await mock.ctl("/__ctl/body")).body);
       await page.evaluate(`state.storage.settings.e2e = "roundtrip"; scheduleSave(); void 0`);
       await page.waitFor("state.storageDirty === false && state.storageRevision && state.storageRevision.length > 8", {
         label: "保存完成并拿到新 revision",
@@ -81,14 +82,46 @@ export const scenarios = [
       check(snap.modalVisible === false, "正常保存不该弹框");
       check(snap.drafts.length === 0, `正常保存不该留草稿，实有 ${snap.drafts.length} 条`);
       check(snap.rev === server.revision.slice(0, 8), `页面 revision(${snap.rev}) 应等于服务器(${server.revision.slice(0, 8)})`);
-      check(saves.some((s) => s.status === 200), "应有一次 200 保存");
       check(!saves.some((s) => s.status === 409), "不该出现 409");
-      /* 上传侧压缩：约 1MB 的整包以前是明文发的，移动网络下这一趟要好几秒。 */
+
+      /* 增量保存：1MB 整包在移动网络下是几百毫秒的等待，而这次真正变的只有 settings.e2e。
+         坏掉时看到的是「又发了 1MB」或者 ops 为空却回 200。 */
       const ok = saves.filter((s) => s.status === 200).at(-1);
-      check(ok.encoding === "gzip", `约 1MB 的保存应带 Content-Encoding: gzip，实际「${ok.encoding}」`);
-      check(ok.wireBytes < ok.bytes / 3, `线上字节数应远小于原文，实际 ${ok.wireBytes} / ${ok.bytes}`);
-      check(JSON.parse(server.body).settings.e2e === "roundtrip", "服务端应收到解压后的原文（revision 仍按原文算）");
+      check(ok.kind === "patch", `改一笔应走增量保存（/api/user/patch），实际「${ok.kind}」`);
+      check(ok.ops > 0 && ok.ops < 50, `增量操作数应很小，实际 ${ok.ops} 条`);
+      check(ok.wireBytes < 4000, `增量上传应只有几百字节，实际 ${ok.wireBytes}`);
+
+      /* 合并必须只动该动的：笔记 / 答题记录这些大块一条都不能丢（丢数据比慢严重得多）。 */
+      const body = JSON.parse(server.body);
+      const notesBefore = Object.keys(before.notes || {}).length;
+      const answersBefore = Object.keys(before.courses?.["1"]?.answers || {}).length;
+      check(body.settings.e2e === "roundtrip", "服务端应收到这次改动");
+      check(Object.keys(body.notes || {}).length === notesBefore, `合并后笔记条数应不变，实际 ${Object.keys(body.notes || {}).length} / ${notesBefore}`);
+      check(Object.keys(body.courses?.["1"]?.answers || {}).length === answersBefore, `合并后答题记录条数应不变，实际 ${Object.keys(body.courses?.["1"]?.answers || {}).length} / ${answersBefore}`);
       return snap;
+    },
+  },
+
+  {
+    name: "full-save-gzip",
+    title: "没有增量基线时退回整包：仍要 gzip 上传",
+    async run({ page, mock, check, sleep }) {
+      await page.goto();
+      /* 清掉基线 = 客户端手里没有「服务端已知内容」（换账号 / 首次保存 / 刚应用草稿都是这种状态），
+         此时必须退回整包，而且整包仍要压缩。 */
+      await page.evaluate(`state.syncedBody = ""; state.storage.settings.e2eFull = "1"; scheduleSave(); void 0`);
+      await page.waitFor("state.storageDirty === false && state.storageRevision && state.storageRevision.length > 8", {
+        label: "整包保存完成",
+      });
+      await sleep(400);
+      const saves = await mock.ctl("/__ctl/saves");
+      const ok = saves.filter((s) => s.status === 200).at(-1);
+      const server = await mock.ctl("/__ctl/body");
+      check(ok.kind !== "patch", `没有基线时不该走增量，实际「${ok.kind}」`);
+      check(ok.encoding === "gzip", `约 1MB 的整包应带 Content-Encoding: gzip，实际「${ok.encoding}」`);
+      check(ok.wireBytes < ok.bytes / 3, `线上字节数应远小于原文，实际 ${ok.wireBytes} / ${ok.bytes}`);
+      check(JSON.parse(server.body).settings.e2eFull === "1", "服务端应收到解压后的原文（revision 仍按原文算）");
+      return null;
     },
   },
 
@@ -130,7 +163,15 @@ export const scenarios = [
     name: "stale-draft-no-popup",
     title: "过期草稿：开页不弹框；点「加载服务器」时正好有保存在飞，也不该 409 卡住",
     async run({ page, mock, check, sleep, log }) {
+      /* 排查用：把「客户端自己认为的基线」打出来。增量保存出问题时，第一件事就是看
+         storageRevision / syncedBody 是否跟服务端一致 —— 不一致就必然会 409。 */
+      const probe = async (tag) => {
+        const st = await page.evaluate(`({ rev: String(state.storageRevision || "").slice(0, 8), synced: (state.syncedBody || "").length, seq: state.saveSuccessSeq, gen: state.loadGeneration, dirty: state.storageDirty, status: state.saveStatus })`);
+        log(tag, st);
+        return st;
+      };
       await page.goto();
+      await probe("开页");
       // ① 模拟「旧版本客户端留下的过期草稿」：revision 与服务器不符
       const injected = await page.evaluate(`(() => {
         const stale = JSON.parse(JSON.stringify(state.storage));
@@ -156,26 +197,42 @@ export const scenarios = [
       await setLoadDelay(mock, 2000);
       await page.evaluate(`state.storage.settings.e2eRace = "1"; scheduleSave(); void 0`);
       await page.waitFor("state.saveStatus === 'saving'", { label: "保存已发出", timeout: 8000 });
+      await probe("② 保存已发出");
 
       // 用户主动点状态条 → 此时才允许弹框
       await page.click("#saveStatusLabel");
       await sleep(300);
       const opened = await page.snapshot();
       check(opened.modalVisible === true, "点「未补存」应打开处理框");
+      await probe("② 弹框后");
 
       await page.click("#conflictReloadBtn");
       await page.waitFor("document.getElementById('conflictModal').classList.contains('hidden')", { label: "处理框关闭", timeout: 15000 });
       await sleep(2500); // 等在飞的保存和 load 都落定
+      await probe("② 处理框关闭 +3.5s");
       const after = await page.snapshot();
       log("加载服务器后快照", after);
+      /* 这条是那次「刷新后又弹冲突」的真正断点：读到的快照若早于刚落地的那次保存，
+         基线就比服务端旧，下一次保存必然 409。断言在这里，失败信息比等待超时清楚得多。 */
+      const serverAfter = await mock.ctl("/__ctl/body");
+      check(
+        after.rev === serverAfter.revision.slice(0, 8),
+        `加载服务器后基线应等于服务端：页面 ${after.rev} / 服务端 ${serverAfter.revision.slice(0, 8)}`,
+      );
       check(after.drafts.length === 0, `选「加载服务器数据」后草稿应清空，实有 ${after.drafts.length} 条`);
       check(!/未补存/.test(after.label), `处理后状态条不该再挂「未补存」，实际是「${after.label}」`);
 
       /* ③ 用户接着答题 —— 这一步才是关键：如果上一步把 revision 拽回了旧值，
          这之后的第一次保存就会 409，状态条又变脏，用户再刷新又是一条过期草稿。 */
       await setLoadDelay(mock, 0);
+      await probe("③ 保存前");
       await page.evaluate(`state.storage.settings.e2eAfter = "1"; scheduleSave(); void 0`);
-      await page.waitFor("state.storageDirty === false && state.saveStatus === 'idle'", { label: "继续答题后保存落定", timeout: 15000 });
+      try {
+        await page.waitFor("state.storageDirty === false && state.saveStatus === 'idle'", { label: "继续答题后保存落定", timeout: 15000 });
+      } catch (err) {
+        await probe("③ 超时现场");
+        throw err;
+      }
       await sleep(400);
       const post = await page.snapshot();
       const saves = await mock.ctl("/__ctl/saves");
