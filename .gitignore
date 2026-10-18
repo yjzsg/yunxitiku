@@ -41,3 +41,6 @@ local-edits.json
 !data/.gitkeep
 !userdata/.gitkeep
 
+# ---- 端到端测试产物：截图 / 请求轨迹 / 一次性 Chrome profile（2026-10-19）----
+tests/e2e/.artifacts/
+

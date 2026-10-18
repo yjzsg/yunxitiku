@@ -46,6 +46,10 @@ const state = {
   /* 上下文**世代**：每次 loadUserData / enterApp / logout 自增，
      用来隔离上一个账号（或上一次读数据）的在途保存响应。 */
   loadGeneration: 0,
+  /* 「成功保存」的单调计数。只用来判一件事：一次 /api/user/load 拿回来的快照，
+     在它飞的过程中有没有被本页自己的保存超过。
+     超过就不能用（那份 revision 已经旧了，拿它去存必然 409）——见 loadUserData 的重读。 */
+  saveSuccessSeq: 0,
   /* 冲突弹窗打开时记录「是哪一次 storage 变更触发的」，用来判断恢复后
      storage 是否已经变了（见 applyPendingSaveDraft / keepLocalConflictDraft）。 */
   conflictGeneration: -1,
@@ -1685,7 +1689,16 @@ async function loadUserData(user, options = {}) {
   const generation = state.loadGeneration;
   let res;
   try {
+    const savesBefore = state.saveSuccessSeq;
     res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
+    /* 读的过程中本页可能有保存落地：服务端那份 revision 已经前进，
+       而这次读到的是保存**之前**的快照。采用它会把 storageRevision 回退，
+       紧接着任何一次保存都会撞 409（用户看到的是「刚选完加载服务器数据，
+       状态条又卡在保存中，草稿还在」）。快照过期就重读一次 —— 第二次读到的
+       一定不早于那次保存，收敛即止，不会无限重试。 */
+    if (state.saveSuccessSeq !== savesBefore) {
+      res = await api(`/api/user/load?user=${encodeURIComponent(user)}`);
+    }
   } catch (err) {
     const readFailed = !err?.status || err.status >= 500;
     setStorageReadFailed(readFailed, err?.message || "");
@@ -2252,7 +2265,11 @@ function refreshPendingConflict() {
   const stale = readPendingSaveDrafts().filter((row) => row.dirty
     && String(row.revision || "") !== String(state.storageRevision || ""));
   state.pendingConflict = stale.length ? { drafts: stale, newest: stale[0] } : null;
+  /* 挂上时走 setSaveStatus（顺带刷 UI）；**清掉时也必须刷**，否则状态条会一直停在
+     上一次的「未补存 N 份 · 点击处理」——草稿其实已经删干净了，用户却以为还没处理完
+     （e2e 实测：drafts=[] 但文案仍是「未补存 2 份」）。 */
   if (state.pendingConflict) setSaveStatus("error");
+  else updateSaveStatusUi();
 }
 
 function flushPendingSaveBeacon() {
@@ -2352,6 +2369,8 @@ function saveUserData() {
       throw err;
     });
     state.storageRevision = result.revision || state.storageRevision;
+    /* 服务端已经是这份内容了：给「在途的 load 快照是否过期」打个记号（见 loadUserData）。 */
+    state.saveSuccessSeq += 1;
     /* 这次请求确实被服务端收下了 —— 它发出去的那份内容（= 某条草稿的内容）
        现在可以按 ID 定向删；导入去重也认这个凭据。 */
     markDraftConfirmed([context.inherited?.id], [context.payload]);

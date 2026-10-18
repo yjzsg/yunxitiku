@@ -1,0 +1,191 @@
+// 回归场景。每条场景都对应一个真实发生过的故障，注释里写清「坏掉时会看到什么」。
+//
+// 约定：场景函数拿到 { page, mock, check, log, sleep }，用 check(条件, 说明) 断言；
+// 一条场景里的断言会全部跑完再汇总失败，不会因为第一处失败就丢掉后面的信息。
+
+/** 造一份接近线上的用户数据（~1MB）：beacon 上限 64KB 这个前提必须靠它复现。 */
+export function makeSeed({ answers = 4000, notes = 3000, history = 3000 } = {}) {
+  const store = { answers: {}, done: {}, correct: {}, wrong: {}, verified: {}, lastSubjectId: 0 };
+  for (let i = 0; i < answers; i++) {
+    const id = String(10000 + i);
+    store.answers[id] = "ABCD"[i % 4];
+    store.done[id] = 1;
+    if (i % 5 === 0) store.wrong[id] = 1; else store.correct[id] = 1;
+  }
+  const noteMap = {};
+  for (let i = 0; i < notes; i++) {
+    noteMap[String(10000 + i)] = "第" + i + "题的笔记：" + "审题时先看设问方向，再回头看题干里的限定词。".repeat(2);
+  }
+  const hist = [];
+  for (let i = 0; i < history; i++) {
+    hist.push({ qid: String(10000 + i), at: `2026-0${(i % 9) + 1}-1${i % 9} 10:0${i % 9}:00`, ok: i % 5 !== 0 });
+  }
+  const data = {
+    profile: { name: "e2e", createdAt: "2026-01-01 00:00:00" },
+    courses: { "1": store },
+    history: hist,
+    notes: noteMap,
+    settings: {},
+  };
+  // 不够 1MB 就补笔记正文，保证 payload 远超 64KB（否则这条回归守不住任何东西）
+  let pad = 0;
+  while (JSON.stringify(data).length < 1_000_000) {
+    data.notes[String(900000 + pad)] = "填充笔记 " + pad + " ".padEnd(120, "题");
+    pad++;
+  }
+  return data;
+}
+
+const setSaveDelay = (mock, ms) => mock.ctl("/__ctl/config", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ saveDelay: ms }),
+});
+
+const setLoadDelay = (mock, ms) => mock.ctl("/__ctl/config", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ loadDelay: ms }),
+});
+
+export const scenarios = [
+  {
+    name: "idle-no-draft",
+    title: "开着不动：不该囤草稿、不该弹框",
+    async run({ page, mock, check, sleep }) {
+      await page.goto();
+      await sleep(3000);
+      const snap = await page.snapshot();
+      const server = await mock.ctl("/__ctl/body");
+      check(snap.modalVisible === false, "首屏不该弹冲突框");
+      check(snap.drafts.length === 0, `首屏不该留下草稿，实有 ${snap.drafts.length} 条`);
+      check(snap.rev === server.revision.slice(0, 8), `页面 revision(${snap.rev}) 应与服务器一致(${server.revision.slice(0, 8)})`);
+      check(snap.dirty === false, "首屏落定后不该还是脏的");
+      return snap;
+    },
+  },
+
+  {
+    name: "save-roundtrip",
+    title: "改一笔再等 450ms：应正常保存，不该冲突",
+    async run({ page, mock, check, sleep }) {
+      await page.goto();
+      await page.evaluate(`state.storage.settings.e2e = "roundtrip"; scheduleSave(); void 0`);
+      await page.waitFor("state.storageDirty === false && state.storageRevision && state.storageRevision.length > 8", {
+        label: "保存完成并拿到新 revision",
+      });
+      await sleep(500);
+      const snap = await page.snapshot();
+      const server = await mock.ctl("/__ctl/body");
+      const saves = await mock.ctl("/__ctl/saves");
+      check(snap.modalVisible === false, "正常保存不该弹框");
+      check(snap.drafts.length === 0, `正常保存不该留草稿，实有 ${snap.drafts.length} 条`);
+      check(snap.rev === server.revision.slice(0, 8), `页面 revision(${snap.rev}) 应等于服务器(${server.revision.slice(0, 8)})`);
+      check(saves.some((s) => s.status === 200), "应有一次 200 保存");
+      check(!saves.some((s) => s.status === 409), "不该出现 409");
+      return snap;
+    },
+  },
+
+  {
+    name: "unload-beacon-toobig",
+    title: "1MB 数据 + 保存途中刷新：beacon 一个字节都不发，且不该弹框",
+    timeout: 60000,
+    async run({ page, mock, check, sleep, log }) {
+      await setSaveDelay(mock, 1200);
+      await page.goto();
+      // 触发一次保存，然后在 POST 还在飞的时候刷新
+      await page.evaluate(`state.storage.settings.e2e = "inflight"; scheduleSave(); void 0`);
+      await page.waitFor("state.saveStatus === 'saving'", { label: "保存进入 saving（POST 已在飞）", timeout: 8000 });
+      await sleep(300);
+      await page.reload();
+      await sleep(2500); // 等在飞的那次 POST 落地 + 新页面 load 稳定
+      const snap1 = await page.snapshot();
+      log("刷新后第一次快照", snap1);
+
+      const saves = await mock.ctl("/__ctl/saves");
+      const beacon = saves.filter((s) => s.channel === "beacon");
+      check(beacon.length === 0, `超 64KB 的 payload 不该走 sendBeacon，实发 ${beacon.length} 条`);
+      check(snap1.modalVisible === false, "第一次刷新后不该弹冲突框");
+      check(snap1.drafts.length === 0, `第一次刷新后不该留草稿，实有 ${snap1.drafts.length} 条`);
+
+      // 再刷一次：旧实现这里会「每次刷新都弹」，且不再发任何请求
+      await page.reload();
+      await sleep(1500);
+      const snap2 = await page.snapshot();
+      log("刷新后第二次快照", snap2);
+      check(snap2.modalVisible === false, "第二次刷新后仍不该弹框（这正是用户报的现象）");
+      check(snap2.drafts.length === 0, `第二次刷新后草稿应为 0，实有 ${snap2.drafts.length} 条`);
+      check((await mock.ctl("/__ctl/saves")).filter((s) => s.channel === "beacon").length === 0, "整个过程都不该出现 beacon 保存");
+      return { snap1, snap2, saves };
+    },
+  },
+
+  {
+    name: "stale-draft-no-popup",
+    title: "过期草稿：开页不弹框；点「加载服务器」时正好有保存在飞，也不该 409 卡住",
+    async run({ page, mock, check, sleep, log }) {
+      await page.goto();
+      // ① 模拟「旧版本客户端留下的过期草稿」：revision 与服务器不符
+      const injected = await page.evaluate(`(() => {
+        const stale = JSON.parse(JSON.stringify(state.storage));
+        stale.settings = Object.assign({}, stale.settings, { e2eStale: "local-only" });
+        return stashPendingSaveDraft("e2e-stale", { revision: "0".repeat(64), storage: stale }) || "";
+      })()`);
+      check(!!injected, "注入过期草稿应成功");
+
+      await page.reload();
+      await sleep(1200);
+      const snap = await page.snapshot();
+      log("过期草稿开页快照", snap);
+      check(snap.modalVisible === false, "开页不该自动弹冲突框（用户抱怨的就是这个）");
+      check(/未补存/.test(snap.label), `状态条应提示「未补存」，实际是「${snap.label}」`);
+      check(snap.drafts.length >= 1, "草稿应还在（还没被处理）");
+      /* 这里故意**不**要求 storageDirty=true：开页只挂入口、不动 storage，
+         卸载时也就不会再多落一条 revision 更旧的草稿。 */
+      check(!(await mock.ctl("/__ctl/saves")).some((s) => s.status === 409), "开页阶段不该自动发起补存并撞 409");
+
+      // ② 竞态：保存慢（1.2s 后落地）、load 更慢（2s 后回包）。
+      //    load 取的是保存**之前**的快照，却晚于保存回包 —— 这是线上真实出现过的顺序。
+      await setSaveDelay(mock, 1200);
+      await setLoadDelay(mock, 2000);
+      await page.evaluate(`state.storage.settings.e2eRace = "1"; scheduleSave(); void 0`);
+      await page.waitFor("state.saveStatus === 'saving'", { label: "保存已发出", timeout: 8000 });
+
+      // 用户主动点状态条 → 此时才允许弹框
+      await page.click("#saveStatusLabel");
+      await sleep(300);
+      const opened = await page.snapshot();
+      check(opened.modalVisible === true, "点「未补存」应打开处理框");
+
+      await page.click("#conflictReloadBtn");
+      await page.waitFor("document.getElementById('conflictModal').classList.contains('hidden')", { label: "处理框关闭", timeout: 15000 });
+      await sleep(2500); // 等在飞的保存和 load 都落定
+      const after = await page.snapshot();
+      log("加载服务器后快照", after);
+      check(after.drafts.length === 0, `选「加载服务器数据」后草稿应清空，实有 ${after.drafts.length} 条`);
+      check(!/未补存/.test(after.label), `处理后状态条不该再挂「未补存」，实际是「${after.label}」`);
+
+      /* ③ 用户接着答题 —— 这一步才是关键：如果上一步把 revision 拽回了旧值，
+         这之后的第一次保存就会 409，状态条又变脏，用户再刷新又是一条过期草稿。 */
+      await setLoadDelay(mock, 0);
+      await page.evaluate(`state.storage.settings.e2eAfter = "1"; scheduleSave(); void 0`);
+      await page.waitFor("state.storageDirty === false && state.saveStatus === 'idle'", { label: "继续答题后保存落定", timeout: 15000 });
+      await sleep(400);
+      const post = await page.snapshot();
+      const saves = await mock.ctl("/__ctl/saves");
+      log("继续答题后快照", post);
+      const conflicts = saves.filter((s) => s.status === 409);
+      check(conflicts.length === 0, `整个流程不该出现 409，实有 ${conflicts.length} 次（最后一次 exp=${conflicts.at(-1)?.expected} cur=${conflicts.at(-1)?.current}）`);
+      check(post.dirty === false, "继续答题保存后不该还是脏的");
+      check(post.drafts.length === 0, `不该留下草稿，实有 ${post.drafts.length} 条`);
+
+      await page.reload();
+      await sleep(1000);
+      const final = await page.snapshot();
+      check(final.modalVisible === false, "再刷新一次仍不该弹框");
+      check(final.drafts.length === 0, "再刷新一次仍不该有草稿");
+      return { snap, opened, after, final };
+    },
+  },
+];

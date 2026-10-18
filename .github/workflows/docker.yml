@@ -10,6 +10,7 @@ on:
       - src/**
       - deploy/asset-versions.lock.json
       - deploy/check-asset-versions.mjs
+      - tests/**
       - .github/workflows/docker.yml
   # PR 也要过门禁（DL-06）：镜像只在 push/dispatch 上推，PR 只跑 verify。
   pull_request:
@@ -20,6 +21,7 @@ on:
       - public/**
       - src/**
       - deploy/**
+      - tests/**
       - .github/workflows/docker.yml
   workflow_dispatch:
 
@@ -51,9 +53,37 @@ jobs:
       - name: 校验 ?v= 与文件内容一致
         run: node deploy/check-asset-versions.mjs
 
+  # ── 端到端回归（tests/e2e）──────────────────────────────────────────────
+  # 守的是「刷新一次弹一次数据冲突」「点了加载服务器数据还是弹」这类**前端状态机**回归：
+  # 一个假后端（复刻 Program.cs 的 revision=内容哈希 + If-Match/expectEmpty 语义）
+  # 加无头 Chrome 跑真实的 public/app.js，不 mock 业务代码本身。
+  # 曾经的坑：sendBeacon 上限 64KB 静默失败 → 落一条永久过期的草稿，用户每次刷新都被问一遍。
+  e2e:
+    name: 端到端回归
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"   # 驱动用 Node 内置 WebSocket 直连 CDP，必须 ≥ 22
+
+      - name: 跑 tests/e2e
+        run: node tests/e2e/run.mjs
+
+      - name: 失败时归档产物（截图 / 请求轨迹）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: tests/e2e/.artifacts/
+          retention-days: 7
+
   docker:
     name: 构建并推送镜像
-    needs: verify
+    needs: [verify, e2e]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
