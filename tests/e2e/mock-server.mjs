@@ -134,9 +134,14 @@ export async function startMockServer(opts = {}) {
       /* 与真实服务端的 UseRequestDecompression 对齐：带 Content-Encoding 就先解压，
          之后一律当原始 JSON 看（revision 也按解压后的内容算）。 */
       let raw = wire;
-      if (encoding === "gzip") raw = zlib.gunzipSync(wire);
-      else if (encoding === "deflate") raw = zlib.inflateSync(wire);
-      else if (encoding === "br") raw = zlib.brotliDecompressSync(wire);
+      try {
+        if (encoding === "gzip") raw = zlib.gunzipSync(wire);
+        else if (encoding === "deflate") raw = zlib.inflateSync(wire);
+        else if (encoding === "br") raw = zlib.brotliDecompressSync(wire);
+      } catch {
+        // 与真实服务端一致：解压失败是客户端请求体的问题，回 400 而不是把连接打断
+        return json(res, 400, { ok: false, error: "请求体解压失败：Content-Encoding 与实际内容不符" });
+      }
       const body = raw.toString("utf8") || "{}";
       if (state.saveDelay > 0) await new Promise((r) => setTimeout(r, state.saveDelay));
 

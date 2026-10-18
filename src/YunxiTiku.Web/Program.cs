@@ -496,21 +496,30 @@ app.MapGet("/api/user/load", async (HttpContext context, string? user, UserDataS
     }
 });
 
-/* 限长读取请求体（UTF-8）：超限返回 null，由调用方回 400。
+/* 限长读取请求体（UTF-8）：超限返回 Body=null，由调用方回 400。
    为什么要限长：客户端会把保存请求 gzip 压缩后再发（约 1/10 体积），
-   请求体经 UseRequestDecompression 还原后才到这里，压缩比可以被构造成任意大。 */
-static async Task<string?> ReadBodyWithLimitAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
+   请求体经 UseRequestDecompression 还原后才到这里，压缩比可以被构造成任意大。
+   ⚠️ Content-Encoding 与实际内容不符时，解压流会在读取时抛异常 ——
+   那是**客户端请求体的问题**，不是服务器故障，要回 400 而不是 500。 */
+static async Task<(string? Body, string? Error)> ReadBodyWithLimitAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
 {
-    using var buffer = new MemoryStream();
-    var chunk = new byte[64 * 1024];
-    while (true)
+    try
     {
-        var read = await stream.ReadAsync(chunk, cancellationToken);
-        if (read <= 0) break;
-        if (buffer.Length + read > maxBytes) return null;
-        buffer.Write(chunk, 0, read);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[64 * 1024];
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk, cancellationToken);
+            if (read <= 0) break;
+            if (buffer.Length + read > maxBytes) return (null, null);
+            buffer.Write(chunk, 0, read);
+        }
+        return (Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length), null);
     }
-    return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException)
+    {
+        return (null, "请求体解压失败：Content-Encoding 与实际内容不符");
+    }
 }
 
 app.MapPost("/api/user/save", async (HttpContext context, string? user, UserDataStore userData) =>
@@ -523,7 +532,8 @@ app.MapPost("/api/user/save", async (HttpContext context, string? user, UserData
        所以真正的 32MB 上限要看解压后的实际字节数 —— 读的时候限长，别等 ReadToEndAsync
        把解压炸弹整个吃进内存再判。 */
     if (request.ContentLength > 32L * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
-    var body = await ReadBodyWithLimitAsync(request.Body, 32 * 1024 * 1024, context.RequestAborted);
+    var (body, readError) = await ReadBodyWithLimitAsync(request.Body, 32 * 1024 * 1024, context.RequestAborted);
+    if (readError is not null) return Results.Json(new { ok = false, error = readError }, statusCode: 400);
     if (body is null) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
     if (string.IsNullOrWhiteSpace(body)) body = "{}";
     // 必须是 JSON 对象（以前接受数组/标量并落盘，导出与备份的消费者都要跟着防）
