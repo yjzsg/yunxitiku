@@ -2327,6 +2327,30 @@ function flushPendingSaveBeacon() {
   }
 }
 
+/* 保存请求体压缩：整包用户数据线上实测约 1MB（1,006,794 字节），上传侧一直没有压缩，
+   国内移动网络下这一趟要好几秒。CompressionStream('gzip') 在 Chrome 80+ / Safari 16.4+ /
+   Firefox 113+ 可用，同样的数据能压到约 1/10。
+   服务端 UseRequestDecompression 负责还原，端点读到的仍是原始 JSON，
+   revision 依旧按原文算 —— 协议语义不变。老浏览器 / 压不动时不发这个头，行为与以前一致。 */
+const SAVE_COMPRESS_MIN_BYTES = 32 * 1024;
+
+async function encodeSaveBody(payload) {
+  const text = JSON.stringify(payload);
+  if (typeof CompressionStream !== "function") return { body: text, encoding: "" };
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.byteLength < SAVE_COMPRESS_MIN_BYTES) return { body: text, encoding: "" };
+  try {
+    const packed = new Uint8Array(await new Response(
+      new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip")),
+    ).arrayBuffer());
+    /* 压不动（小包 / 已高度随机的数据）就别多发一个头，按原文发。 */
+    if (packed.byteLength >= bytes.byteLength) return { body: text, encoding: "" };
+    return { body: packed, encoding: "gzip" };
+  } catch {
+    return { body: text, encoding: "" };
+  }
+}
+
 function saveUserData() {
   if (!state.user) return Promise.resolve();
   /* 只读态：直接返回失败，不发请求（调度侧已拦，这里是第二道闸）。 */
@@ -2350,10 +2374,13 @@ function saveUserData() {
        这正是那条「读失败 → 空包覆盖真实进度」的路径的兜底。 */
     if (state.storageRevision) headers["If-Match"] = `"${state.storageRevision}"`;
     else headers["If-None-Match"] = "*";
+    /* 大包走 gzip（见 encodeSaveBody）：1MB → 约 100KB，服务端透明解压。 */
+    const encoded = await encodeSaveBody(context.payload);
+    if (encoded.encoding) headers["Content-Encoding"] = encoded.encoding;
     const result = await api(`/api/user/save?user=${encodeURIComponent(state.user)}`, {
       method: "POST",
       headers,
-      body: JSON.stringify(context.payload),
+      body: encoded.body,
     }).catch((err) => {
       /* 把「这次被拒的是哪份内容」挂到错误上：409 之后要先拿它跟服务端对账，
          内容一致就说明是本机另一处已经写进去了，不该弹冲突框（见 handleUserSaveError）。 */

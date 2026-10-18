@@ -83,6 +83,11 @@ export const scenarios = [
       check(snap.rev === server.revision.slice(0, 8), `页面 revision(${snap.rev}) 应等于服务器(${server.revision.slice(0, 8)})`);
       check(saves.some((s) => s.status === 200), "应有一次 200 保存");
       check(!saves.some((s) => s.status === 409), "不该出现 409");
+      /* 上传侧压缩：约 1MB 的整包以前是明文发的，移动网络下这一趟要好几秒。 */
+      const ok = saves.filter((s) => s.status === 200).at(-1);
+      check(ok.encoding === "gzip", `约 1MB 的保存应带 Content-Encoding: gzip，实际「${ok.encoding}」`);
+      check(ok.wireBytes < ok.bytes / 3, `线上字节数应远小于原文，实际 ${ok.wireBytes} / ${ok.bytes}`);
+      check(JSON.parse(server.body).settings.e2e === "roundtrip", "服务端应收到解压后的原文（revision 仍按原文算）");
       return snap;
     },
   },

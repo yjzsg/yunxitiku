@@ -12,6 +12,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../../public/", import.meta.url));
@@ -128,7 +129,15 @@ export async function startMockServer(opts = {}) {
     if (p === "/api/user/save") {
       const chunks = [];
       for await (const c of req) chunks.push(c);
-      const body = Buffer.concat(chunks).toString("utf8") || "{}";
+      const wire = Buffer.concat(chunks);
+      const encoding = String(req.headers["content-encoding"] || "").toLowerCase();
+      /* 与真实服务端的 UseRequestDecompression 对齐：带 Content-Encoding 就先解压，
+         之后一律当原始 JSON 看（revision 也按解压后的内容算）。 */
+      let raw = wire;
+      if (encoding === "gzip") raw = zlib.gunzipSync(wire);
+      else if (encoding === "deflate") raw = zlib.inflateSync(wire);
+      else if (encoding === "br") raw = zlib.brotliDecompressSync(wire);
+      const body = raw.toString("utf8") || "{}";
       if (state.saveDelay > 0) await new Promise((r) => setTimeout(r, state.saveDelay));
 
       const { expected, expectEmpty } = parsePrecondition(req.headers, url);
@@ -151,6 +160,9 @@ export async function startMockServer(opts = {}) {
       state.saves.push({
         at: new Date().toISOString().slice(11, 23),
         bytes: Buffer.byteLength(body),
+        // 线上实际传输的字节数（gzip 压缩后）与所用编码，用来断言上传侧真的压了
+        wireBytes: wire.length,
+        encoding,
         expected: expected.slice(0, 8),
         current: current.slice(0, 8),
         status,

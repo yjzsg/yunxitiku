@@ -146,9 +146,18 @@ builder.Services.AddResponseCompression(options =>
 builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Optimal);
 builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
 
+/* 请求体解压：保存走的是整包上传（线上实测 1,006,794 字节），
+   国内移动网络下这一趟要好几秒。客户端用 CompressionStream('gzip') 压到约 1/10 再发，
+   这里负责还原 —— 端点读到的仍是原始 JSON，revision 仍按原文算，契约不变。
+   老客户端不带 Content-Encoding，行为完全不变。
+   ⚠️ RequestDecompressionOptions 没有 SizeLimit（.NET 这里不提供），解压炸弹靠
+   /api/user/save 里改成「限长读取」来兜（见 ReadBodyWithLimitAsync）。 */
+builder.Services.AddRequestDecompression();
+
 var app = builder.Build();
 
 app.UseResponseCompression();   // 必须尽早：要压在静态文件与路由之前
+app.UseRequestDecompression();  // 同理：必须在端点读 body 之前
 
 // 全局异常处理：任何未捕获异常都回 JSON，而不是 Production 下的裸 500 空响应体。
 app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
@@ -487,16 +496,35 @@ app.MapGet("/api/user/load", async (HttpContext context, string? user, UserDataS
     }
 });
 
+/* 限长读取请求体（UTF-8）：超限返回 null，由调用方回 400。
+   为什么要限长：客户端会把保存请求 gzip 压缩后再发（约 1/10 体积），
+   请求体经 UseRequestDecompression 还原后才到这里，压缩比可以被构造成任意大。 */
+static async Task<string?> ReadBodyWithLimitAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
+{
+    using var buffer = new MemoryStream();
+    var chunk = new byte[64 * 1024];
+    while (true)
+    {
+        var read = await stream.ReadAsync(chunk, cancellationToken);
+        if (read <= 0) break;
+        if (buffer.Length + read > maxBytes) return null;
+        buffer.Write(chunk, 0, read);
+    }
+    return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+}
+
 app.MapPost("/api/user/save", async (HttpContext context, string? user, UserDataStore userData) =>
 {
     var request = context.Request;
     string clean;
     try { clean = ResolveRequestedUser(context, user); }
     catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
+    /* ContentLength 是「线上字节数」：带 Content-Encoding: gzip 时它是压缩后的长度，
+       所以真正的 32MB 上限要看解压后的实际字节数 —— 读的时候限长，别等 ReadToEndAsync
+       把解压炸弹整个吃进内存再判。 */
     if (request.ContentLength > 32L * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
-    using var reader = new StreamReader(request.Body, request.ContentType?.Contains("charset", StringComparison.OrdinalIgnoreCase) == true ? Encoding.UTF8 : Encoding.UTF8);
-    var body = await reader.ReadToEndAsync();
-    if (Encoding.UTF8.GetByteCount(body) > 32 * 1024 * 1024) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
+    var body = await ReadBodyWithLimitAsync(request.Body, 32 * 1024 * 1024, context.RequestAborted);
+    if (body is null) return Results.Json(new { ok = false, error = "用户数据超过 32MB，请清理历史记录或导出归档" }, statusCode: 400);
     if (string.IsNullOrWhiteSpace(body)) body = "{}";
     // 必须是 JSON 对象（以前接受数组/标量并落盘，导出与备份的消费者都要跟着防）
     try
