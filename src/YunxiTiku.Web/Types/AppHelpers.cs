@@ -427,4 +427,53 @@ internal static string ContentType(string path)
         _ => "application/octet-stream"
     };
 }
+
+/* 限长读取请求体（UTF-8）：超限返回 Body=null，由调用方回 400。
+   为什么要限长：客户端会把保存请求 gzip 压缩后再发（约 1/10 体积），
+   请求体经 UseRequestDecompression 还原后才到这里，压缩比可以被构造成任意大。
+   ⚠️ Content-Encoding 与实际内容不符时，解压流会在读取时抛异常 ——
+   那是**客户端请求体的问题**，不是服务器故障，要回 400 而不是 500。
+   （原先是 Program.cs 里的本地函数，端点搬到 Endpoints/ 后挪进这里共用。） */
+internal static async Task<(string? Body, string? Error)> ReadBodyWithLimitAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
+{
+    try
+    {
+        using var buffer = new MemoryStream();
+        var chunk = new byte[64 * 1024];
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk, cancellationToken);
+            if (read <= 0) break;
+            if (buffer.Length + read > maxBytes) return (null, null);
+            buffer.Write(chunk, 0, read);
+        }
+        return (Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length), null);
+    }
+    catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException)
+    {
+        return (null, "请求体解压失败：Content-Encoding 与实际内容不符");
+    }
+}
+
+/// <summary>
+/// 上游课程目录（失败**不抛**）：管理端列表宁可少几门「未拉取」的课，
+/// 也不能因为上游抖动 / 账号没配就整个列表打不开。
+/// </summary>
+internal static async Task<Puller.CourseCatalogSnapshot?> TryLoadUpstreamCatalogAsync(IConfiguration configuration)
+{
+    try
+    {
+        var user = Puller.BankCredentials.ResolveUser(configuration["App:BankServiceUser"]);
+        var password = Puller.BankCredentials.ResolvePassword(configuration["App:BankServicePassword"]);
+        Puller.BankCredentials.EnsureConfigured(user, password);
+        using var soap = new Puller.SoapClient(
+            Puller.BankCredentials.ResolveUrl(configuration["App:BankServiceUrl"]), user, password, 15000);
+        return await Puller.CourseCatalog.LoadFullAsync(soap);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[catalog] 上游课程目录不可用，管理端仅列本地课程：{SafeErrorText(ex)}");
+        return null;
+    }
+}
 }
