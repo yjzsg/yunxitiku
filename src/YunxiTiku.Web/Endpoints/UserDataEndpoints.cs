@@ -131,16 +131,16 @@ internal static class UserDataEndpoints
         try { clean = ResolveRequestedUser(context, user); }
         catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
         /* 增量请求正常只有几百字节到几十 KB；4MB 上限是防着「客户端算出巨大 diff 还硬发」。 */
-        if (request.ContentLength > 4L * 1024 * 1024) return Results.Json(new { ok = false, error = "增量保存请求超过 4MB，请改用整包保存" }, statusCode: 400);
+        if (request.ContentLength > 4L * 1024 * 1024) return Results.Json(new { ok = false, error = "增量保存请求超过 4MB，请改用整包保存", code = "user_data_patch_rejected" }, statusCode: 400);
         var (body, readError) = await ReadBodyWithLimitAsync(request.Body, 4 * 1024 * 1024, context.RequestAborted);
-        if (readError is not null) return Results.Json(new { ok = false, error = readError }, statusCode: 400);
-        if (body is null) return Results.Json(new { ok = false, error = "增量保存请求超过 4MB，请改用整包保存" }, statusCode: 400);
+        if (readError is not null) return Results.Json(new { ok = false, error = readError, code = "user_data_patch_rejected" }, statusCode: 400);
+        if (body is null) return Results.Json(new { ok = false, error = "增量保存请求超过 4MB，请改用整包保存", code = "user_data_patch_rejected" }, statusCode: 400);
 
         string baseRevision;
         List<UserDataPatchOp> ops;
         try { (baseRevision, ops) = UserDataPatch.Parse(body); }
-        catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message }, statusCode: 400); }
-        catch (JsonException ex) { return Results.Json(new { ok = false, error = "增量保存请求不是有效 JSON：" + ex.Message }, statusCode: 400); }
+        catch (InvalidOperationException ex) { return Results.Json(new { ok = false, error = ex.Message, code = "user_data_patch_rejected" }, statusCode: 400); }
+        catch (JsonException ex) { return Results.Json(new { ok = false, error = "增量保存请求不是有效 JSON：" + ex.Message, code = "user_data_patch_rejected" }, statusCode: 400); }
 
         try
         {

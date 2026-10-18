@@ -39,6 +39,7 @@ node tests/e2e/run.mjs --debug         # 打印浏览器 stderr 与中间快照
 | `idle-no-draft` | 纯开页不写草稿、不回写服务器（revision 不变） |
 | `save-roundtrip` | 改一笔走**增量保存**（`/api/user/patch`：ops 少、线上字节 < 4KB），且合并不丢笔记 / 答题记录 |
 | `full-save-gzip` | 没有增量基线（换账号 / 首次保存 / 刚应用草稿）时退回整包，整包仍要 gzip（线上字节 < 原文 1/3） |
+| `patch-rejected-falls-back` | 服务端拒绝增量（400 `user_data_patch_rejected`）时，这一次改动必须改走整包保存（gzip）、不丢、不弹框 |
 | `unload-beacon-toobig` | 保存还在飞时刷新：大包不发 beacon、续跑那条已在飞的保存、连刷两次都不弹框不留草稿 |
 | `stale-draft-no-popup` | 本机存着过期草稿：开页**不弹模态**、改挂「未补存」入口；点「加载服务器数据」后草稿真被删掉、基线等于服务端；之后继续答题不会 409 |
 
@@ -59,6 +60,20 @@ node tests/e2e/run.mjs --debug         # 打印浏览器 stderr 与中间快照
    造确定性的顺序，再用 `waitFor` 等最终态。
 4. 加了 `?delay=` / `/__ctl/*` 这类测试钩子，也要保证默认配置下的语义和真后端一致。
 5. 每个场景先 `reset` 再 `seed`，场景之间不共享状态。
+
+## 真实服务端的契约检查（tests/api）
+
+e2e 的假后端是**抄**契约；抄错了两边一起错。`tests/api/patch-check.mjs` 直接打真实 C# 实现，
+验的是合并语义本身：gzip 上传、`set`/`app`/`del` 生效、`revision = 落盘全文 SHA256`、
+过期 base 409（一个字节都不写）、非法 op / 超过 2000 条回 400 且不改数据、老客户端的明文整包仍可用。
+
+```bash
+dotnet publish src/YunxiTiku.Web -c Release -o /tmp/yt
+cd /tmp/yt && ASPNETCORE_URLS=http://127.0.0.1:5199 dotnet YunxiTiku.Web.dll &
+node tests/api/patch-check.mjs          # 可用 PATCH_BASE/PATCH_USER/PATCH_PASSWORD 覆盖
+```
+
+它不接 CI（CI 里没有起好的服务端），改保存端点后手工跑一次。
 
 ## CI
 

@@ -48,6 +48,13 @@ const setLoadDelay = (mock, ms) => mock.ctl("/__ctl/config", {
   body: JSON.stringify({ loadDelay: ms }),
 });
 
+/* 让接下来 n 次增量请求被服务端拒掉（400），用来验证「退回整包」这条退路。 */
+const rejectNextPatch = (mock, n) => mock.ctl("/__ctl/config", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ rejectPatch: n }),
+});
+
 export const scenarios = [
   {
     name: "idle-no-draft",
@@ -122,6 +129,36 @@ export const scenarios = [
       check(ok.wireBytes < ok.bytes / 3, `线上字节数应远小于原文，实际 ${ok.wireBytes} / ${ok.bytes}`);
       check(JSON.parse(server.body).settings.e2eFull === "1", "服务端应收到解压后的原文（revision 仍按原文算）");
       return null;
+    },
+  },
+
+  {
+    name: "patch-rejected-falls-back",
+    title: "服务端拒绝增量（400）时：这一次改动必须改走整包保存，不能丢",
+    async run({ page, mock, check, sleep }) {
+      await page.goto();
+      /* 服务端在结构分叉（中间层不是对象、op 非法）时回 400 + user_data_patch_rejected。
+         早期实现只在 404/405 时退回整包，400 会把这次改动直接扔掉 —— 用户看到「保存失败」，
+         再一刷新改动就没了。这里让 mock 的前 1 次 patch 请求返回 400。 */
+      await rejectNextPatch(mock, 1);
+      await page.evaluate(`state.storage.settings.e2eFallback = "1"; scheduleSave(); void 0`);
+      await page.waitFor("state.storageDirty === false && state.saveStatus === 'idle'", { label: "保存最终落定", timeout: 20000 });
+      await sleep(400);
+
+      const saves = await mock.ctl("/__ctl/saves");
+      const rejected = saves.filter((s) => s.kind === "patch" && s.status === 400);
+      const full = saves.filter((s) => s.kind !== "patch" && s.status === 200).at(-1);
+      const server = await mock.ctl("/__ctl/body");
+      const snap = await page.snapshot();
+      check(rejected.length === 1, `应发出 1 次被拒的增量请求，实际 ${rejected.length} 次`);
+      check(!!full, "被拒之后必须退回整包保存，实际没有整包请求");
+      check(full && full.encoding === "gzip", `退回整包时仍要 gzip，实际「${full?.encoding}」`);
+      check(JSON.parse(server.body).settings.e2eFallback === "1", "整包里应带上这次改动");
+      check(snap.rev === server.revision.slice(0, 8), `页面 revision(${snap.rev}) 应等于服务器(${server.revision.slice(0, 8)})`);
+      check(snap.modalVisible === false, "退回整包不该弹冲突框");
+      check(snap.drafts.length === 0, `不该留草稿，实有 ${snap.drafts.length} 条`);
+      check(!saves.some((s) => s.status === 409), "不该出现 409");
+      return { saves, snap };
     },
   },
 

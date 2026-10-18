@@ -53,6 +53,9 @@ export async function startMockServer(opts = {}) {
     /* load 的延迟单独可控：只有让「保存先落地、load 后返回」，
        才能稳定复现「load 快照把 revision 拽回旧值」的竞态。 */
     loadDelay: 0,
+    /* 接下来若干个 /api/user/patch 请求直接回 400（模拟服务端结构分叉拒绝）。
+       客户端必须退回整包保存，不能把这次改动丢掉。 */
+    rejectPatch: 0,
   };
 
   const json = (res, code, obj) => {
@@ -73,7 +76,7 @@ export async function startMockServer(opts = {}) {
     if (p === "/__ctl/body") return json(res, 200, { revision: state.revision(), body: state.body });
     if (p === "/__ctl/reset") {
       state.body = ""; state.saves = []; state.loads = []; state.requests = [];
-      state.saveDelay = 0; state.loadDelay = 0;
+      state.saveDelay = 0; state.loadDelay = 0; state.rejectPatch = 0;
       return json(res, 200, { ok: true });
     }
     if (p === "/__ctl/config") {
@@ -82,7 +85,8 @@ export async function startMockServer(opts = {}) {
       const cfg = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
       if (typeof cfg.saveDelay === "number") state.saveDelay = cfg.saveDelay;
       if (typeof cfg.loadDelay === "number") state.loadDelay = cfg.loadDelay;
-      return json(res, 200, { ok: true, saveDelay: state.saveDelay, loadDelay: state.loadDelay });
+      if (typeof cfg.rejectPatch === "number") state.rejectPatch = cfg.rejectPatch;
+      return json(res, 200, { ok: true, saveDelay: state.saveDelay, loadDelay: state.loadDelay, rejectPatch: state.rejectPatch });
     }
     if (p === "/__ctl/seed") {
       const chunks = [];
@@ -215,6 +219,13 @@ export async function startMockServer(opts = {}) {
         status: 200,
         channel: "fetch",
       };
+      if (state.rejectPatch > 0) {
+        /* 真实服务端会在「结构分叉 / op 非法」时回 400 + user_data_patch_rejected。
+           客户端必须把这次改动改走整包保存 —— 这里模拟的正是那条退路。 */
+        state.rejectPatch -= 1;
+        state.saves.push({ ...row, status: 400 });
+        return json(res, 400, { ok: false, error: "模拟服务端拒绝增量（结构分叉）", code: "user_data_patch_rejected" });
+      }
       if (!base || !ops) {
         state.saves.push({ ...row, status: 400 });
         return json(res, 400, { ok: false, error: "增量保存必须带 base 与 ops" });
