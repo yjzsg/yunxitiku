@@ -552,9 +552,9 @@ body.is-admin .admin-only {
 }
 
 /* 「未补存」入口：有 revision 已过期的草稿时，保存状态就是打开冲突框的按钮。
-   小屏断点默认 .save-status{display:none}，这里必须强制显示 ——
-   否则手机上唯一的入口就没了。 */
-.save-status.is-actionable {
+   小屏断点里有 `.main-nav .save-status{display:none !important}`（选择器权重 0,2,0），
+   所以这里用 **id** 选择器（1,1,0）压过它 —— 否则手机上唯一的入口就没了。 */
+#saveStatusLabel.is-actionable {
   display: inline-flex !important;
   cursor: pointer;
 }
