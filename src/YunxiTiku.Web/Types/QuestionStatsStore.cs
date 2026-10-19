@@ -17,6 +17,20 @@ sealed class QuestionStatsStore
     /// <summary>一道题至少被作答多少次才对外给比例。低于这个数只累计、不展示。</summary>
     public const int QuestionMinAttempts = 3;
 
+    /* ── 题库质量闭环的判定口径 ──────────────────────────────────────────
+       这些阈值决定「哪些题会被推进审核队列」。刻意保守：
+       · 样本太少（<10）不判 —— 三个人的对错说明不了题有问题；
+       · 「正确率低」和「选项分布过均」分开判：前者是题太难/答案可疑，
+         后者是「两个选项都像对的」这种歧义题的典型形态；
+       · 复核过一次之后，只有**又多了 QualityRecheckAttempts 次作答**才重新入队，
+         否则管理员每刷一次就看到同一批题。 */
+    public const int QualityMinAttempts = 10;
+    public const int QualityFlatMinAttempts = 20;
+    public const double QualityLowRate = 0.6;
+    public const double QualityFlatTopShare = 0.55;
+    public const double QualityFlatGap = 0.05;
+    public const int QualityRecheckAttempts = 5;
+
     private readonly AppPaths _paths;
     private readonly object _initLock = new();
     private bool _schemaReady;
@@ -70,7 +84,23 @@ sealed class QuestionStatsStore
                     iwrong integer not null default 0,
                     dupdated text
                 );
-                create index if not exists ix_question_stat_course on question_stat(icourseid);";
+                create index if not exists ix_question_stat_course on question_stat(icourseid);
+                /* 选项分布：只对「单个字母」作答（单选/判断）累计，用来发现
+                   「两个选项各占一半」这种歧义题。多选、填空、主观题不记。 */
+                create table if not exists question_choice (
+                    isubjectid integer not null,
+                    soption text not null,
+                    icount integer not null default 0,
+                    primary key(isubjectid, soption)
+                );
+                /* 质量复核：记下复核那一刻的作答次数。之后只有新增作答达到
+                   QualityRecheckAttempts 才重新进队列（见类注释的阈值说明）。 */
+                create table if not exists question_quality_ack (
+                    isubjectid integer primary key,
+                    iattempts integer not null default 0,
+                    sreviewer text,
+                    dreviewed text
+                );";
             cmd.ExecuteNonQuery();
             _schemaReady = true;
         }
@@ -80,7 +110,7 @@ sealed class QuestionStatsStore
     /// 记一批作答（只累计计数）。题目归属的课程/章节每次现查题库：拉取库、换库之后
     /// 归属都可能变，把 0 当作「还不知道」在下次写入时补上（见 upsert 的 case 分支）。
     /// </summary>
-    public int Record(IReadOnlyList<(int QuestionId, bool Correct)> items, QuestionBank bank)
+    public int Record(IReadOnlyList<(int QuestionId, bool Correct, string? Choice)> items, QuestionBank bank)
     {
         var valid = items.Where(item => item.QuestionId > 0).ToList();
         if (valid.Count == 0) return 0;
@@ -104,7 +134,17 @@ sealed class QuestionStatsStore
         var pWrong = cmd.Parameters.Add("$wrong", SqliteType.Integer);
         var pNow = cmd.Parameters.Add("$now", SqliteType.Text);
         pNow.Value = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-        foreach (var (questionId, correct) in valid)
+        /* 选项分布单独一张表：题号 → 选项字母 → 次数。只记单字母作答，
+           多选题（"AB"）与判断题的「对/错」都不进来。 */
+        using var choiceCmd = conn.CreateCommand();
+        choiceCmd.Transaction = tx;
+        choiceCmd.CommandText = @"
+            insert into question_choice(isubjectid, soption, icount)
+            values ($id, $option, 1)
+            on conflict(isubjectid, soption) do update set icount = question_choice.icount + 1";
+        var cId = choiceCmd.Parameters.Add("$id", SqliteType.Integer);
+        var cOption = choiceCmd.Parameters.Add("$option", SqliteType.Text);
+        foreach (var (questionId, correct, choice) in valid)
         {
             placements.TryGetValue(questionId, out var place);
             pId.Value = questionId;
@@ -112,9 +152,145 @@ sealed class QuestionStatsStore
             pChapter.Value = place.ChapterId;
             pWrong.Value = correct ? 0 : 1;
             cmd.ExecuteNonQuery();
+            var option = NormalizeChoice(choice);
+            if (option is not null)
+            {
+                cId.Value = questionId;
+                cOption.Value = option;
+                choiceCmd.ExecuteNonQuery();
+            }
         }
         tx.Commit();
         return valid.Count;
+    }
+
+    /// <summary>只接受单个字母（A-Z，去空白后转大写）；其余一律当没给。</summary>
+    private static string? NormalizeChoice(string? raw)
+    {
+        var text = (raw ?? "").Trim().ToUpperInvariant();
+        if (text.Length != 1) return null;
+        var ch = text[0];
+        return ch >= 'A' && ch <= 'Z' ? text : null;
+    }
+
+    /// <summary>一道题的统计 + 选项分布。质量队列只读它，不碰用户数据。</summary>
+    public sealed record QualityRow(
+        int QuestionId,
+        int CourseId,
+        int ChapterId,
+        int Attempts,
+        int Wrong,
+        IReadOnlyDictionary<string, int> Options);
+
+    /// <summary>
+    /// 取「值得看一眼」的题：样本够 + 没被最近复核挡住。
+    /// 课程 0 表示全部课程。排序把「错得多」放前面，界面再叠加纠错数二次排序。
+    /// </summary>
+    public IReadOnlyList<QualityRow> GetQuality(int courseId, int limit)
+    {
+        var take = Math.Clamp(limit, 1, 200);
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        var sql = @"select s.isubjectid, s.icourseid, s.ichapterid, s.iattempts, s.iwrong
+            from question_stat s
+            where s.iattempts >= $min";
+        if (courseId > 0) sql += " and s.icourseid = $course";
+        sql += @"
+            and not exists (
+                select 1 from question_quality_ack a
+                where a.isubjectid = s.isubjectid
+                  and s.iattempts < a.iattempts + $recheck)
+            order by (cast(s.iwrong as real) / s.iattempts) desc, s.iattempts desc
+            limit $take";
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue("$min", QualityMinAttempts);
+        cmd.Parameters.AddWithValue("$recheck", QualityRecheckAttempts);
+        cmd.Parameters.AddWithValue("$take", take);
+        if (courseId > 0) cmd.Parameters.AddWithValue("$course", courseId);
+        var rows = new List<(int Id, int Course, int Chapter, int Attempts, int Wrong)>();
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                rows.Add((reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3), reader.GetInt32(4)));
+            }
+        }
+        if (rows.Count == 0) return Array.Empty<QualityRow>();
+        var options = GetOptions(conn, rows.Select(row => row.Id).ToList());
+        return rows
+            .Select(row => new QualityRow(row.Id, row.Course, row.Chapter, row.Attempts, row.Wrong,
+                options.TryGetValue(row.Id, out var map) ? map : new Dictionary<string, int>()))
+            .ToList();
+    }
+
+    /// <summary>选项分布：题号 → { "A": 3, "B": 5 }。</summary>
+    private static Dictionary<int, IReadOnlyDictionary<string, int>> GetOptions(SqliteConnection conn, List<int> ids)
+    {
+        var result = new Dictionary<int, IReadOnlyDictionary<string, int>>();
+        if (ids.Count == 0) return result;
+        using var cmd = conn.CreateCommand();
+        var names = new List<string>();
+        for (var i = 0; i < ids.Count; i++)
+        {
+            var name = "$oid" + i;
+            names.Add(name);
+            cmd.Parameters.AddWithValue(name, ids[i]);
+        }
+        cmd.CommandText = $@"select isubjectid, soption, icount from question_choice
+            where isubjectid in ({string.Join(",", names)})";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var id = reader.GetInt32(0);
+            if (!result.TryGetValue(id, out var map))
+            {
+                map = new Dictionary<string, int>();
+                result[id] = map;
+            }
+            ((Dictionary<string, int>)map)[reader.GetString(1)] = reader.GetInt32(2);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// 标记「已复核」：记下当前作答次数。之后只有新增作答达到 QualityRecheckAttempts
+    /// 才会重新进质量队列。返回复核时的作答次数（0 = 这道题还没有统计）。
+    /// </summary>
+    public int AckQuality(int questionId, string reviewer)
+    {
+        if (questionId <= 0) return 0;
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        int attempts;
+        using (var read = conn.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = "select iattempts from question_stat where isubjectid = $id";
+            read.Parameters.AddWithValue("$id", questionId);
+            var value = read.ExecuteScalar();
+            if (value is null || value is DBNull)
+            {
+                tx.Commit();
+                return 0;
+            }
+            attempts = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = @"
+            insert into question_quality_ack(isubjectid, iattempts, sreviewer, dreviewed)
+            values ($id, $attempts, $reviewer, $now)
+            on conflict(isubjectid) do update set
+                iattempts = excluded.iattempts,
+                sreviewer = excluded.sreviewer,
+                dreviewed = excluded.dreviewed";
+        cmd.Parameters.AddWithValue("$id", questionId);
+        cmd.Parameters.AddWithValue("$attempts", attempts);
+        cmd.Parameters.AddWithValue("$reviewer", reviewer ?? "");
+        cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+        return attempts;
     }
 
     /// <summary>批量取单题统计（只返回达到最小样本量的题）。</summary>

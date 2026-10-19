@@ -111,6 +111,11 @@ const state = {
   adminAi: null,
   adminAiLoading: false,
   adminAiError: "",
+  /* 题库质量队列（管理端「质量」页签）。null = 还没读过；加载失败把原因留在
+     adminQualityError 里，页面上别一直显示「正在读取」。 */
+  adminQuality: null,
+  adminQualityLoading: false,
+  adminQualityError: "",
   adminBankQuery: "",
   adminBankCategory: "",
   adminBankSubcategory: "",
@@ -6425,13 +6430,18 @@ function writeCrowdQueue(list) {
   }
 }
 
-function enqueueCrowdAnswer(questionId, correct) {
+function enqueueCrowdAnswer(questionId, correct, choice) {
   const id = Number(questionId || 0);
   if (!id) return;
   /* 管理员在后台编题、试答案不算考生作答；主观题没有客观对错，也排除。 */
   if (isAdmin() || crowdUnavailable) return;
   const queue = readCrowdQueue();
-  queue.push({ q: id, ok: !!correct });
+  const row = { q: id, ok: !!correct };
+  /* 选项分布是「题库质量」的判定依据之一：只收单字母（多选题的答案是多字符，
+     混进去会让分布失去意义）。老客户端不带这个字段，服务端照样按次数/错次统计。 */
+  const picked = String(choice || "").trim().toUpperCase();
+  if (picked.length === 1 && /[A-Z]/.test(picked)) row.c = picked;
+  queue.push(row);
   writeCrowdQueue(queue);
   scheduleCrowdFlush(CROWD_FLUSH_DELAY_MS);
 }
@@ -6758,7 +6768,7 @@ function markResult(q) {
   if (!logged) recordResultEntry(courseStore, q, scopeId, isRight);
   /* 全站统计：与本地记账同一个幂等开关，一道题的一次作答只上报一次。
      主观题没有客观对错，不上报（否则「多少人答错」会被文本比对污染）。 */
-  if (!logged && !isSubjective(q)) enqueueCrowdAnswer(q.id, isRight);
+  if (!logged && !isSubjective(q)) enqueueCrowdAnswer(q.id, isRight, currentAnswerSnapshot(q.id));
   syncCurrentTrainingSession(q.id);
 }
 
@@ -9953,6 +9963,7 @@ function renderAdminRows(rows, failedCount = 0) {
     corrections: { title: "纠错反馈", desc: "处理用户提交的题目问题" },
     banks: { title: "题库更新", desc: "按课程拉取或上传更新" },
     bankEditor: { title: "题库编辑", desc: "在线修改题干、选项与解析" },
+    quality: { title: "题库质量", desc: "统计异常与纠错集中的题，逐题复核" },
     data: { title: "数据管理", desc: "整包上传下载题库和用户数据" },
   };
   const currentMeta = viewMeta[state.adminView] || viewMeta.users;
@@ -9969,6 +9980,7 @@ function renderAdminRows(rows, failedCount = 0) {
           <button class="admin-view-btn ${state.adminView === "corrections" ? "active" : ""}" data-admin-view="corrections" type="button">纠错</button>
           <button class="admin-view-btn ${state.adminView === "banks" ? "active" : ""}" data-admin-view="banks" type="button">更新</button>
           <button class="admin-view-btn ${state.adminView === "bankEditor" ? "active" : ""}" data-admin-view="bankEditor" type="button">编辑</button>
+          <button class="admin-view-btn ${state.adminView === "quality" ? "active" : ""}" data-admin-view="quality" type="button">质量</button>
           <button class="admin-view-btn ${state.adminView === "data" ? "active" : ""}" data-admin-view="data" type="button">数据</button>
         </div>
         ${failedCount ? `<span class="admin-warning">${failedCount} 个用户数据加载失败，已跳过</span>` : ""}
@@ -9984,7 +9996,7 @@ function renderAdminRows(rows, failedCount = 0) {
         </div>
       </div>
       <div class="admin-view-body">
-        ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "bankEditor" ? renderAdminBankEditorPanel() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
+        ${state.adminView === "courses" ? renderAdminCourseTable(rows) : state.adminView === "banks" ? renderAdminBankTable() : state.adminView === "bankEditor" ? renderAdminBankEditorPanel() : state.adminView === "corrections" ? renderAdminCorrectionTable(rows) : state.adminView === "quality" ? renderAdminQualityPanel(rows) : state.adminView === "data" ? renderAdminDataPanel() : renderAdminUserTable(rows)}
       </div>
     </div>
   `;
@@ -10071,6 +10083,22 @@ function renderAdminRows(rows, failedCount = 0) {
   });
   document.querySelectorAll("[data-correction-action]").forEach((btn) => {
     btn.onclick = () => adminCorrectionAction(btn.dataset.user, btn.dataset.correctionId, btn.dataset.correctionAction).catch((err) => toast(err.message));
+  });
+  document.querySelectorAll("[data-quality-ack]").forEach((btn) => {
+    btn.onclick = () => ackQuality(btn.dataset.qualityAck, btn).catch((err) => toast(err.message));
+  });
+  document.querySelectorAll("[data-quality-goto-corrections]").forEach((btn) => {
+    btn.onclick = () => {
+      state.adminView = "corrections";
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+    };
+  });
+  document.querySelectorAll("[data-quality-reload]").forEach((btn) => {
+    btn.onclick = () => {
+      state.adminQuality = null;
+      state.adminQualityError = "";
+      renderAdminRows(state.adminRows, state.adminFailedCount);
+    };
   });
   bindAdminDataActions();
 }
@@ -10469,6 +10497,217 @@ function renderAdminCorrectionTable(rows) {
       </table>
     </div>
   `;
+}
+
+/* ── 题库质量闭环 ─────────────────────────────────────────────────────
+   两类信号合成一个审核队列：
+   · 统计异常：题被作答够多次之后，错得太多（可能太难/答案有误），或选项分布
+     过均（「两个选项都像对的」这种歧义题）。判定与阈值在服务端，这里只展示。
+   · 纠错集中：同一道题 ≥2 条未处理反馈。1 条可能只是个人误解，2 条以上才
+     值得回头看题干。纠错本身存在各账号的 user data 里，所以这部分在客户端合并，
+     不给服务端再加一遍「扫所有用户 JSON」的开销。
+   复核按钮只对统计行有效：把题移出队列，直到它又攒够新作答（服务端阈值）。 */
+const QUALITY_CORRECTION_MIN = 2;
+const QUALITY_REASON_TEXT = {
+  low_rate: "错得太多",
+  flat_options: "选项分布过均",
+};
+
+function qualityCourseName(courseId) {
+  const id = Number(courseId || 0);
+  const found = (state.adminCourses || []).find((course) => Number(course.id) === id)
+    || (state.courses || []).find((course) => Number(course.id) === id);
+  return found?.name || (id ? `课程${id}` : "");
+}
+
+function collectQualityCorrections(corrections) {
+  const map = new Map();
+  corrections.forEach((item) => {
+    const id = Number(item.questionId || 0);
+    if (!id) return;
+    const row = map.get(id) || {
+      id,
+      open: 0,
+      total: 0,
+      title: "",
+      courseId: Number(item.courseId || 0),
+      latest: "",
+      users: new Set(),
+    };
+    row.total += 1;
+    if (item.status !== "resolved") {
+      row.open += 1;
+      row.users.add(item.user);
+    }
+    row.title ||= item.title || "";
+    row.courseId ||= Number(item.courseId || 0);
+    if (String(item.at || "") > row.latest) row.latest = String(item.at || "");
+    map.set(id, row);
+  });
+  return [...map.values()]
+    .filter((row) => row.open >= QUALITY_CORRECTION_MIN)
+    .sort((a, b) => b.open - a.open || String(b.latest).localeCompare(String(a.latest)));
+}
+
+function renderAdminQualityPanel(rows) {
+  if (!state.adminQuality && !state.adminQualityLoading && !state.adminQualityError) {
+    state.adminQualityLoading = true;
+    loadAdminQuality()
+      .catch((err) => { state.adminQualityError = err.message; })
+      .finally(() => {
+        state.adminQualityLoading = false;
+        if (state.adminView === "quality") renderAdminRows(state.adminRows, state.adminFailedCount);
+      });
+  }
+  if (state.adminQualityError) {
+    return `
+      <div class="admin-empty">
+        读取质量队列失败：${escapeHtml(state.adminQualityError)}
+        <button type="button" data-quality-reload>重试</button>
+      </div>
+    `;
+  }
+  if (!state.adminQuality && state.adminQualityLoading) {
+    return `<div class="admin-backup-empty">正在读取质量队列...</div>`;
+  }
+  const stats = state.adminQuality?.items || [];
+  const correctionRows = collectQualityCorrections(collectCorrections(rows));
+  const statsBody = stats.length
+    ? stats.map((item) => {
+      const reasons = (item.reasons || []).map((code) => {
+        const text = QUALITY_REASON_TEXT[code] || code;
+        return `<span class="quality-reason ${code === "flat_options" ? "is-warn" : "is-bad"}">${escapeHtml(text)}</span>`;
+      }).join("");
+      const options = Object.entries(item.options || {})
+        .sort(([a], [b]) => String(a).localeCompare(String(b)))
+        .map(([key, count]) => `${escapeHtml(key)} ${Number(count || 0)}`)
+        .join(" · ");
+      return `
+        <tr>
+          <td data-label="题目">
+            <div class="admin-user-cell"><b>#${Number(item.id)}</b><span>${escapeHtml(item.title || "（题干未取到，点「编辑题库」查看）")}</span>
+              <small>${escapeHtml(qualityCourseName(item.courseId))}${item.chapterName ? ` / ${escapeHtml(item.chapterName)}` : ""}</small></div>
+          </td>
+          <td data-label="作答">${Number(item.attempts || 0)}</td>
+          <td data-label="错误率"><b>${Math.round(Number(item.rate || 0) * 100)}%</b><span class="admin-cell-sub">${Number(item.wrong || 0)}/${Number(item.attempts || 0)}</span></td>
+          <td data-label="选项分布"><span class="admin-cell-sub">${options || "无选项数据"}</span></td>
+          <td data-label="判定">${reasons || `<span class="quality-reason">待观察</span>`}</td>
+          <td data-label="操作" class="admin-actions">
+            <button data-bank-editor-open="${Number(item.id)}" data-editor-course="${Number(item.courseId || 0)}" type="button">编辑题库</button>
+            <button data-quality-ack="${Number(item.id)}" type="button">复核</button>
+          </td>
+        </tr>
+      `;
+    }).join("")
+    : `<tr><td colspan="6"><div class="admin-empty">暂无统计异常。<br>入队条件：作答 ≥10 次且错误率 ≥60%（错得太多），或作答 ≥20 次、至少 3 个选项且分布过均。</div></td></tr>`;
+
+  const correctionBody = correctionRows.length
+    ? correctionRows.map((row) => `
+        <tr>
+          <td data-label="题目">
+            <div class="admin-user-cell"><b>#${row.id}</b><span>${escapeHtml(row.title || "（题干未取到）")}</span>
+              <small>${escapeHtml(qualityCourseName(row.courseId))}</small></div>
+          </td>
+          <td data-label="未处理纠错"><b>${row.open}</b><span class="admin-cell-sub">共 ${row.total} 条</span></td>
+          <td data-label="反馈人">${row.users.size ? escapeHtml([...row.users].join("、")) : "—"}</td>
+          <td data-label="最近提交">${escapeHtml(row.latest || "未记录")}</td>
+          <td data-label="操作" class="admin-actions">
+            <button data-bank-editor-open="${row.id}" data-editor-course="${Number(row.courseId || 0)}" type="button">编辑题库</button>
+            <button data-quality-goto-corrections type="button">去纠错页处理</button>
+          </td>
+        </tr>
+      `).join("")
+    : `<tr><td colspan="5"><div class="admin-empty">暂无纠错集中的题（同题 ≥${QUALITY_CORRECTION_MIN} 条未处理反馈才入队）。</div></td></tr>`;
+
+  return `
+    <div class="admin-quality-panel">
+      <section class="admin-data-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>统计异常</b>
+            <span>只看全站匿名作答次数与选项分布，不含账号信息</span>
+          </div>
+          <span class="status-pill ${stats.length ? "disabled" : "active"}">${stats.length} 道待看</span>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-quality-table">
+            <thead>
+              <tr><th>题目</th><th>作答</th><th>错误率</th><th>选项分布</th><th>判定</th><th>操作</th></tr>
+            </thead>
+            <tbody>${statsBody}</tbody>
+          </table>
+        </div>
+        <small>「复核」只是把题移出队列，不改数据；这题再攒够新作答后若仍异常会重新出现。</small>
+      </section>
+      <section class="admin-data-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>纠错集中</b>
+            <span>同一道题 ≥${QUALITY_CORRECTION_MIN} 条未处理反馈</span>
+          </div>
+          <span class="status-pill ${correctionRows.length ? "disabled" : "active"}">${correctionRows.length} 道</span>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-quality-table">
+            <thead>
+              <tr><th>题目</th><th>未处理纠错</th><th>反馈人</th><th>最近提交</th><th>操作</th></tr>
+            </thead>
+            <tbody>${correctionBody}</tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+async function loadAdminQuality(force = false) {
+  if (!force && state.adminQuality) return state.adminQuality;
+  state.adminQualityError = "";
+  const res = await api(`/api/admin/quality?user=${encodeURIComponent(state.user)}&courseId=0&limit=60`);
+  const items = Array.isArray(res.items) ? res.items : [];
+  if (items.length) {
+    try {
+      /* 质量接口只回题号与统计；题干/章节名从题库编辑接口按 ids 批量补齐
+         （一次请求，最多 60 个 id）。取不到就退回显示题号，不影响队列本身。 */
+      const query = new URLSearchParams({
+        user: state.user,
+        courseId: "0",
+        ids: items.map((item) => item.id).join(","),
+        limit: "500",
+      });
+      const detail = await api(`/api/admin/bank-editor/questions?${query}`);
+      const map = new Map((detail.items || []).map((item) => [Number(item.id), item]));
+      items.forEach((item) => {
+        const found = map.get(Number(item.id));
+        item.title = found?.title || "";
+        item.chapterName = found?.chapterName || "";
+      });
+    } catch {
+      /* 题干是锦上添花：批量取失败不阻塞队列。 */
+    }
+  }
+  state.adminQuality = { ...res, items };
+  return state.adminQuality;
+}
+
+async function ackQuality(questionId, btn) {
+  const id = Number(questionId || 0);
+  if (!id) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/admin/quality/ack?user=${encodeURIComponent(state.user)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    toast("已复核；这题再攒够新作答后仍异常会重新入队");
+    state.adminQuality = null;
+    await loadAdminQuality(true).catch(() => {});
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    throw err;
+  }
 }
 
 function collectAdminCourses(rows) {

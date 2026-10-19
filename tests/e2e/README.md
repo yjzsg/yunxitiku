@@ -49,6 +49,15 @@ node tests/e2e/run.mjs --debug         # 打印浏览器 stderr 与中间快照
 | `crowd-stats` | 全站统计：答案没展开不显示比例（不剧透）、答完显示「全站 N 次作答 · M% 答错」、上报计入服务端、看板「全站参照」卡数值正确 |
 | `ai-explain` | AI 解析：开关关着不出按钮；开启后按钮出现、正文来自服务端；同题第二次直接吃缓存（上游只调一次）；失败显示人话并可重试 |
 | `ai-admin-config` | 管理端 AI 配置：非管理员进不去，管理员能存密钥、保存后密钥只回掩码 |
+| `bank-quality-queue` | 题库质量队列：错得太多 / 选项分布过均按阈值入队、样本不足与单条纠错不入队、复核后移出且不误伤、能跳进题库编辑打开这道题 |
+
+### 质量队列的两类信号
+
+- **统计异常**（服务端判定）：作答 ≥10 次且错误率 ≥60% →「错得太多」；作答 ≥20 次、至少 3 个选项、
+  最高选项占比 ≤55% 且与第二名相差 ≤5% →「选项分布过均」。管理员点「复核」只记下当时的样本量，
+  这题再攒够 5 次作答后仍异常会重新入队（`question_quality_ack` 表）。
+- **纠错集中**（客户端合并）：同一道题 ≥2 条未处理反馈。纠错本身在各账号的 user data 里，
+  不为它去扫所有用户 JSON。
 
 ### 一条实测教训：读到的快照可能比刚落地的那次保存还旧
 
@@ -97,6 +106,14 @@ node tests/api/patch-check.mjs          # 可用 PATCH_BASE/PATCH_USER/PATCH_PAS
 
 ```bash
 node tests/api/ai-check.mjs             # 可用 AI_BASE/AI_USER/AI_PASSWORD 覆盖
+```
+
+`tests/api/quality-check.mjs` 打真实服务端的质量队列：错误率与选项分布两条判定、复核后移出、
+攒够 5 次新作答重新入队、非管理员 403、无统计 404。因为它会往统计库里写真实计数，
+跑之前要删掉临时目录旁边的 `data/question-stats.db`：
+
+```bash
+Q_PASSWORD=<管理员密码> node tests/api/quality-check.mjs
 ```
 
 ## CI

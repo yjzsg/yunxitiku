@@ -3494,6 +3494,53 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 14px;
 }
 
+/* 质量队列：两张整宽的表（统计异常 / 纠错集中），窄屏样式在文件末尾 */
+.admin-quality-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-quality-panel .admin-data-card {
+  overflow: hidden;
+}
+
+.admin-quality-table td {
+  vertical-align: top;
+}
+
+.admin-cell-sub {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.quality-reason {
+  display: inline-block;
+  margin: 0 4px 4px 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.quality-reason.is-bad {
+  border-color: var(--danger-200);
+  background: var(--danger-50);
+  color: var(--danger-700);
+}
+
+.quality-reason.is-warn {
+  border-color: var(--warning-200);
+  background: var(--warning-50);
+  color: var(--warning-text);
+}
+
 .admin-data-card {
   min-width: 0;
   display: grid;
@@ -6689,18 +6736,18 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
     min-width: 84px;
   }
 
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(1)::before { content: "账号"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(2)::before { content: "状怀"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(3)::before { content: "做题"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(4)::before { content: "正确玀"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(5)::before { content: "错题"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(6)::before { content: "收藏"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(7)::before { content: "笔记"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(8)::before { content: "纠错"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(9)::before { content: "最近登彀"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(10)::before { content: "最近题庀"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(11)::before { content: "最近提亀"; }
-  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table) td:nth-child(12)::before { content: "操作"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(1)::before { content: "账号"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(2)::before { content: "状怀"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(3)::before { content: "做题"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(4)::before { content: "正确玀"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(5)::before { content: "错题"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(6)::before { content: "收藏"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(7)::before { content: "笔记"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(8)::before { content: "纠错"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(9)::before { content: "最近登彀"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(10)::before { content: "最近题庀"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(11)::before { content: "最近提亀"; }
+  .admin-table:not(.admin-course-table):not(.admin-bank-table):not(.admin-correction-table):not(.admin-quality-table) td:nth-child(12)::before { content: "操作"; }
 
   .admin-bank-table td:nth-child(1)::before { content: "题库"; }
   .admin-bank-table td:nth-child(2)::before { content: "分类"; }
@@ -13438,6 +13485,88 @@ body.img-viewer-open { overflow: hidden; }
    与其让用户横滚，不如把每行拆成一张卡片 —— `<td>` 上的 data-label 当标签。
    这样任何宽度都不需要横向滚动。断点 1279 与上面的 min-width 对齐。
    ══════════════════════════════════════════════════════════════════════════ */
+/* 质量队列两张表：沿用纠错表的窄屏卡片模式，标签一律走 data-label ——
+   两张表列数不同（6 列 / 5 列），不能再按 nth-child 硬编码标签。 */
+@media screen and (max-width: 1279px) {
+  .admin-quality-table {
+    min-width: 0;
+  }
+
+  .admin-quality-table thead {
+    display: none;
+  }
+
+  .admin-quality-table,
+  .admin-quality-table tbody,
+  .admin-quality-table tr,
+  .admin-quality-table td {
+    display: block;
+    width: auto;
+    min-width: 0;
+  }
+
+  .admin-quality-table td,
+  .admin-quality-table td:last-child,
+  .admin-quality-table th:last-child {
+    position: static;
+    box-shadow: none;
+    background: transparent;
+  }
+
+  .admin-quality-table tr {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+  }
+
+  .admin-quality-table tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .admin-quality-table td {
+    display: grid;
+    grid-template-columns: 84px 1fr;
+    gap: 10px;
+    align-items: start;
+    padding: 5px 0;
+    border-bottom: 0;
+    white-space: normal;
+  }
+
+  .admin-quality-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.7;
+  }
+
+  .admin-quality-table td.admin-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .admin-quality-table td.admin-actions::before {
+    flex: 0 0 84px;
+    line-height: 2.2;
+  }
+
+  [data-theme="ink"] .admin-quality-table tr {
+    border-color: var(--ink-l5);
+    background: var(--ink-l0);
+  }
+
+  [data-theme="ink"] .admin-quality-table td.admin-actions {
+    border-top-color: var(--ink-l5);
+  }
+}
+
 @media screen and (max-width: 1279px) {
   .admin-correction-table {
     min-width: 0;

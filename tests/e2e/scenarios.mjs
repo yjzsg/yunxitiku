@@ -810,11 +810,21 @@ export const scenarios = [
 
       const openQuestion = (id) => `(async () => {
         state.mode = "practice";
-        await loadQuestions();
-        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === ${id});
-        await loadCurrentQuestion();
-        state.answerVisible = true;
-        renderQuestion();
+        /* 开页的 restoreLastCourse 会再拉一次题单，而 loadQuestions 的 requestId 是后写先赢：
+           只调一次有概率被它作废，机器忙时就会一直停在「正在加载题单」。
+           重试到这道题真的带 detail 为止（与 crowd-stats / ai-explain 场景同一套做法）。 */
+        for (let i = 0; i < 20; i += 1) {
+          await loadQuestions();
+          const idx = state.questions.findIndex((q) => Number(q.id) === ${id});
+          if (idx >= 0) {
+            state.currentIndex = idx;
+            await loadCurrentQuestion();
+            state.answerVisible = true;
+            renderQuestion();
+            if (state.questions[idx] && state.questions[idx].detail) return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
       })()`;
 
       await page.evaluate(openQuestion(101));
@@ -937,6 +947,93 @@ export const scenarios = [
       const status = await page.evaluate(`fetch("/api/ai/status").then((r) => r.json())`);
       check(status.enabled === true, "前台状态接口应立刻读到开启（无需重启）");
       return { initial, saved: saved.ai };
+    },
+  },
+
+  {
+    name: "bank-quality-queue",
+    title: "后台质量队列：统计异常与纠错集中各自入队，复核后移出，能跳进题库编辑",
+    async run({ page, mock, check }) {
+      await mock.ctl("/__ctl/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: true }),
+      });
+      /* 三个统计口径：
+         · 101 答 12 次错 9 次（75%）→ 错得太多
+         · 102 答 24 次、A9/B9/C6 → 选项分布过均
+         · 103 只答 6 次（全错）→ 样本不够，不该入队 */
+      await mock.ctl("/__ctl/stats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rows: [
+            { q: 101, attempts: 12, wrong: 9, options: { A: 9, B: 2, C: 1 } },
+            { q: 102, attempts: 24, wrong: 8, options: { A: 9, B: 9, C: 6 } },
+            { q: 103, attempts: 6, wrong: 6, options: {} },
+          ],
+        }),
+      });
+      /* 纠错集中：104 有 2 条待处理（入队），105 只有 1 条（不入队），
+         106 的 3 条里 2 条已处理（仍算 1 条待处理，不入队）。 */
+      await mock.ctl("/__ctl/seed", {
+        method: "POST",
+        body: JSON.stringify({
+          profile: { name: "e2e", createdAt: "2026-01-01 00:00:00" },
+          courses: { "1": { answers: {}, done: {}, correct: {}, wrong: {}, verified: {}, lastSubjectId: 0 } },
+          history: [],
+          notes: {},
+          settings: {},
+          corrections: [
+            { id: "c104a", questionId: 104, courseId: 1, title: "题目 104（e2e）", type: "答案错误", note: "答案不对", status: "open", at: "2026-10-19 10:00:00" },
+            { id: "c104b", questionId: 104, courseId: 1, title: "题目 104（e2e）", type: "解析错误", note: "解析对不上", status: "open", at: "2026-10-19 11:00:00" },
+            { id: "c105a", questionId: 105, courseId: 1, title: "题目 105（e2e）", type: "其他", note: "单条不入队", status: "open", at: "2026-10-19 09:00:00" },
+            { id: "c106a", questionId: 106, courseId: 1, title: "题目 106（e2e）", type: "其他", note: "已处理一条", status: "resolved", at: "2026-10-18 09:00:00" },
+            { id: "c106b", questionId: 106, courseId: 1, title: "题目 106（e2e）", type: "其他", note: "又一条", status: "open", at: "2026-10-18 10:00:00" },
+          ],
+        }),
+      });
+
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision && !!state.user", { label: "管理员首屏加载完成" });
+      await page.waitFor("!document.getElementById('adminDashboard')?.classList.contains('hidden')", { label: "管理看板打开" });
+      await page.waitFor("!!document.querySelector('[data-admin-view=\"quality\"]')", { label: "质量页签就绪" });
+      await page.click('[data-admin-view="quality"]');
+      await page.waitFor("!!document.querySelector('[data-quality-ack]')", { label: "质量队列加载完成" });
+
+      const panelText = () => page.evaluate(`(document.querySelector('.admin-quality-panel')?.innerText || '')`);
+      const before = await panelText();
+      check(before.includes("#101") && before.includes("错得太多"), `101 应以「错得太多」入队，实际面板：${before.slice(0, 200)}`);
+      check(before.includes("#102") && before.includes("选项分布过均"), `102 应以「选项分布过均」入队，实际面板：${before.slice(0, 200)}`);
+      check(!before.includes("#103"), "103 样本不足 10 次，不该进统计异常队列");
+      check(before.includes("#104") && before.includes("共 2 条"), "104 有 2 条待处理纠错，应进纠错集中队列");
+      check(!before.includes("#105"), "105 只有 1 条纠错，不该进纠错集中队列");
+      check(!before.includes("#106"), "106 的 2 条里 1 条已处理，只剩 1 条待处理，不该入队");
+      check(before.includes("2 道待看"), `统计卡片应显示 2 道待看，实际：${before.slice(0, 120)}`);
+
+      /* 复核 101：应立刻从统计队列消失，102 保留。 */
+      await page.click('[data-quality-ack="101"]');
+      await page.waitFor("!document.querySelector('[data-quality-ack=\"101\"]')", { label: "101 复核后移出队列" });
+      const after = await panelText();
+      check(!after.includes("#101"), "复核后 101 不该还在队列里");
+      check(after.includes("#102"), "复核 101 不应误伤 102");
+      const stats = await mock.ctl("/__ctl/stats");
+      check(Number(stats.stats["101"]?.ackedAttempts || 0) === 12, `复核应把已处理样本记到 12 次，实际 ${stats.stats["101"]?.ackedAttempts}`);
+
+      /* 「编辑题库」应接进既有的题库编辑视图，并打开这道题。 */
+      await page.click('[data-bank-editor-open="102"]');
+      await page.waitFor("typeof state !== 'undefined' && state.adminView === 'bankEditor' && Number(state.adminEditorDetail?.id || 0) === 102", { label: "编辑题库打开 102" });
+      const editor = await page.evaluate(`(() => ({
+        view: state.adminView,
+        detailId: Number(state.adminEditorDetail?.id || 0),
+        title: document.getElementById("bankEditorTitleInput")?.value || "",
+      }))()`);
+      check(editor.view === "bankEditor" && editor.detailId === 102, `应进入题库编辑并选中 102，实际 ${editor.view}/${editor.detailId}`);
+      check(editor.title.includes("102"), `编辑区应显示 102 的题干，实际「${editor.title}」`);
+
+      const snap = await page.snapshot();
+      check(snap.modalVisible === false, "质量队列流程不该牵出冲突框");
+      return { before: before.slice(0, 400), after: after.slice(0, 300), editor };
     },
   },
 ];

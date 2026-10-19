@@ -94,7 +94,13 @@ export async function startMockServer(opts = {}) {
         for (const row of payload.rows || []) {
           const id = Number(row?.q || 0);
           if (id <= 0) continue;
-          state.stats[id] = { attempts: Number(row.attempts || 0), wrong: Number(row.wrong || 0) };
+          state.stats[id] = {
+            attempts: Number(row.attempts || 0),
+            wrong: Number(row.wrong || 0),
+            /* 选项分布：{A: 9, B: 9, C: 6}。质量队列的「分布过均」判定靠它。 */
+            options: { ...(row.options || {}) },
+            ackedAttempts: Number(row.ackedAttempts || 0),
+          };
         }
       }
       return json(res, 200, { stats: state.stats, posts: state.statPosts });
@@ -175,10 +181,15 @@ export async function startMockServer(opts = {}) {
       for (const item of items) {
         const id = Number(item?.q || 0);
         if (id <= 0) continue;
-        const row = state.stats[id] || (state.stats[id] = { attempts: 0, wrong: 0 });
+        const row = state.stats[id] || (state.stats[id] = { attempts: 0, wrong: 0, options: Object.create(null), ackedAttempts: 0 });
         row.attempts += 1;
         if (!item.ok) row.wrong += 1;
-        accepted.push({ q: id, ok: !!item.ok });
+        /* 与真实服务端对齐：只收单字母选项（多选答案是多字符，不参与分布）。 */
+        const pick = String(item.c || "").trim().toUpperCase();
+        if (pick.length === 1 && /^[A-Z]$/.test(pick)) {
+          row.options[pick] = (row.options[pick] || 0) + 1;
+        }
+        accepted.push({ q: id, ok: !!item.ok, c: pick.length === 1 ? pick : undefined });
       }
       state.statPosts.push({ at: Date.now(), items: accepted, token: String(req.headers["x-session-token"] || "") });
       return json(res, 200, { ok: true, accepted: accepted.length });
@@ -216,6 +227,102 @@ export async function startMockServer(opts = {}) {
       return json(res, 200, [{ name: USER, disabled: false, createdAt: "2026-01-01 00:00:00", lastLoginAt: "2026-01-02 08:00:00" }]);
     }
     if (p === "/api/admin/user-courses") return json(res, 200, { ok: true, assigned: null });
+
+    /* 题库质量队列：阈值与判定抄自 StatsEndpoints.cs 的 QualityReasons ——
+       改服务端口径时必须同步这里，否则这个回归就失真了。 */
+    if (p === "/api/admin/quality") {
+      if (!state.adminSession) return json(res, 401, { ok: false, error: "请先登录" });
+      const minAttempts = 10;
+      const flatMinAttempts = 20;
+      const lowRate = 0.6;
+      const flatTopShare = 0.55;
+      const flatGap = 0.05;
+      const recheck = 5;
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 60)));
+      const items = Object.entries(state.stats)
+        .map(([id, row]) => {
+          const options = row.options || {};
+          const total = Object.values(options).reduce((sum, n) => sum + Number(n || 0), 0);
+          const ordered = Object.entries(options)
+            .map(([key, count]) => [key, Number(count || 0)])
+            .sort((a, b) => b[1] - a[1]);
+          const topShare = total > 0 ? ordered[0][1] / total : 0;
+          const secondShare = total > 0 && ordered.length > 1 ? ordered[1][1] / total : 0;
+          const reasons = [];
+          if (row.attempts >= minAttempts && row.wrong / Math.max(1, row.attempts) >= lowRate) reasons.push("low_rate");
+          if (row.attempts >= flatMinAttempts && ordered.length >= 3
+              && topShare <= flatTopShare && topShare - secondShare <= flatGap) reasons.push("flat_options");
+          return {
+            id: Number(id),
+            courseId: 1,
+            chapterId: 10,
+            attempts: row.attempts,
+            wrong: row.wrong,
+            rate: Number((row.wrong / Math.max(1, row.attempts)).toFixed(4)),
+            options,
+            topOption: ordered.length ? ordered[0][0] : "",
+            topShare: Number(topShare.toFixed(4)),
+            reasons,
+            ackedAttempts: row.ackedAttempts || 0,
+          };
+        })
+        .filter((item) => item.reasons.length && item.attempts >= item.ackedAttempts + recheck)
+        .sort((a, b) => b.rate - a.rate || b.attempts - a.attempts)
+        .slice(0, limit);
+      return json(res, 200, {
+        ok: true,
+        courseId: Number(url.searchParams.get("courseId") || 0),
+        items,
+        threshold: { minAttempts, flatMinAttempts, lowRate, flatTopShare, flatGap, recheckAttempts: recheck },
+      });
+    }
+    if (p === "/api/admin/quality/ack" && req.method === "POST") {
+      if (!state.adminSession) return json(res, 401, { ok: false, error: "请先登录" });
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      const id = Number(payload.id || 0);
+      const row = state.stats[id];
+      if (!row) return json(res, 404, { ok: false, error: "这道题还没有统计" });
+      row.ackedAttempts = row.attempts;
+      return json(res, 200, { ok: true, id, attempts: row.attempts });
+    }
+    /* 题库编辑的题面查询：质量队列用它批量补题干，这里只实现 ids 过滤这条路。 */
+    if (p === "/api/admin/bank-editor/questions") {
+      if (!state.adminSession) return json(res, 401, { ok: false, error: "请先登录" });
+      const ids = String(url.searchParams.get("ids") || "").split(",").map(Number).filter((id) => id > 0);
+      const list = (ids.length ? ids : fixtures.questions.map((q) => Number(q.id))).map((id) => ({
+        id,
+        courseId: 1,
+        chapterId: 10,
+        chapterName: "第一章",
+        title: `题目 ${id}（e2e）`,
+      }));
+      return json(res, 200, { ok: true, items: list, count: list.length, limit: 500, localEditsError: null });
+    }
+    /* 单题详情：质量队列里的「编辑题库」会跳到题库编辑并拉这一条。
+       只回编辑器要用的字段，够断言「点进去打开的是这道题」即可。 */
+    if (p === "/api/admin/bank-editor/question") {
+      if (!state.adminSession) return json(res, 401, { ok: false, error: "请先登录" });
+      const id = Number(url.searchParams.get("id") || 0);
+      if (id <= 0) return json(res, 400, { ok: false, error: "id 不合法" });
+      return json(res, 200, {
+        ok: true,
+        id,
+        courseId: 1,
+        courseName: "测试科目",
+        chapterId: 10,
+        chapterName: "第一章",
+        chapterPath: [{ id: 10, name: "第一章" }],
+        type: "单选题",
+        title: `题目 ${id}（e2e）`,
+        question: "",
+        answer: "A",
+        description: "e2e 解析",
+        updatedAt: "2026-01-01 00:00:00",
+        localEdit: null,
+      });
+    }
 
     /* AI 解析：状态只回「开没开 + 模型名」，正文按题缓存。语义对齐真实服务端：
        未开启 503、上游失败 502、超额度 429、命中缓存不再生成。 */
