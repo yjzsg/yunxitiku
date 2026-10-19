@@ -2479,6 +2479,100 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   opacity: 1;
 }
 
+/* ── 「掌握校准」卡（见 renderCalibrationCard） ─────────────────────────────
+   2×2：确定/没把握 × 对/错。红格是「确定却答错」（危险盲区），黄格是「蒙对」（侥幸）——
+   两种「假会」要能在扫一眼时分开，所以只给这两格上色，其余保持中性。 */
+.cal-matrix {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cal-cell {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.cal-cell b {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cal-cell span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cal-cell.is-danger {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.cal-cell.is-danger b {
+  color: #b91c1c;
+}
+
+.cal-cell.is-lucky {
+  border-color: rgba(217, 119, 6, 0.35);
+  background: rgba(217, 119, 6, 0.08);
+}
+
+.cal-cell.is-lucky b {
+  color: #b45309;
+}
+
+.cal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ── 答错后的一键信心标注（见 renderConfidenceAsk） ────────────────────────
+   贴在答案框末尾：一行提示 + 三个按钮 + 一个 ×。只在答错且已揭示答案时出现，
+   答对不打扰；窄屏自动换行，按钮保持 32px 以上点击高度。 */
+.confidence-ask {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line, #d8dee6);
+  border-radius: 10px;
+  background: var(--soft, #f7f9fc);
+  font-size: 13px;
+}
+
+.confidence-ask span {
+  flex: 1 1 100%;
+  color: var(--muted, #5b6472);
+}
+
+.confidence-ask button {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line, #d8dee6);
+  background: #fff;
+  cursor: pointer;
+}
+
+.confidence-ask button.ask-dismiss {
+  margin-left: auto;
+  min-width: 32px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted, #5b6472);
+}
+
 /* ── 「薄弱章节」卡的行 +「只练这一章」按钮（见 renderWeakChapterCard） ─────────
    一行 = 章名 / 正确率 + 可练题量 / 按钮。题量写在按钮上：
    按钮上写几道，这一轮就发几道（同错题本「开始训练」的规则）；

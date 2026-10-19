@@ -209,6 +209,15 @@ const SPRINT_QUOTA = { wrong: 25, weak: 35 };
    3 个生成器（今日强化段③ / 考前冲刺段② / 今日计划）拿的是它的 top-N，样本不足的章
    不再参与，题池会略微缩小。这是「口径统一」的必然代价，**没有**给生成器另加过滤。 */
 const WEAK_MIN_VERIFIED = 5;
+/* 元认知校准（学习看板「掌握校准」卡）：
+   信心只有三档，「确定」单独成一列 —— 两种「假会」的代价完全不同：
+     · 确定 + 答错 = 危险盲区（自己以为会，考场上一定踩）；
+     · 不确定/蒙的 + 答对 = 侥幸（这次运气好，下次大概率错）。
+   只统计**答过且有判定**的题：答过还没被判（等交卷）的、只标信心没做的都不进矩阵，
+   否则卡上写「盲区 12 题」、点进去只有 3 题。 */
+const CONFIDENCE_SURE = "确定";
+/* 一次最多发多少道：题量再大也是一轮练得完的量，不是把整个盲区倒给用户。 */
+const CALIBRATION_MAX_IDS = 60;
 /* 弱项类题的轮换冷却：N 天内出现过的降到候选队尾（不是硬排除，
    池子不够时仍然会被用上，不会出现「凑不满」）。 */
 const TRAINING_COOLDOWN_DAYS = 3;
@@ -5311,6 +5320,7 @@ function renderQuestion() {
   syncQuestionNavButtons();
   renderSearchMatches();
   renderAnswerCard();
+  renderConfidenceAsk(q, revealAnswer);
   updateStats();
   animateQuestionEntry(q.id);
 }
@@ -5460,6 +5470,48 @@ function setQuestionConfidence(questionId, value) {
   else state.storage.confidence[questionId] = value;
   scheduleSave();
   renderQuestionTags(state.questions[state.currentIndex]?.detail || { id: questionId });
+}
+
+/* 答错那一刻就地收集信心（不是让人专门去开侧栏面板）。
+   为什么需要它：信心按钮一直藏在题目侧栏的「标签」折叠区里，真实账号抽样显示
+   答过 1758 / 848 / 584 题只标了 2 / 0 / 4 次 —— 靠用户主动打开面板标注等于没有数据，
+   「掌握校准」卡也就永远是空的。这里换成在**答错的当场**问一句、点一下就完事：
+   只在答错且答案已揭示时出现（答对不打扰、考试中不出现以免提前泄题），
+   标过或点过 × 就消失；× 只记在本页内存里，不改存储结构。 */
+function renderConfidenceAsk(q, revealAnswer) {
+  const box = $("answerBox");
+  if (!box) return;
+  const old = $("confidenceAsk");
+  const answered = !!normalizeAnswer(state.answers[q.id]);
+  const wrong = !isSubjective(q) && state.mode !== "exam" && answered && !isAnswerCorrect(q);
+  const labeled = !!(state.storage.confidence || {})[q.id];
+  const dismissed = (state.confidenceAskDismissed || {})[q.id];
+  if (!revealAnswer || !wrong || labeled || dismissed) {
+    old?.remove();
+    return;
+  }
+  const el = old || document.createElement("div");
+  el.id = "confidenceAsk";
+  el.className = "confidence-ask";
+  el.innerHTML = `<span>答的时候你以为自己会吗？</span>
+    <button type="button" data-ask-confidence="${CONFIDENCE_SURE}">以为会</button>
+    <button type="button" data-ask-confidence="不确定">没把握</button>
+    <button type="button" data-ask-confidence="蒙的">蒙的</button>
+    <button type="button" class="ask-dismiss" data-ask-dismiss="1" title="这道题不再问" aria-label="不再问这道题">×</button>`;
+  el.querySelectorAll("[data-ask-confidence]").forEach((btn) => {
+    btn.onclick = () => {
+      state.storage.confidence ||= {};
+      state.storage.confidence[q.id] = btn.dataset.askConfidence;
+      scheduleSave();
+      renderQuestionTags(q);
+      renderConfidenceAsk(q, true);
+    };
+  });
+  el.querySelector("[data-ask-dismiss]").onclick = () => {
+    (state.confidenceAskDismissed ||= {})[q.id] = true;
+    el.remove();
+  };
+  if (!old) box.appendChild(el);
 }
 
 function setQuestionWrongReason(q, value) {
@@ -6168,10 +6220,13 @@ function resultAlreadyRecorded(courseStore, q, scopeId) {
   return entry.scope === scopeId && entry.answer === currentAnswerSnapshot(q.id);
 }
 
-function recordResultEntry(courseStore, q, scopeId) {
+function recordResultEntry(courseStore, q, scopeId, isRight) {
   if (!courseStore) return;
   courseStore.resultLog ||= {};
-  courseStore.resultLog[q.id] = { scope: scopeId, answer: currentAnswerSnapshot(q.id), at: nowText() };
+  /* correct 是「判定当时」的结果，给掌握校准（buildCalibration）用 ——
+     不能再靠 wrong/correct 两张表反推：那是**当前归属**，答对过的题会从 wrong 里消失，
+     看不出「当时是不是蒙对的」。老条目没有这个字段，读的时候按归属兜底。 */
+  courseStore.resultLog[q.id] = { scope: scopeId, answer: currentAnswerSnapshot(q.id), at: nowText(), correct: !!isRight };
   trimResultLog(courseStore);
 }
 
@@ -6289,7 +6344,7 @@ function markResult(q) {
     }
   }
   /* 记账：只有真的推进过（或本来就没记过）才写 ---- 写进去的是这一轮的幂等依据。 */
-  if (!logged) recordResultEntry(courseStore, q, scopeId);
+  if (!logged) recordResultEntry(courseStore, q, scopeId, isRight);
   syncCurrentTrainingSession(q.id);
 }
 
@@ -7311,6 +7366,103 @@ function renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount
   `;
 }
 
+/* 一道题「最近一次判定」是对还是错。true / false / null（没判定过）。
+   先看 resultLog：它记的是**判定当时**的结果，覆盖写、每题一条；
+   老数据里没有 correct 字段（本次改动之前记的账），退回错题本 / 答对表 ——
+   这两个表描述的是「当前归属」，对没重做过的题等价，重做过的题会偏保守。
+   宁可少算一题，也不要把「其实还错着」的题算成已掌握。 */
+function questionOutcome(questionId, courseStore) {
+  const log = courseStore?.resultLog?.[questionId];
+  if (log && typeof log.correct === "boolean") return log.correct;
+  if (courseStore?.wrong?.[questionId]) return false;
+  if (courseStore?.correct?.[questionId]) return true;
+  return null;
+}
+
+/* 校准矩阵：把「答过且有判定」的题按（信心 × 对错）四分。
+   items 要用**科目全量题**（analysisQuestions）：只看当前章会漏题，
+   卡上的数字与点进去的题单就会对不上。 */
+function buildCalibration(courseStore, items) {
+  const answers = courseStore?.answers || {};
+  const confidence = state.storage.confidence || {};
+  const buckets = { sureRight: [], sureWrong: [], shakyRight: [], shakyWrong: [] };
+  let labeled = 0;
+  let unjudged = 0;
+  for (const q of items || []) {
+    if (!q || !normalizeAnswer(answers[q.id])) continue;
+    const label = confidence[q.id] || "";
+    if (!label) continue;
+    labeled += 1;
+    const outcome = questionOutcome(q.id, courseStore);
+    if (outcome === null) {
+      unjudged += 1;
+      continue;
+    }
+    buckets[`${label === CONFIDENCE_SURE ? "sure" : "shaky"}${outcome ? "Right" : "Wrong"}`].push(String(q.id));
+  }
+  const inBuckets = new Set([
+    ...buckets.sureRight, ...buckets.sureWrong, ...buckets.shakyRight, ...buckets.shakyWrong,
+  ]);
+  /* 没标信心也算得出的「疑似盲区」：反复错（count>=2）或已经练到第 2 档还错。
+     为什么必须有这一路：真实账号里信心标记极稀疏（抽样三个号：答过 1758 / 848 / 584 题，
+     只标了 2 / 0 / 4 次），只靠显式标签这张卡对绝大多数人是空的 —— 开箱可用靠行为推断，
+     更准靠显式标签。两个来源不混进同一个矩阵：矩阵只统计真标过的，疑似盲区单列一行。 */
+  const suspected = getWrongRecordsForCurrentCourse(courseStore)
+    .filter(([id, item]) => !item.resolved
+      && !inBuckets.has(String(id))
+      && (Number(item.count || 1) >= 2 || Number(item.stage || 0) >= 2))
+    .sort((a, b) => Number(b[1].count || 1) - Number(a[1].count || 1))
+    .map(([id]) => String(id));
+  const total = buckets.sureRight.length + buckets.sureWrong.length + buckets.shakyRight.length + buckets.shakyWrong.length;
+  return { ...buckets, labeled, unjudged, total, suspected };
+}
+
+/* 学习看板「掌握校准」卡（见 CONFIDENCE_SURE 的注释）。
+   三种状态都要说清，不留空卡：加载中 / 还没标过信心 / 有数字。 */
+function renderCalibrationCard(courseStore, items) {
+  const courseId = Number(state.currentCourse?.id || 0);
+  const analysisLoaded = state.analysisCourseId === courseId;
+  const loading = !items.length && !analysisLoaded;
+  const cal = buildCalibration(courseStore, items);
+  const blind = cal.sureWrong.length;
+  const lucky = cal.shakyRight.length;
+  const suspected = cal.suspected.length;
+  const headline = loading
+    ? "正在计算…"
+    : cal.total
+      ? `盲区 ${blind} 题 · 侥幸 ${lucky} 题`
+      : suspected
+        ? `疑似盲区 ${suspected} 题`
+        : "还没有可校准的题";
+  const note = loading
+    ? "题库分析数据还在加载，稍后自动刷新"
+    : !analysisLoaded
+      ? `全科分析还在加载，下面的数字可能不全；已标信心 ${cal.labeled} 题`
+      : cal.total
+        ? `「确定」却答错 ${blind} 题 · 蒙对 ${lucky} 题 · 共 ${cal.total} 题带判定`
+        : suspected
+          ? `还没标过信心 —— 下面是「反复错」推断出的，标一次「以为会 / 没把握」之后这里才分得准`
+          : "答题时标一下「确定 / 不确定 / 蒙的」，这里会告诉你哪些题其实没掌握";
+  const cell = (count, label, cls = "") => `<div class="cal-cell${cls}"><b>${count}</b><span>${label}</span></div>`;
+  return `
+      <div class="study-card calibration-card">
+        <span>掌握校准</span>
+        <b>${escapeHtml(headline)}</b>
+        <div class="cal-matrix">
+          ${cell(cal.sureWrong.length, "确定·答错", " is-danger")}
+          ${cell(cal.sureRight.length, "确定·答对")}
+          ${cell(cal.shakyRight.length, "蒙对", " is-lucky")}
+          ${cell(cal.shakyWrong.length, "没把握·答错")}
+        </div>
+        <small>${escapeHtml(note)}</small>
+        <div class="cal-actions">
+          <button id="blindSpotBtn" type="button" ${loading || !blind ? "disabled" : ""}>练盲区（${blind}）</button>
+          <button id="luckyReviewBtn" type="button" ${loading || !lucky ? "disabled" : ""}>复盘蒙对（${lucky}）</button>
+          <button id="suspectedBtn" type="button" ${loading || !suspected ? "disabled" : ""}>练疑似盲区（${suspected}）</button>
+        </div>
+      </div>`;
+}
+
 function renderStudyDashboard(courseStore, stats, items) {
   const records = getWrongRecordsForCurrentCourse(courseStore);
   const due = records.filter(([, item]) => isReviewDue(item)).length;
@@ -7345,6 +7497,7 @@ function renderStudyDashboard(courseStore, stats, items) {
         <small>已确认 ${today.verified} 题 · 答对 ${today.correct} 题 · ${today.rate}%${today.durationMs ? ` · 用时 ${formatDuration(today.durationMs)}` : ""}</small>
       </div>
       ${renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount)}
+      ${renderCalibrationCard(courseStore, items)}
       <div class="study-card">
         <span>学习日报</span>
         <b>${savedReport ? "今日已记录" : "今日未记录"}</b>
@@ -7377,6 +7530,14 @@ function bindStudyDashboardActions(courseStore) {
   };
   const smartBtn = $("continueSmartBtn");
   if (smartBtn) smartBtn.onclick = () => continueSmartPractice().catch((err) => toast(err.message));
+  /* 「掌握校准」卡的两个入口（见 renderCalibrationCard）。disabled 的按钮不派发 click，
+     所以这里不用过滤 —— 为什么不能点已经写在卡上。 */
+  const blindBtn = $("blindSpotBtn");
+  if (blindBtn) blindBtn.onclick = () => startCalibrationPractice("blind").catch((err) => toast(err.message));
+  const luckyBtn = $("luckyReviewBtn");
+  if (luckyBtn) luckyBtn.onclick = () => startCalibrationPractice("lucky").catch((err) => toast(err.message));
+  const suspectedBtn = $("suspectedBtn");
+  if (suspectedBtn) suspectedBtn.onclick = () => startCalibrationPractice("suspected").catch((err) => toast(err.message));
   /* 「薄弱章节」卡每行的「只练这一章」（见 renderWeakChapterCard）。
      disabled 的按钮不会派发 click，所以这里不必过滤 ——
      不能练的原因已经写在卡上（title + 行内文案），点不到也不会静默。 */
@@ -7827,6 +7988,41 @@ async function startWeakChapterPractice(chapterKey) {
     sourceTitle: `${prefix}：${name}`,
     type: "weak",
     toastText: `已生成「${name}」专项练习（${state.questions.length || ids.length} 题）`,
+  });
+}
+
+/* 学习看板「掌握校准」卡 → 盲区专练 / 侥幸复盘（口径见 buildCalibration）。
+   会话 type 用 "blind" / "lucky"，**不复用 smart/weak**：复用会把今日强化的题单顶掉
+   （同 startWeakChapterPractice 的教训），「继续上次」也分不清续的是哪一条。 */
+async function startCalibrationPractice(kind) {
+  if (!state.currentCourse) return;
+  if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  const courseStore = userCourseStore();
+  const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const cal = buildCalibration(courseStore, items);
+  const pool = kind === "lucky" ? cal.shakyRight : kind === "suspected" ? cal.suspected : cal.sureWrong;
+  /* 最近的排前面：这是「立刻处理」的入口，先做刚错的那道更符合直觉。
+     疑似盲区没有 resultLog 时间（多数是没重做过的老错题），按错题记录的 lastReviewAt 排。 */
+  const at = (id) => String(courseStore?.resultLog?.[id]?.at || "");
+  const wrongAt = (id) => String(state.storage.wrong?.[id]?.lastReviewAt || "");
+  const ids = pool.slice()
+    .sort((a, b) => (kind === "suspected" ? wrongAt(b).localeCompare(wrongAt(a)) : at(b).localeCompare(at(a))))
+    .slice(0, CALIBRATION_MAX_IDS);
+  if (!ids.length) {
+    toast(kind === "lucky"
+      ? "还没有「蒙对」的题"
+      : kind === "suspected" ? "还没有反复错的题" : "还没有「确定却答错」的题");
+    renderProgress();
+    return;
+  }
+  const label = kind === "lucky"
+    ? "侥幸复盘：蒙对的题"
+    : kind === "suspected" ? "疑似盲区：反复错的题" : "危险盲区：以为会却答错";
+  await enterSmartPractice({
+    ids,
+    sourceTitle: label,
+    type: kind === "lucky" ? "lucky" : "blind",
+    toastText: `已生成「${label}」（${ids.length} 题）`,
   });
 }
 

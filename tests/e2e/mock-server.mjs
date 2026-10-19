@@ -30,12 +30,13 @@ const MIME = {
 
 const sha = (s) => crypto.createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
 
-/** 最小题库：只有 1 个科目 / 1 章 / 4 道题，够前端进入答题页即可。 */
+/** 最小题库：只有 1 个科目 / 1 章 / 5 道题，够前端进入答题页即可。
+    （105 是「掌握校准」用来验证纯行为推断的题：永远不标信心，只反复错。） */
 const fixtures = {
-  courses: [{ id: 1, name: "测试科目", questionCount: 4, changedAt: "2026-01-01 00:00:00", available: true }],
-  chapters: [{ id: 10, name: "第一章", questionCount: 4, parentId: 0 }],
-  types: [{ id: 1, name: "单选题", questionCount: 4 }],
-  questions: [101, 102, 103, 104].map((id) => ({ id, typeId: 1, chapterId: 10, typeName: "单选题" })),
+  courses: [{ id: 1, name: "测试科目", questionCount: 5, changedAt: "2026-01-01 00:00:00", available: true }],
+  chapters: [{ id: 10, name: "第一章", questionCount: 5, parentId: 0 }],
+  types: [{ id: 1, name: "单选题", questionCount: 5 }],
+  questions: [101, 102, 103, 104, 105].map((id) => ({ id, typeId: 1, chapterId: 10, typeName: "单选题" })),
 };
 
 /**
@@ -259,7 +260,14 @@ export async function startMockServer(opts = {}) {
     if (p === "/api/courses") return json(res, 200, fixtures.courses);
     if (p === "/api/chapters") return json(res, 200, fixtures.chapters);
     if (p === "/api/types") return json(res, 200, fixtures.types);
-    if (p === "/api/questions") return json(res, 200, fixtures.questions);
+    if (p === "/api/questions") {
+      /* 真后端支持 ids=102,103 这种指定题单（智能训练/专练都靠它，见 loadQuestions）。
+         mock 必须同样过滤：否则「点进去只有这几道」的断言会把全部题放过去而白过。 */
+      const ids = (url.searchParams.get("ids") || "").split(",").map((s) => Number(s)).filter(Boolean);
+      if (!ids.length) return json(res, 200, fixtures.questions);
+      const byId = new Map(fixtures.questions.map((q) => [Number(q.id), q]));
+      return json(res, 200, ids.map((id) => byId.get(id)).filter(Boolean));
+    }
     if (p === "/api/question-chapters") return json(res, 200, { pairs: [] });
     if (p === "/api/chapter-map") return json(res, 200, {});
     if (p === "/api/question") {

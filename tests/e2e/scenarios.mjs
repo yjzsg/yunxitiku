@@ -331,4 +331,225 @@ export const scenarios = [
       return { snap, opened, after, final };
     },
   },
+
+  {
+    name: "calibration-blind-spot",
+    title: "掌握校准：确定却答错=盲区、蒙对=侥幸，专练只发这一批题",
+    async run({ page, mock, check, sleep }) {
+      /* mock 题库只有 4 道题、正确答案都是 A。这里把四种组合各造一道：
+           101 确定 + 答对   → 确定·答对
+           102 确定 + 答错   → 危险盲区（卡上要报警）
+           103 蒙的 + 答对   → 侥幸
+           104 不确定 + 答错 → 没把握·答错
+         坏掉时看到的是：四个格子数字串位，或者「练盲区」发出来的题单不是 102。 */
+      const data = {
+        profile: { name: "e2e", createdAt: "2026-01-01 00:00:00" },
+        courses: {
+          "1": {
+            answers: { 101: "A", 102: "B", 103: "A", 104: "B" },
+            done: { 101: 1, 102: 1, 103: 1, 104: 1 },
+            correct: { 101: 1, 103: 1 },
+            wrong: { 102: 1, 104: 1 },
+            verified: {
+              101: { answer: "A", at: "2026-01-01 10:00:00" },
+              102: { answer: "B", at: "2026-01-01 10:01:00" },
+              103: { answer: "A", at: "2026-01-01 10:02:00" },
+              104: { answer: "B", at: "2026-01-01 10:03:00" },
+            },
+            /* 只给 101 留一条带 correct 的账：验证「新口径优先、老数据靠归属兜底」两条路都能算对。 */
+            resultLog: { 101: { scope: "round:practice:1:2026-01-01", answer: "A", at: "2026-01-01 10:00:00", correct: true } },
+            lastSubjectId: 101,
+          },
+        },
+        confidence: { 101: "确定", 102: "确定", 103: "蒙的", 104: "不确定" },
+        /* 105 从没标过信心，只是反复错（count 3 / stage 2）——
+           「疑似盲区」这一路的唯一输入，用来验证没标信心的人也能得到入口。 */
+        wrong: {
+          105: {
+            courseId: 1,
+            count: 3,
+            stage: 2,
+            at: "2026-01-01 09:00:00",
+            lastReviewAt: "2026-01-01 09:30:00",
+          },
+        },
+        settings: {},
+      };
+      await mock.ctl("/__ctl/seed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
+      await page.waitFor("state.analysisCourseId === 1 && state.analysisQuestions.length > 0", { label: "全科分析题加载完成" });
+
+      const card = await page.evaluate(`(() => {
+        state.mode = "progress";
+        renderProgress();
+        const el = document.querySelector(".calibration-card");
+        return {
+          text: el ? el.textContent.replace(/\\s+/g, " ").trim() : "",
+          cells: Array.from(document.querySelectorAll(".cal-cell b")).map((b) => b.textContent.trim()),
+          blindDisabled: document.querySelector("#blindSpotBtn")?.disabled,
+          luckyDisabled: document.querySelector("#luckyReviewBtn")?.disabled,
+          suspectedDisabled: document.querySelector("#suspectedBtn")?.disabled,
+          suspectedText: document.querySelector("#suspectedBtn")?.textContent.trim() || "",
+          cells: Array.from(document.querySelectorAll(".cal-cell b")).map((b) => b.textContent.trim()),
+        };
+      })()`);
+      check(!!card.text, "学习看板上应有「掌握校准」卡");
+      check(card.cells.join(",") === "1,1,1,1", `四个格子应各 1 题（确定错/确定对/蒙对/没把握错），实际 ${card.cells.join(",")}`);
+      check(card.text.includes("盲区 1 题"), `卡上应写「盲区 1 题」，实际：${card.text}`);
+      check(card.text.includes("侥幸 1 题"), `卡上应写「侥幸 1 题」，实际：${card.text}`);
+      check(card.blindDisabled === false && card.luckyDisabled === false, "有盲区题时两个入口都该可点");
+      /* 105 没标信心 → 不能进四象限（否则等于凭空捏造「确定/不确定」），但必须有独立入口。 */
+      check(card.cells.join(",") === "1,1,1,1" && card.suspectedText.includes("1"),
+        `疑似盲区应单列 1 题且不污染四象限，实际按钮「${card.suspectedText}」、格子 ${card.cells.join(",")}`);
+      check(card.suspectedDisabled === false, `有反复错的题时「练疑似盲区」该可点，实际 disabled=${card.suspectedDisabled}`);
+
+      /* 盲区专练：发出去的必须只有 102 —— 卡上写几道，点进去就几道。 */
+      await page.evaluate("document.querySelector('#blindSpotBtn').click()");
+      await page.waitFor("state.mode === 'smart' && !!activeTrainingSession()", { label: "进入盲区专练" });
+      const blind = await page.evaluate(`(() => {
+        const s = activeTrainingSession();
+        return { type: s.type, ids: (s.ids || []).map(String), title: s.sourceTitle || "" };
+      })()`);
+      check(blind.type === "blind", `会话 type 应为 blind（不能顶掉今日强化），实际 ${blind.type}`);
+      check(blind.ids.join(",") === "102", `盲区专练题单应只含 102，实际 ${blind.ids.join(",")}`);
+      check(blind.title.includes("盲区"), `会话标题应写明是盲区，实际「${blind.title}」`);
+
+      /* 侥幸复盘：刷新回到看板再点，题单必须换成 103（不是把上一轮的盲区题单续上）。 */
+      await page.reload();
+      await page.waitFor("typeof state !== 'undefined' && state.analysisCourseId === 1 && state.analysisQuestions.length > 0", { label: "刷新后分析题就绪" });
+      await page.evaluate(`(() => { state.mode = "progress"; renderProgress(); document.querySelector("#luckyReviewBtn").click(); })()`);
+      await page.waitFor("state.mode === 'smart' && activeTrainingSession()?.type === 'lucky'", { label: "进入侥幸复盘" });
+      const lucky = await page.evaluate("(() => { const s = activeTrainingSession(); return (s.ids || []).map(String); })()");
+      check(lucky.join(",") === "103", `侥幸复盘题单应只含 103，实际 ${lucky.join(",")}`);
+
+      /* 疑似盲区专练：题单必须只含 105（没标过信心、只靠反复错推断出来的那道）。 */
+      await page.reload();
+      await page.waitFor("typeof state !== 'undefined' && state.analysisCourseId === 1 && state.analysisQuestions.length > 0", { label: "刷新后分析题就绪（疑似盲区）" });
+      await page.evaluate(`(() => { state.mode = "progress"; renderProgress(); document.querySelector("#suspectedBtn").click(); })()`);
+      await page.waitFor("state.mode === 'smart' && !!activeTrainingSession()", { label: "进入疑似盲区专练" });
+      const suspected = await page.evaluate(`(() => {
+        const s = activeTrainingSession();
+        return { type: s.type, ids: (s.ids || []).map(String), title: s.sourceTitle || "", loaded: state.questions.length };
+      })()`);
+      check(suspected.ids.join(",") === "105", `疑似盲区专练题单应只含 105，实际 ${suspected.ids.join(",")}`);
+      check(suspected.type === "blind", `疑似盲区也走盲区会话，type 应为 blind，实际 ${suspected.type}`);
+      check(suspected.loaded === 1, `疑似盲区应能真的取到 1 道题，实际 ${suspected.loaded}`);
+      const snap = await page.snapshot();
+      check(snap.modalVisible === false, "校准入口不该牵出冲突框");
+      return { card, blind, lucky, suspected };
+    },
+  },
+
+  {
+    name: "confidence-ask",
+    title: "答错就地标信心：点一下即写库，看板立刻能分出盲区",
+    async run({ page, mock, check }) {
+      /* 这条守的是「数据从哪来」：信心按钮原来只藏在侧栏标签面板里，
+         真实账号抽样答过上千题只标了几次 —— 等于没有数据。
+         这里验证：答错当场出现提示 → 点一下写进 storage.confidence →
+         提示消失 → 看板把这道题算成「确定·答错」（盲区）；答对时不打扰。 */
+      const data = {
+        profile: { name: "e2e", createdAt: "2026-01-01 00:00:00" },
+        courses: {
+          "1": {
+            answers: {},
+            done: {},
+            correct: {},
+            wrong: {},
+            verified: {},
+            lastSubjectId: 101,
+          },
+        },
+        settings: {},
+      };
+      await mock.ctl("/__ctl/seed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
+      /* 空进度账号开页停在「智能训练」页（mode=training，没有题）。
+         先进答题模式取一份题单，再切到 101。 */
+      await page.evaluate(`(async () => {
+        state.mode = "practice";
+        await loadQuestions();
+        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === 101);
+        await loadCurrentQuestion();
+      })()`);
+      await page.waitFor("state.questions.some((q) => Number(q.id) === 101 && !!q.detail)",
+        { label: "101 题题干就绪" });
+
+      /* 走真实路径答题：saveSubjectiveAnswer 同时写 state.answers 与 courseStore.answers
+         （校准卡读的是后者，直接改 state.answers 不算数）。 */
+      await page.evaluate(`(() => {
+        const idx = state.questions.findIndex((q) => Number(q.id) === 101 && !!q.detail);
+        if (idx < 0) throw new Error("101 题没在题单里");
+        state.currentIndex = idx;
+        renderQuestion();
+        const q = state.questions[idx].detail;
+        saveSubjectiveAnswer(q, "B");
+        confirmCurrentAnswer();
+      })()`);
+      const ask = await page.evaluate(`(() => {
+        const el = document.getElementById("confidenceAsk");
+        return { text: el ? el.textContent.replace(/\\s+/g, " ").trim() : "", buttons: el ? el.querySelectorAll("[data-ask-confidence]").length : 0 };
+      })()`);
+      check(ask.text.includes("以为"), `答错后应就地问「你以为自己会吗」，实际「${ask.text}」`);
+      check(ask.buttons === 3, `应有三个信心按钮，实际 ${ask.buttons}`);
+
+      await page.click('#confidenceAsk [data-ask-confidence="确定"]');
+      const labeled = await page.evaluate(`(() => ({
+        value: (state.storage.confidence || {})[101] || "",
+        gone: !document.getElementById("confidenceAsk"),
+      }))()`);
+      check(labeled.value === "确定", `点「以为会」应写进 confidence[101]，实际「${labeled.value}」`);
+      check(labeled.gone, "标完之后提示应立刻消失");
+
+      /* 答对不打扰：102 选 A（正确）交卷后不该出现同一个提示。 */
+      await page.evaluate(`(async () => {
+        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === 102);
+        await loadCurrentQuestion();
+      })()`);
+      await page.waitFor("Number(state.questions[state.currentIndex]?.id) === 102 && !!state.questions[state.currentIndex]?.detail",
+        { label: "102 题题干就绪" });
+      await page.evaluate(`(() => {
+        saveSubjectiveAnswer(state.questions[state.currentIndex].detail, "A");
+        confirmCurrentAnswer();
+      })()`);
+      await page.waitFor("Number(state.questions[state.currentIndex]?.id) === 102", { label: "切到 102" });
+      const afterRight = await page.evaluate("!!document.getElementById('confidenceAsk')");
+      check(afterRight === false, "答对时不该出现信心提示");
+
+      /* 等这几次改动落盘再刷新，刷新后看板应把它算成盲区。 */
+      await page.waitFor("!state.storageDirty", { label: "改动已保存", timeout: 20000 });
+      await page.reload();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "刷新后加载完成" });
+      /* 刷新会恢复上次的答题模式（不会自动拉全科分析），直接取一次，
+         否则看板的四象限永远是「分析还在加载」。 */
+      const card = await page.evaluate(`(async () => {
+        await loadAnalysisQuestions();
+        state.mode = "progress";
+        renderProgress();
+        const el = document.querySelector(".calibration-card");
+        return {
+          text: el ? el.textContent.replace(/\\s+/g, " ").trim() : "",
+          cells: Array.from(document.querySelectorAll(".cal-cell b")).map((b) => b.textContent.trim()),
+          confidence: (state.storage.confidence || {})[101] || "",
+        };
+      })()`);
+      check(card.confidence === "确定", `刷新后 confidence[101] 应仍是「确定」，实际「${card.confidence}」`);
+      check(card.cells[0] === "1", `看板应把这题算进「确定·答错」，实际四格 ${card.cells.join(",")}`);
+      check(card.text.includes("盲区 1 题"), `卡上应写「盲区 1 题」，实际：${card.text}`);
+
+      const snap = await page.snapshot();
+      check(snap.modalVisible === false, "标注流程不该牵出冲突框");
+      return { ask, labeled, card };
+    },
+  },
 ];
