@@ -60,6 +60,13 @@ export async function startMockServer(opts = {}) {
     /* 全站统计：stats 是「服务器上已有的比例」，statPosts 记每次上报（断言用）。 */
     stats: Object.create(null),
     statPosts: [],
+    /* AI 解析：默认关闭（真实部署也要管理员显式开启）。
+       aiCalls 只数真正「生成」的次数 —— 缓存命中不增加，用来验「同一道题全站只生成一次」。 */
+    ai: { enabled: false, baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", apiKeyMasked: "", dailyLimit: 100, maxTokens: 600, prompt: "你是讲解老师" },
+    aiCalls: 0,
+    aiCache: Object.create(null),
+    aiFail: false,
+    adminSession: false,
   };
 
   const json = (res, code, obj) => {
@@ -96,7 +103,31 @@ export async function startMockServer(opts = {}) {
       state.body = ""; state.saves = []; state.loads = []; state.requests = [];
       state.saveDelay = 0; state.loadDelay = 0; state.rejectPatch = 0;
       state.stats = Object.create(null); state.statPosts = [];
+      state.ai.enabled = false; state.aiCalls = 0; state.aiCache = Object.create(null); state.aiFail = false;
+      state.adminSession = false;
       return json(res, 200, { ok: true });
+    }
+    /* AI 控制面：POST {enabled?, fail?, resetCalls?} 改开关 / 模拟上游失败 / 清空调用计数与缓存。 */
+    if (p === "/__ctl/ai") {
+      if (req.method === "POST") {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        const cfg = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        if (typeof cfg.enabled === "boolean") state.ai.enabled = cfg.enabled;
+        if (typeof cfg.fail === "boolean") state.aiFail = cfg.fail;
+        if (cfg.resetCalls) { state.aiCalls = 0; state.aiCache = Object.create(null); }
+        if (typeof cfg.model === "string") state.ai.model = cfg.model;
+        if (typeof cfg.dailyLimit === "number") state.ai.dailyLimit = cfg.dailyLimit;
+      }
+      return json(res, 200, { ai: state.ai, calls: state.aiCalls, cached: Object.keys(state.aiCache).length });
+    }
+    /* 后台会话开关：给「管理员配置界面」那类场景用，普通场景保持 false。 */
+    if (p === "/__ctl/admin" && req.method === "POST") {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const cfg = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      state.adminSession = !!cfg.on;
+      return json(res, 200, { admin: state.adminSession });
     }
     if (p === "/__ctl/config") {
       const chunks = [];
@@ -129,8 +160,8 @@ export async function startMockServer(opts = {}) {
   });
 
   async function handleApi(req, res, url, p) {
-    if (p === "/api/auth/session") return json(res, 200, { ok: true, user: USER, admin: false, mustChangePassword: false });
-    if (p === "/api/auth/login") return json(res, 200, { ok: true, user: USER, token: "tok-e2e" });
+    if (p === "/api/auth/session") return json(res, 200, { ok: true, user: state.adminSession ? "admin" : USER, admin: state.adminSession, mustChangePassword: false });
+    if (p === "/api/auth/login") return json(res, 200, { ok: true, user: state.adminSession ? "admin" : USER, token: "tok-e2e", admin: state.adminSession });
     if (p === "/api/auth/logout") return json(res, 200, { ok: true });
     if (p === "/api/health") return json(res, 200, { ok: true, sqlite: true });
 
@@ -180,6 +211,66 @@ export async function startMockServer(opts = {}) {
       });
     }
 
+    if (p === "/api/admin/users") {
+      if (!state.adminSession) return json(res, 401, { ok: false, error: "请先登录" });
+      return json(res, 200, [{ name: USER, disabled: false, createdAt: "2026-01-01 00:00:00", lastLoginAt: "2026-01-02 08:00:00" }]);
+    }
+    if (p === "/api/admin/user-courses") return json(res, 200, { ok: true, assigned: null });
+
+    /* AI 解析：状态只回「开没开 + 模型名」，正文按题缓存。语义对齐真实服务端：
+       未开启 503、上游失败 502、超额度 429、命中缓存不再生成。 */
+    if (p === "/api/ai/status") {
+      return json(res, 200, { ok: true, enabled: !!state.ai.enabled, model: state.ai.model, dailyLimit: state.ai.dailyLimit, used: state.aiCalls });
+    }
+    if (p === "/api/ai/explain") {
+      if (req.method !== "POST") return json(res, 405, { ok: false, error: "请用 POST" });
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      const id = Number(payload.questionId || 0);
+      if (!state.ai.enabled) return json(res, 503, { ok: false, error: "AI 解析未开启" });
+      if (state.aiFail) return json(res, 502, { ok: false, error: "AI 服务暂时不可用" });
+      if (id <= 0) return json(res, 400, { ok: false, error: "questionId 不合法" });
+      const hit = state.aiCache[id];
+      if (hit) return json(res, 200, { ok: true, text: hit.text, cached: true });
+      if (state.ai.dailyLimit > 0 && state.aiCalls >= state.ai.dailyLimit) {
+        return json(res, 429, { ok: false, error: "今日 AI 解析额度已用完" });
+      }
+      state.aiCalls += 1;
+      const text = `第 ${state.aiCalls} 次生成的讲解。\n先看题干考点，再对比选项（mock）。`;
+      state.aiCache[id] = { text, at: new Date().toISOString() };
+      return json(res, 200, { ok: true, text, cached: false });
+    }
+    /* 管理端 AI 配置：读只回掩码；密钥留空表示不改。 */
+    if (p === "/api/admin/ai") {
+      if (!state.adminSession) return json(res, 401, { ok: false, error: "请先登录" });
+      const config = () => ({
+        enabled: !!state.ai.enabled,
+        baseUrl: state.ai.baseUrl,
+        model: state.ai.model,
+        apiKeyMasked: state.ai.apiKeyMasked,
+        dailyLimit: state.ai.dailyLimit,
+        maxTokens: state.ai.maxTokens,
+        prompt: state.ai.prompt,
+        cached: Object.keys(state.aiCache).length,
+      });
+      if (req.method === "GET") return json(res, 200, { ok: true, config: config() });
+      if (req.method === "PUT") {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        const cfg = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        if (typeof cfg.enabled === "boolean") state.ai.enabled = cfg.enabled;
+        if (typeof cfg.baseUrl === "string") state.ai.baseUrl = cfg.baseUrl;
+        if (typeof cfg.model === "string") state.ai.model = cfg.model;
+        if (typeof cfg.dailyLimit === "number") state.ai.dailyLimit = cfg.dailyLimit;
+        if (typeof cfg.maxTokens === "number") state.ai.maxTokens = cfg.maxTokens;
+        if (typeof cfg.prompt === "string") state.ai.prompt = cfg.prompt;
+        if (typeof cfg.apiKey === "string" && cfg.apiKey) state.ai.apiKeyMasked = `sk-****${cfg.apiKey.slice(-4)}`;
+        return json(res, 200, { ok: true, config: config() });
+      }
+      return json(res, 405, { ok: false, error: "不支持的方法" });
+    }
+
     if (p === "/api/user/load") {
       /* 先按请求时刻取快照，再延迟回包 —— 这就是真实竞态的形态：
          服务端读的是旧内容，回包却晚于另一次保存的完成。 */
@@ -198,7 +289,7 @@ export async function startMockServer(opts = {}) {
         return res.end();
       }
       const snapshot = {
-        ok: true, user: USER,
+        ok: true, user: state.adminSession ? "admin" : USER,
         data: state.body ? JSON.parse(state.body) : {},
         revision,
       };
@@ -239,7 +330,7 @@ export async function startMockServer(opts = {}) {
       }
       if (status === 200) {
         state.body = body;
-        out = { ok: true, user: USER, revision: state.revision(), savedAt: new Date().toISOString() };
+        out = { ok: true, user: state.adminSession ? "admin" : USER, revision: state.revision(), savedAt: new Date().toISOString() };
       }
       state.saves.push({
         at: new Date().toISOString().slice(11, 23),
@@ -318,7 +409,7 @@ export async function startMockServer(opts = {}) {
       }
       state.body = merged;
       state.saves.push({ ...row, bytes: Buffer.byteLength(merged) });
-      return json(res, 200, { ok: true, user: USER, revision: state.revision(), applied: ops.length, savedAt: new Date().toISOString() });
+      return json(res, 200, { ok: true, user: state.adminSession ? "admin" : USER, revision: state.revision(), applied: ops.length, savedAt: new Date().toISOString() });
     }
 
     if (p === "/api/courses") return json(res, 200, fixtures.courses);

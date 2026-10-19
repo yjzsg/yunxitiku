@@ -72,6 +72,8 @@ builder.Services.AddSingleton<QuestionBank>();
 builder.Services.AddSingleton<ChapterMapStore>();
 /* 全站答题统计：独立库（question-stats.db），只存题号的累计作答/答错次数，不含任何身份。 */
 builder.Services.AddSingleton<QuestionStatsStore>();
+builder.Services.AddSingleton<AiSettingsStore>();
+builder.Services.AddSingleton<AiExplainStore>();
 /* 每日推送提醒（见文件末尾 PushConfigStore / PushScheduler）。
    注册成单例再挂 HostedService，是为了让 /api/push/test 和 /api/push/run 能拿到**同一个**
    调度器实例（AddHostedService 默认建的是独立实例，端点里注入不到它）。 */
@@ -367,6 +369,7 @@ app.MapAdmin();
 app.MapContent();
 
 app.MapStats();
+app.MapAi();
 
 /* ── 每日推送提醒 ────────────────────────────────────────────────────────
    配置存 userdata/push/<user>.json（**子目录**）。为什么不写进用户数据整包、为什么

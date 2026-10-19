@@ -602,12 +602,23 @@ export const scenarios = [
       await page.goto();
       await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
       /* 空进度账号开页停在「智能训练」页（mode=training，没有题）。
-         先进答题模式取一份题单，再切到 101。 */
+         先进答题模式取一份题单，再切到 101。
+         注意：首屏的 restoreLastCourse 可能在后台再拉一次题单把 state.questions
+         覆盖掉，单次 loadQuestions 有概率抢不过它 —— 这里重试到 101 真的带 detail 为止。 */
       await page.evaluate(`(async () => {
         state.mode = "practice";
-        await loadQuestions();
-        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === 101);
-        await loadCurrentQuestion();
+        for (let i = 0; i < 20; i += 1) {
+          await loadQuestions();
+          const idx = state.questions.findIndex((q) => Number(q.id) === 101);
+          if (idx >= 0) {
+            state.currentIndex = idx;
+            await loadCurrentQuestion();
+            renderQuestion();
+            if (state.questions[idx] && state.questions[idx].detail) return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        throw new Error("101 题没进题单");
       })()`);
       await page.waitFor("state.questions.some((q) => Number(q.id) === 101 && !!q.detail)",
         { label: "101 题题干就绪" });
@@ -716,9 +727,18 @@ export const scenarios = [
       await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
       await page.evaluate(`(async () => {
         state.mode = "practice";
-        await loadQuestions();
-        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === 101);
-        await loadCurrentQuestion();
+        for (let i = 0; i < 20; i += 1) {
+          await loadQuestions();
+          const idx = state.questions.findIndex((q) => Number(q.id) === 101);
+          if (idx >= 0) {
+            state.currentIndex = idx;
+            await loadCurrentQuestion();
+            renderQuestion();
+            if (state.questions[idx] && state.questions[idx].detail) return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        throw new Error("101 题没进题单");
       })()`);
       await page.waitFor("state.questions.some((q) => Number(q.id) === 101 && !!q.detail)",
         { label: "101 题题干就绪" });
@@ -776,6 +796,147 @@ export const scenarios = [
       const snap = await page.snapshot();
       check(snap.modalVisible === false, "统计流程不该牵出冲突框");
       return { line, card, posted: posted.length };
+    },
+  },
+
+  {
+    name: "ai-explain",
+    title: "AI 解析：后台没开就不出现，开了才生成，同一题全站只生成一次",
+    async run({ page, mock, check }) {
+      /* 守的是三件事：① 开关关闭时前台完全看不到入口；② 生成走的是真实接口并且正文能落进 DOM；
+         ③ 第二个人（同一题重开）读的是服务端缓存，不再消耗一次调用。 */
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
+
+      const openQuestion = (id) => `(async () => {
+        state.mode = "practice";
+        await loadQuestions();
+        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === ${id});
+        await loadCurrentQuestion();
+        state.answerVisible = true;
+        renderQuestion();
+      })()`;
+
+      await page.evaluate(openQuestion(101));
+      await page.waitFor("Number(state.questions[state.currentIndex]?.id) === 101 && !!state.questions[state.currentIndex]?.detail", { label: "101 题就绪" });
+      await page.waitFor("state.aiStatus !== null", { label: "AI 状态已取回" });
+      const closed = await page.evaluate(`(() => ({
+        enabled: state.aiStatus && state.aiStatus.enabled,
+        btn: !!document.getElementById("aiExplainBtn"),
+      }))()`);
+      check(closed.enabled === false, "后台没开时状态应为关闭");
+      check(closed.btn === false, "后台没开时不该出现 AI 按钮");
+
+      /* 管理员打开开关（真实部署里这一步在后台「数据」页做）。
+         这里不整页刷新：刷新会跟应用启动时的 restoreLastCourse 抢题单，
+         而本场景要验的是「状态重新取回后按钮出现」——清掉内存里的状态缓存重绘即可。 */
+      await mock.ctl("/__ctl/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      await page.evaluate(`(() => {
+        state.aiStatus = null;
+        state.aiStatusPromise = null;
+        renderQuestion();
+      })()`);
+      await page.waitFor("!!document.getElementById('aiExplainBtn')", { label: "AI 按钮出现" });
+
+      await page.click("#aiExplainBtn");
+      await page.waitFor("(document.querySelector('.ai-explain-body')?.textContent || '').length > 0", { label: "讲解正文出现" });
+      const first = await page.evaluate(`(document.querySelector('.ai-explain-body')?.textContent || "").trim()`);
+      const callsAfterFirst = (await mock.ctl("/__ctl/ai")).calls;
+      check(first.includes("第 1 次生成"), `正文应是服务端返回的内容，实际「${first}」`);
+      check(callsAfterFirst === 1, `第一次生成应只调用一次上游，实际 ${callsAfterFirst} 次`);
+
+      /* 同题重开（模拟另一个人，内存缓存清空）：服务端直接回缓存，调用次数不能再涨。 */
+      await page.evaluate(`(() => {
+        delete state.aiExplains[101];
+        state.answerVisible = true;
+        renderQuestion();
+      })()`);
+      await page.waitFor("!!document.getElementById('aiExplainBtn')", { label: "重开后 AI 按钮出现" });
+      await page.click("#aiExplainBtn");
+      await page.waitFor("(document.querySelector('.ai-explain-body')?.textContent || '').length > 0", { label: "缓存正文出现" });
+      const second = await page.evaluate(`(document.querySelector('.ai-explain-body')?.textContent || "").trim()`);
+      const callsAfterSecond = (await mock.ctl("/__ctl/ai")).calls;
+      check(second === first, `同题应拿到同一份缓存正文，实际「${second}」`);
+      check(callsAfterSecond === 1, `缓存命中不该再调用上游，实际 ${callsAfterSecond} 次`);
+
+      /* 上游失败要能看见原因、并且允许重试（按钮回到可点状态）。 */
+      await mock.ctl("/__ctl/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fail: true }),
+      });
+      await page.evaluate(`(async () => {
+        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === 102);
+        await loadCurrentQuestion();
+        /* 换题会收起答案（loadCurrentQuestion 重置 answerVisible）；
+           AI 入口只在答案可见时出现，这里显式展开。 */
+        state.answerVisible = true;
+        renderQuestion();
+      })()`);
+      await page.waitFor("!!document.getElementById('aiExplainBtn')", { label: "102 的 AI 按钮出现" });
+      await page.click("#aiExplainBtn");
+      await page.waitFor("(document.querySelector('.ai-explain-error')?.textContent || '').length > 0", { label: "失败原因出现" });
+      const failed = await page.evaluate(`(() => {
+        const btn = document.getElementById("aiExplainBtn");
+        return {
+          error: (document.querySelector(".ai-explain-error")?.textContent || "").trim(),
+          retry: btn ? btn.textContent.trim() : "",
+          disabled: btn ? btn.disabled : null,
+        };
+      })()`);
+      check(failed.error.includes("暂时不可用"), `失败原因应显示给用户，实际「${failed.error}」`);
+      check(failed.retry === "再试一次" && failed.disabled === false, `失败后按钮应可重试，实际「${failed.retry}」/${failed.disabled}`);
+
+      const snap = await page.snapshot();
+      check(snap.modalVisible === false, "AI 流程不该牵出冲突框");
+      return { first, callsAfterFirst, callsAfterSecond, failed };
+    },
+  },
+
+  {
+    name: "ai-admin-config",
+    title: "后台配置 AI：读回掩码、保存生效，前台立刻能生成",
+    async run({ page, mock, check }) {
+      await mock.ctl("/__ctl/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: true }),
+      });
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision && !!state.user", { label: "管理员首屏加载完成" });
+      await page.waitFor("!document.getElementById('adminDashboard')?.classList.contains('hidden')", { label: "管理看板打开" });
+      /* 看板先去掉 hidden、再逐个用户拉数据，工具栏（页签）是最后才写进去的：
+         等页签出现再点，否则点到的还是上一屏的旧 DOM。 */
+      await page.waitFor("!!document.querySelector('[data-admin-view=\"data\"]')", { label: "管理页签就绪" });
+      await page.click('[data-admin-view="data"]');
+      await page.waitFor("!!document.getElementById('aiCfgBaseUrl')", { label: "AI 配置表单出现" });
+
+      const initial = await page.evaluate(`(() => ({
+        enabled: document.getElementById("aiCfgEnabled").checked,
+        baseUrl: document.getElementById("aiCfgBaseUrl").value,
+        model: document.getElementById("aiCfgModel").value,
+        keyPlaceholder: document.getElementById("aiCfgKey").placeholder,
+      }))()`);
+      check(initial.enabled === false, "默认应为关闭");
+      check(initial.baseUrl.includes("openai.com"), `应读回已保存的接口地址，实际「${initial.baseUrl}」`);
+
+      /* 填密钥 + 打开开关后保存；密钥留空语义另测：保存后 placeholder 应变成掩码。 */
+      await page.evaluate(`(() => {
+        document.getElementById("aiCfgKey").value = "sk-e2e-1234";
+        document.getElementById("aiCfgEnabled").checked = true;
+        document.getElementById("aiCfgSave").click();
+      })()`);
+      await page.waitFor("document.getElementById('aiCfgKey')?.placeholder.includes('sk-****1234')", { label: "保存后读到密钥掩码" });
+      const saved = await mock.ctl("/__ctl/ai");
+      check(saved.ai.enabled === true, "保存后服务端开关应为打开");
+      check(saved.ai.apiKeyMasked === "sk-****1234", `服务端应只存/回掩码，实际「${saved.ai.apiKeyMasked}」`);
+      const status = await page.evaluate(`fetch("/api/ai/status").then((r) => r.json())`);
+      check(status.enabled === true, "前台状态接口应立刻读到开启（无需重启）");
+      return { initial, saved: saved.ai };
     },
   },
 ];

@@ -96,12 +96,21 @@ const state = {
   crowdQuestionInFlight: {},
   crowdCourse: null,
   crowdFlushTimer: null,
+  /* AI 解析（后台开关 + 全站缓存）：null = 还没问过服务端；
+     正文按题缓存在内存里，翻回同一题不再请求。 */
+  aiStatus: null,
+  aiStatusPromise: null,
+  aiExplains: {},
   verifyMode: "paper",
   shuffledOrder: null,
   shuffleKey: "",
   adminRows: [],
   adminFailedCount: 0,
   adminView: "users",
+  /* AI 解析配置（后台「数据」页底部）：null = 还没读过；管理员只改开关与密钥，正文全站共用缓存。 */
+  adminAi: null,
+  adminAiLoading: false,
+  adminAiError: "",
   adminBankQuery: "",
   adminBankCategory: "",
   adminBankSubcategory: "",
@@ -5364,6 +5373,7 @@ function renderQuestion() {
   renderConfidenceAsk(q, revealAnswer);
   renderWrongReasonAsk(q, revealAnswer);
   renderCrowdStat(q, revealAnswer);
+  renderAiExplain(q, revealAnswer);
   updateStats();
   animateQuestionEntry(q.id);
 }
@@ -5607,6 +5617,97 @@ function questionWrongReason(questionId) {
     return state.storage.wrongReasons[questionId] || "";
   }
   return state.storage.wrongReasons?.[questionId] || state.storage.wrong?.[questionId]?.reason || "";
+}
+
+/* ---------- AI 解析 ----------
+   只在后台配好密钥并打开开关时出现。同一道题全站共用一份缓存（服务端按题号去重），
+   正文一律用 textContent 写入，避免把模型输出当 HTML 执行。
+   入口放解析区末尾：答案已经可见才出现，不提前泄题；考试模式不出现。 */
+function ensureAiStatus() {
+  if (state.aiStatus) return Promise.resolve(state.aiStatus);
+  if (!state.aiStatusPromise) {
+    state.aiStatusPromise = fetch("/api/ai/status")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => (state.aiStatus = payload?.ok
+        ? { enabled: !!payload.enabled, model: payload.model || "" }
+        : { enabled: false, model: "" }))
+      .catch(() => (state.aiStatus = { enabled: false, model: "" }))
+      .finally(() => { state.aiStatusPromise = null; });
+  }
+  return state.aiStatusPromise;
+}
+
+function renderAiExplain(q, revealAnswer) {
+  const box = $("answerBox");
+  if (!box || !q) return;
+  const old = $("aiExplain");
+  const visible = !!revealAnswer && state.mode !== "exam" && !isSubjective(q);
+  if (!visible || (state.aiStatus && !state.aiStatus.enabled)) {
+    old?.remove();
+    return;
+  }
+  if (!state.aiStatus) {
+    /* 状态没回来之前先不画按钮，回来再重画一次；只认已加载出详情的当前题。 */
+    ensureAiStatus().then(() => {
+      const item = state.questions[state.currentIndex];
+      if (Number(item?.id) === Number(q.id) && item.detail) renderAiExplain(item.detail, true);
+    });
+    return;
+  }
+  const el = old || document.createElement("div");
+  el.id = "aiExplain";
+  el.className = "ai-explain";
+  el.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "ai-explain-head";
+  const title = document.createElement("b");
+  title.textContent = "AI 解析";
+  const model = document.createElement("small");
+  model.textContent = state.aiStatus.model || "已配置";
+  head.append(title, model);
+  el.appendChild(head);
+  const cached = state.aiExplains[q.id];
+  if (cached) {
+    const body = document.createElement("div");
+    body.className = "ai-explain-body";
+    body.textContent = cached;
+    el.appendChild(body);
+  } else {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "aiExplainBtn";
+    btn.textContent = "让 AI 讲讲这道题";
+    btn.onclick = () => requestAiExplain(q, btn);
+    el.appendChild(btn);
+  }
+  if (!old) box.appendChild(el);
+}
+
+async function requestAiExplain(q, btn) {
+  const el = $("aiExplain");
+  if (!el || !btn) return;
+  btn.disabled = true;
+  btn.textContent = "生成中…";
+  let err = el.querySelector(".ai-explain-error");
+  if (!err) {
+    err = document.createElement("div");
+    err.className = "ai-explain-error";
+    el.appendChild(err);
+  }
+  err.textContent = "";
+  try {
+    const res = await api("/api/ai/explain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ questionId: Number(q.id) }),
+    });
+    state.aiExplains[q.id] = res.text || "";
+    renderAiExplain(q, true);
+  } catch (error) {
+    btn.disabled = false;
+    btn.textContent = "再试一次";
+    err.textContent = error.message || "生成失败";
+  }
 }
 
 function favoriteGroupOf(questionId) {
@@ -11569,6 +11670,19 @@ function renderAdminDataPanel() {
           : "拉取题库时会自动清洗；此处用于清理库中已经存在的历史广告。执行前会自动备份数据库，只改动命中广告的题目。"}</small>
       </section>
 
+      <section class="admin-data-card">
+        <div class="admin-data-card-head">
+          <div>
+            <b>AI 解析</b>
+            <span>用 OpenAI 兼容接口给题目生成讲解；同一道题只生成一次，全站共用缓存</span>
+          </div>
+          <span class="status-pill ${state.adminAi?.enabled ? "active" : "disabled"}">${state.adminAi?.enabled ? "已开启" : "未开启"}</span>
+        </div>
+        ${renderAdminAiForm()}
+        <small>密钥只存在服务端配置文件里，读接口只回掩码；留空表示不修改已保存的密钥。模型输出会先落 SQLite 缓存，
+          同一道题后续所有人直接读缓存、不再调用接口（可在服务端删 data/ai-explain.db 清空）。</small>
+      </section>
+
       <section class="admin-data-card admin-backup-card">
         <div class="admin-data-card-head">
           <div>
@@ -11582,6 +11696,74 @@ function renderAdminDataPanel() {
       </section>
     </div>
   `;
+}
+
+/* 后台「数据」页里的 AI 配置表单。没读过配置就先渲染占位并发起一次读取，
+   读到后由 loadAdminAi() 重绘整块（和 loadAdminDataStatus 的套路一致）。 */
+function renderAdminAiForm() {
+  if (!state.adminAi) {
+    if (!state.adminAiLoading && !state.adminAiError) {
+      state.adminAiLoading = true;
+      loadAdminAi().catch((err) => { state.adminAiError = err.message; })
+        .finally(() => { state.adminAiLoading = false; });
+    }
+    return state.adminAiError
+      ? `<div class="admin-backup-empty">读取 AI 配置失败：${escapeHtml(state.adminAiError)}</div>`
+      : `<div class="admin-backup-empty">正在读取 AI 配置...</div>`;
+  }
+  const cfg = state.adminAi;
+  return `
+    <div class="admin-ai-form">
+      <label class="admin-ai-row"><input id="aiCfgEnabled" type="checkbox" ${cfg.enabled ? "checked" : ""}> 开启 AI 解析（关掉后前台立即不再请求）</label>
+      <label class="admin-ai-row"><span>接口地址</span><input id="aiCfgBaseUrl" type="text" value="${escapeHtml(cfg.baseUrl || "")}" placeholder="https://api.openai.com/v1"></label>
+      <label class="admin-ai-row"><span>模型</span><input id="aiCfgModel" type="text" value="${escapeHtml(cfg.model || "")}" placeholder="gpt-4o-mini"></label>
+      <label class="admin-ai-row"><span>API Key</span><input id="aiCfgKey" type="password" value="" autocomplete="new-password" placeholder="${cfg.apiKeyMasked ? `已保存 ${escapeHtml(cfg.apiKeyMasked)}` : "未配置"}"></label>
+      <label class="admin-ai-row"><span>每日上限</span><input id="aiCfgDailyLimit" type="number" min="0" value="${Number(cfg.dailyLimit || 0)}"></label>
+      <label class="admin-ai-row"><span>单次 tokens</span><input id="aiCfgMaxTokens" type="number" min="64" value="${Number(cfg.maxTokens || 0)}"></label>
+      <label class="admin-ai-row admin-ai-row-block"><span>提示词</span><textarea id="aiCfgPrompt" rows="4">${escapeHtml(cfg.prompt || "")}</textarea></label>
+      <div class="admin-data-actions">
+        <button id="aiCfgSave" class="primary-action" type="button">保存配置</button>
+        <span class="admin-ai-cached">已缓存 ${Number(cfg.cached || 0)} 题</span>
+      </div>
+    </div>`;
+}
+
+async function loadAdminAi(force = false) {
+  if (!force && state.adminAi) return state.adminAi;
+  const res = await api("/api/admin/ai");
+  state.adminAi = res.config || null;
+  state.adminAiError = "";
+  if (state.adminView === "data") renderAdminRows(state.adminRows, state.adminFailedCount);
+  return state.adminAi;
+}
+
+async function saveAdminAi(btn) {
+  const value = (id) => $(id)?.value ?? "";
+  const payload = {
+    enabled: !!$("aiCfgEnabled")?.checked,
+    baseUrl: value("aiCfgBaseUrl").trim(),
+    model: value("aiCfgModel").trim(),
+    dailyLimit: Number(value("aiCfgDailyLimit") || 0),
+    maxTokens: Number(value("aiCfgMaxTokens") || 0),
+    prompt: value("aiCfgPrompt"),
+  };
+  /* 密钥留空 = 保留原值：读接口只回掩码，不能把掩码当新密钥写回去。 */
+  const key = value("aiCfgKey").trim();
+  if (key) payload.apiKey = key;
+  if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+  try {
+    const res = await api("/api/admin/ai", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.adminAi = res.config || null;
+    toast("AI 配置已保存");
+    renderAdminRows(state.adminRows, state.adminFailedCount);
+  } catch (err) {
+    toast(err.message || "保存失败");
+    if (btn) { btn.disabled = false; btn.textContent = "保存配置"; }
+  }
 }
 
 /* 备份列表。state.adminBackups 由 loadAdminBackups() 填；没加载过就先显示「读取中」，
@@ -11685,6 +11867,9 @@ function bindAdminDataActions() {
   // 进后台「数据」页时才拉列表：它要跑一遍目录枚举，没必要每次开后台都读
   if (state.adminView === "data" && !Array.isArray(state.adminBackups) && !state.adminBackupsError) {
     loadAdminBackups().catch(() => {});
+  }
+  if ($("aiCfgSave")) {
+    $("aiCfgSave").onclick = () => saveAdminAi($("aiCfgSave"));
   }
 }
 

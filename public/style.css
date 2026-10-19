@@ -2617,6 +2617,62 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   opacity: .68;
 }
 
+/* AI 解析块（见 renderAiExplain）：默认只有一行按钮，点了才长出正文；
+   正文用 pre-wrap 保留模型输出里的换行，字号跟解析一致，不抢题干。 */
+.ai-explain {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line, #d8dde6);
+  border-radius: 10px;
+  background: var(--soft, #f7f9fc);
+  font-size: 13px;
+}
+
+.ai-explain-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted, #5b6472);
+}
+
+.ai-explain-head small {
+  font-size: 11px;
+  opacity: .7;
+}
+
+.ai-explain button {
+  margin-top: 8px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line, #d8dde6);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.ai-explain button:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
+.ai-explain-body {
+  margin-top: 8px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-explain-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--danger, #c0392b);
+}
+
+.ai-explain-error:empty {
+  display: none;
+}
+
 
 /* ── 「薄弱章节」卡的行 +「只练这一章」按钮（见 renderWeakChapterCard） ─────────
    一行 = 章名 / 正确率 + 可练题量 / 按钮。题量写在按钮上：
@@ -3535,6 +3591,57 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   width: 100%;
   padding: 7px 9px;
   line-height: 1.4;
+}
+
+/* AI 解析配置表单（后台「数据」页，见 renderAdminAiForm）：标签定宽、输入撑满，
+   密钥框只显示掩码占位；窄屏让标签换行到上一排，输入仍可整行使用。 */
+.admin-ai-form {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-ai-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.admin-ai-row > span {
+  flex: 0 0 88px;
+  color: var(--muted);
+}
+
+.admin-ai-row > input[type="text"],
+.admin-ai-row > input[type="password"],
+.admin-ai-row > input[type="number"],
+.admin-ai-row > textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+}
+
+.admin-ai-row-block {
+  align-items: flex-start;
+}
+
+.admin-ai-row-block > span {
+  padding-top: 7px;
+}
+
+.admin-ai-form .admin-data-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.admin-ai-cached {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .admin-data-card small {
