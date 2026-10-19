@@ -43,6 +43,12 @@ node tests/e2e/run.mjs --debug         # 打印浏览器 stderr 与中间快照
 | `conditional-load-304` | 内容没变时刷新：`/api/user/load` 带 `If-None-Match` 得 304、页面照常渲染、不吃旧数据；服务端被别的设备改过后必须回全量 |
 | `unload-beacon-toobig` | 保存还在飞时刷新：大包不发 beacon、续跑那条已在飞的保存、连刷两次都不弹框不留草稿 |
 | `stale-draft-no-popup` | 本机存着过期草稿：开页**不弹模态**、改挂「未补存」入口；点「加载服务器数据」后草稿真被删掉、基线等于服务端；之后继续答题不会 409 |
+| `calibration-blind-spot` | 掌握校准：信心×对错四桶各归各位；「危险盲区／侥幸」按钮进专练，题单只含对应题；行为推断的「疑似盲区」也能单独练 |
+| `confidence-ask` | 答错当场问「确定吗」：点了才写 `storage.confidence`、答对不问、刷新后看板把它算进盲区 |
+| `wrong-reason-plan` | 错因处方：答错后就地标错因、看板按错因给处方、按钮进专练且题单符合该错因的规则 |
+| `crowd-stats` | 全站统计：答案没展开不显示比例（不剧透）、答完显示「全站 N 次作答 · M% 答错」、上报计入服务端、看板「全站参照」卡数值正确 |
+| `ai-explain` | AI 解析：开关关着不出按钮；开启后按钮出现、正文来自服务端；同题第二次直接吃缓存（上游只调一次）；失败显示人话并可重试 |
+| `ai-admin-config` | 管理端 AI 配置：非管理员进不去，管理员能存密钥、保存后密钥只回掩码 |
 
 ### 一条实测教训：读到的快照可能比刚落地的那次保存还旧
 
@@ -82,6 +88,16 @@ node tests/api/patch-check.mjs          # 可用 PATCH_BASE/PATCH_USER/PATCH_PAS
 ```
 
 它不接 CI（CI 里没有起好的服务端），改保存端点后手工跑一次。
+
+`tests/api/ai-check.mjs` 同样打真实服务端，验 AI 解析的对外语义：未登录 401、未开启 503 `ai_disabled`、
+密钥只回掩码、上游连不上 502 `ai_upstream`（且文案里没有异常细节）、配额用尽 429 `ai_quota`，
+以及「同题只向上游要一次」——脚本会在本地起一个假的 OpenAI 兼容上游，第一次生成、第二次命中缓存、
+`force` 强制重生成，三次上游调用计数都能对上。它抓到过缓存 upsert 里 `excluded.duped` 的拼写错误
+（应为 `dupdated`），那个错误会让**每次生成都 500**。
+
+```bash
+node tests/api/ai-check.mjs             # 可用 AI_BASE/AI_USER/AI_PASSWORD 覆盖
+```
 
 ## CI
 
