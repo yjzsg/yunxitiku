@@ -225,6 +225,22 @@ const WEAK_MIN_VERIFIED = 5;
 const CONFIDENCE_SURE = "确定";
 /* 一次最多发多少道：题量再大也是一轮练得完的量，不是把整个盲区倒给用户。 */
 const CALIBRATION_MAX_IDS = 60;
+/* 错因处方（学习看板「错因处方」卡）：
+   错因不是贴在错题上的标签，而是决定「下一步该怎么练」的分支 ——
+     · 概念不清：知识点没建立，重做同一道题只会记住答案，补同章新题 + 回错题；
+     · 记忆错误：相似内容互相干扰，用同章同型的新题与错题交替，逼着区分；
+     · 计算错误 / 审题错误 / 选项陷阱：不是不会，是过程出错，
+       必须重做原题（掺新题会掩盖习惯问题）。
+   所以只有前两类掺新题，后三类一律只重做错题。 */
+const REASON_PRACTICE_MAX = 30;
+const REASON_EXTRA_MAX = 20;
+const WRONG_REASON_PLANS = {
+  "概念不清": { action: "补同章新题 + 重做错题", extra: "chapter" },
+  "记忆错误": { action: "同章同型新题与错题交替", extra: "type" },
+  "计算错误": { action: "重做错题：先写步骤再对答案", extra: "" },
+  "审题错误": { action: "重做错题：读完题干再选项", extra: "" },
+  "选项陷阱": { action: "重做错题：逐个选项判断对错", extra: "" },
+};
 /* 全站答题统计（服务端 QuestionStatsStore）：
    上报的只有 (题号, 对错) —— 没有用户名、没有答案、没有时间。服务端也只累计计数。
    · 攒着发：答一题发一次请求太碎（一堂课几百个），4 秒攒一批；
@@ -5346,6 +5362,7 @@ function renderQuestion() {
   renderSearchMatches();
   renderAnswerCard();
   renderConfidenceAsk(q, revealAnswer);
+  renderWrongReasonAsk(q, revealAnswer);
   renderCrowdStat(q, revealAnswer);
   updateStats();
   animateQuestionEntry(q.id);
@@ -5535,6 +5552,40 @@ function renderConfidenceAsk(q, revealAnswer) {
   });
   el.querySelector("[data-ask-dismiss]").onclick = () => {
     (state.confidenceAskDismissed ||= {})[q.id] = true;
+    el.remove();
+  };
+  if (!old) box.appendChild(el);
+}
+
+/* 答错当场问「错在哪」——错因只有用户自己能给，事后补标注没人愿意做。
+   与信心提示各自独立：信心问「你以为会不会」（元认知），错因问「过程哪一步错了」（归因），
+   两个都点 × 才不再问；只在「已作答 + 判错 + 客观题 + 非考试 + 还没标过」时出现。 */
+function renderWrongReasonAsk(q, revealAnswer) {
+  const box = $("answerBox");
+  if (!box || !q) return;
+  const old = $("wrongReasonAsk");
+  const answered = !!normalizeAnswer(state.answers[q.id]);
+  const applicable = !!revealAnswer && !isSubjective(q) && state.mode !== "exam"
+    && answered && !isAnswerCorrect(q) && !questionWrongReason(q.id)
+    && !(state.reasonAskDismissed || {})[q.id];
+  if (!applicable) {
+    old?.remove();
+    return;
+  }
+  const el = old || document.createElement("div");
+  el.id = "wrongReasonAsk";
+  el.className = "confidence-ask reason-ask";
+  el.innerHTML = `<span>错在哪？</span>${Object.keys(WRONG_REASON_PLANS).map((reason) =>
+    `<button type="button" data-ask-reason="${reason}">${reason}</button>`).join("")}
+    <button type="button" class="ask-dismiss" data-reason-dismiss="1" title="这道题不再问" aria-label="不再问这道题">×</button>`;
+  el.querySelectorAll("[data-ask-reason]").forEach((btn) => {
+    btn.onclick = () => {
+      setQuestionWrongReason(q, btn.dataset.askReason);
+      renderWrongReasonAsk(q, true);
+    };
+  });
+  el.querySelector("[data-reason-dismiss]").onclick = () => {
+    (state.reasonAskDismissed ||= {})[q.id] = true;
     el.remove();
   };
   if (!old) box.appendChild(el);
@@ -7725,6 +7776,48 @@ function renderCalibrationCard(courseStore, items) {
       </div>`;
 }
 
+/* 「错因处方」：把已标记的错因按题数排序，每类给一条针对性的练习路径。
+   与「掌握校准」卡的分工：校准问「你以为自己会不会」，处方问「错在哪里」；
+   两者都只读本机数据，不互相当作证据（同一道题可能既在盲区又被标了错因）。 */
+function buildWrongReasonPlan(courseStore = userCourseStore()) {
+  const records = getWrongRecordsForCurrentCourse(courseStore);
+  const rows = [];
+  Object.entries(WRONG_REASON_PLANS).forEach(([reason, plan]) => {
+    const ids = [];
+    records.forEach(([id, item]) => {
+      if (item?.resolved) return;
+      if (questionWrongReason(id) !== reason) return;
+      ids.push(Number(id));
+    });
+    if (ids.length) rows.push({ reason, plan, ids });
+  });
+  return rows.sort((a, b) => b.ids.length - a.ids.length);
+}
+
+function renderWrongReasonCard(courseStore) {
+  const rows = buildWrongReasonPlan(courseStore);
+  const marked = rows.reduce((sum, row) => sum + row.ids.length, 0);
+  const unresolved = getWrongRecordsForCurrentCourse(courseStore).filter(([, item]) => !item?.resolved).length;
+  let body;
+  if (rows.length) {
+    body = `<div class="reason-list">${rows.slice(0, 3).map((row) => `
+        <button type="button" class="reason-row" data-reason-practice="${escapeHtml(row.reason)}">
+          <b>${escapeHtml(row.reason)} · ${row.ids.length} 题</b>
+          <small>${escapeHtml(row.plan.action)}</small>
+        </button>`).join("")}</div>`;
+  } else {
+    body = `<small>${unresolved ? "错题还没标错因 —— 答错时在题下点一下「错在哪」，这里就会给出对应练法。" : "还没有错题，暂时不需要处方。"}</small>`;
+  }
+  const headline = marked
+    ? `${escapeHtml(rows[0].reason)}最多 · ${marked} 题已归类`
+    : "还没有归类";
+  return `<div class="study-card reason-card">
+      <span>错因处方</span>
+      <b>${headline}</b>
+      ${body}
+    </div>`;
+}
+
 function renderStudyDashboard(courseStore, stats, items) {
   const records = getWrongRecordsForCurrentCourse(courseStore);
   const due = records.filter(([, item]) => isReviewDue(item)).length;
@@ -7760,6 +7853,7 @@ function renderStudyDashboard(courseStore, stats, items) {
       </div>
       ${renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount)}
       ${renderCalibrationCard(courseStore, items)}
+      ${renderWrongReasonCard(courseStore)}
       ${renderCrowdCourseCard(stats)}
       <div class="study-card">
         <span>学习日报</span>
@@ -7801,6 +7895,10 @@ function bindStudyDashboardActions(courseStore) {
   if (luckyBtn) luckyBtn.onclick = () => startCalibrationPractice("lucky").catch((err) => toast(err.message));
   const suspectedBtn = $("suspectedBtn");
   if (suspectedBtn) suspectedBtn.onclick = () => startCalibrationPractice("suspected").catch((err) => toast(err.message));
+  /* 「错因处方」卡每类一行（见 renderWrongReasonCard）：点哪类就按哪类的练法生成一轮。 */
+  document.querySelectorAll("[data-reason-practice]").forEach((row) => {
+    row.onclick = () => startReasonPractice(row.dataset.reasonPractice).catch((err) => toast(err.message));
+  });
   /* 「薄弱章节」卡每行的「只练这一章」（见 renderWeakChapterCard）。
      disabled 的按钮不会派发 click，所以这里不必过滤 ——
      不能练的原因已经写在卡上（title + 行内文案），点不到也不会静默。 */
@@ -8286,6 +8384,61 @@ async function startCalibrationPractice(kind) {
     sourceTitle: label,
     type: kind === "lucky" ? "lucky" : "blind",
     toastText: `已生成「${label}」（${ids.length} 题）`,
+  });
+}
+
+/* 错因处方 → 生成一轮练习。extra 为 "chapter"/"type" 时才掺新题：
+   新题只从「同章（同型）且本机从未答过」的题里取，避免把做过的题当新题；
+   其余三类只重做错题 —— 计算/审题/陷阱是过程问题，换新题只会掩盖习惯。 */
+async function startReasonPractice(reason) {
+  if (!state.currentCourse) return;
+  const plan = WRONG_REASON_PLANS[reason];
+  if (!plan) return;
+  if (!state.analysisQuestions.length) await loadAnalysisQuestions();
+  const courseStore = userCourseStore();
+  const rows = buildWrongReasonPlan(courseStore);
+  const row = rows.find((item) => item.reason === reason);
+  if (!row) {
+    toast("这类错因的题已经处理完了");
+    renderProgress();
+    return;
+  }
+  const items = state.analysisQuestions.length ? state.analysisQuestions : state.questions;
+  const byId = new Map(items.map((item) => [Number(item.id), item]));
+  const wrongIds = row.ids.slice(0, REASON_PRACTICE_MAX);
+  let ids = wrongIds;
+  if (plan.extra) {
+    const chapterIds = new Set();
+    const types = new Set();
+    wrongIds.forEach((id) => {
+      const item = byId.get(id);
+      if (!item) return;
+      if (item.chapterId) chapterIds.add(String(item.chapterId));
+      if (plan.extra === "type") types.add(String(item.typeName || item.type || ""));
+    });
+    const extras = items
+      .filter((item) => !courseStore.answers?.[item.id] && !courseStore.correct?.[item.id] && !courseStore.wrong?.[item.id])
+      .filter((item) => chapterIds.has(String(item.chapterId)))
+      .filter((item) => plan.extra !== "type" || types.has(String(item.typeName || item.type || "")))
+      .slice(0, REASON_EXTRA_MAX)
+      .map((item) => Number(item.id));
+    if (plan.extra === "type") {
+      /* 交替排：错题 → 新题 → 错题 → 新题，逼着每一道都重新判断，而不是顺着同一道题的条件反射做完。 */
+      const merged = [];
+      for (let i = 0; i < Math.max(wrongIds.length, extras.length); i += 1) {
+        if (i < wrongIds.length) merged.push(wrongIds[i]);
+        if (i < extras.length) merged.push(extras[i]);
+      }
+      ids = merged;
+    } else {
+      ids = [...wrongIds, ...extras];
+    }
+  }
+  await enterSmartPractice({
+    ids,
+    sourceTitle: `错因处方：${reason}`,
+    type: "reason",
+    toastText: `已生成「${reason}」处方（${ids.length} 题）：${plan.action}`,
   });
 }
 

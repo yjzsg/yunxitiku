@@ -2532,6 +2532,38 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   gap: 8px;
 }
 
+/* ── 学习看板「错因处方」卡（见 renderWrongReasonCard） ──────────────────
+   每类错因一行：左边是什么错、右边是这一类该怎么练。整行可点，不是纯展示。 */
+.reason-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.reason-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #d8dee6);
+  border-radius: 8px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reason-row b {
+  font-size: 13px;
+}
+
+.reason-row small {
+  color: var(--muted, #5b6472);
+  font-size: 12px;
+}
+
 /* ── 答错后的一键信心标注（见 renderConfidenceAsk） ────────────────────────
    贴在答案框末尾：一行提示 + 三个按钮 + 一个 ×。只在答错且已揭示答案时出现，
    答对不打扰；窄屏自动换行，按钮保持 32px 以上点击高度。 */

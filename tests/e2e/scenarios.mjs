@@ -446,6 +446,133 @@ export const scenarios = [
   },
 
   {
+    name: "wrong-reason-plan",
+    title: "错因处方：按错因给不同练法（概念不清掺同章新题、计算错误只重做）",
+    async run({ page, mock, check }) {
+      /* 守两件事：
+         1) 错因不是标签，而是分支 ——「概念不清」补同章没做过的新题，
+            「计算错误」只重做原题（掺新题会掩盖过程习惯问题）；
+         2) 错因从哪来：答错当场问一句，点一下就能归类（事后补标注没人做）。 */
+      const data = {
+        profile: { name: "e2e", createdAt: "2026-01-01 00:00:00" },
+        courses: {
+          "1": {
+            answers: { 101: "B", 102: "B", 103: "B" },
+            done: { 101: 1, 102: 1, 103: 1 },
+            correct: {},
+            wrong: { 101: 1, 102: 1, 103: 1 },
+            verified: {
+              101: { answer: "B", at: "2026-01-01 10:00:00" },
+              102: { answer: "B", at: "2026-01-01 10:01:00" },
+              103: { answer: "B", at: "2026-01-01 10:02:00" },
+            },
+            lastSubjectId: 101,
+          },
+        },
+        /* 三条错题：两条概念不清、一条计算错误。104/105 从没答过，是同章候选新题。 */
+        wrong: {
+          101: { courseId: 1, count: 1, stage: 0, at: "2026-01-01 10:00:00" },
+          102: { courseId: 1, count: 1, stage: 0, at: "2026-01-01 10:01:00" },
+          103: { courseId: 1, count: 1, stage: 0, at: "2026-01-01 10:02:00" },
+        },
+        wrongReasons: { 101: "概念不清", 102: "概念不清", 103: "计算错误" },
+        settings: {},
+      };
+      await mock.ctl("/__ctl/seed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
+      await page.waitFor("state.analysisCourseId === 1 && state.analysisQuestions.length > 0", { label: "全科分析题加载完成" });
+
+      const card = await page.evaluate(`(() => {
+        state.mode = "progress";
+        renderProgress();
+        const el = document.querySelector(".reason-card");
+        return {
+          text: el ? el.textContent.replace(/\\s+/g, " ").trim() : "",
+          rows: Array.from(document.querySelectorAll("[data-reason-practice]")).map((b) => b.textContent.replace(/\\s+/g, " ").trim()),
+        };
+      })()`);
+      check(card.rows.some((t) => t.includes("概念不清") && t.includes("2 题")), `处方卡应列出「概念不清 · 2 题」，实际 ${JSON.stringify(card.rows)}`);
+      check(card.rows.some((t) => t.includes("计算错误") && t.includes("1 题")), `处方卡应列出「计算错误 · 1 题」，实际 ${JSON.stringify(card.rows)}`);
+
+      /* 概念不清 = 先重做错题，再补同章没做过的新题（104/105）。 */
+      await page.click('[data-reason-practice="概念不清"]');
+      await page.waitFor("typeof state !== 'undefined' && state.mode === 'smart'", { label: "进入概念不清处方" });
+      const concept = await page.evaluate(`(() => {
+        const s = activeTrainingSession();
+        return { ids: s.ids.map(Number), type: s.type, title: s.sourceTitle };
+      })()`);
+      check(concept.type === "reason", `处方训练的类型应是 reason，实际「${concept.type}」`);
+      check(concept.title.includes("概念不清"), `题单标题应带错因，实际「${concept.title}」`);
+      check(JSON.stringify(concept.ids) === JSON.stringify([101, 102, 104, 105]),
+        `概念不清应重做 101/102 并补同章新题 104/105，实际 ${JSON.stringify(concept.ids)}`);
+
+      /* 计算错误 = 只重做错题，不掺新题。 */
+      await page.evaluate('state.mode = "progress"; renderProgress()');
+      await page.click('[data-reason-practice="计算错误"]');
+      await page.waitFor("typeof state !== 'undefined' && state.mode === 'smart'", { label: "进入计算错误处方" });
+      const calc = await page.evaluate(`(() => {
+        const s = activeTrainingSession();
+        return { ids: s.ids.map(Number), title: s.sourceTitle };
+      })()`);
+      check(JSON.stringify(calc.ids) === JSON.stringify([103]),
+        `计算错误只该重做原题 103，实际 ${JSON.stringify(calc.ids)}`);
+
+      /* 错因要从答题现场来：105 答错后应出现「错在哪」，点一下即写库。 */
+      await page.reload();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "刷新后加载完成" });
+      await page.evaluate(`(async () => {
+        state.mode = "practice";
+        await loadQuestions();
+        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === 105);
+        await loadCurrentQuestion();
+      })()`);
+      await page.waitFor("state.questions.some((q) => Number(q.id) === 105 && !!q.detail)", { label: "105 题题干就绪" });
+      await page.evaluate(`(() => {
+        const idx = state.questions.findIndex((q) => Number(q.id) === 105 && !!q.detail);
+        state.currentIndex = idx;
+        renderQuestion();
+        const q = state.questions[idx].detail;
+        saveSubjectiveAnswer(q, "B");
+        confirmCurrentAnswer();
+      })()`);
+      const ask = await page.evaluate(`(() => {
+        const el = document.getElementById("wrongReasonAsk");
+        return { text: el ? el.textContent.replace(/\\s+/g, " ").trim() : "", buttons: el ? el.querySelectorAll("[data-ask-reason]").length : 0 };
+      })()`);
+      check(ask.text.includes("错在哪"), `答错后应就地问「错在哪」，实际「${ask.text}」`);
+      check(ask.buttons === 5, `应有五个错因按钮，实际 ${ask.buttons}`);
+
+      await page.click('#wrongReasonAsk [data-ask-reason="计算错误"]');
+      const labeled = await page.evaluate(`(() => ({
+        value: (state.storage.wrongReasons || {})[105] || "",
+        gone: !document.getElementById("wrongReasonAsk"),
+        dirty: state.storageDirty,
+      }))()`);
+      check(labeled.value === "计算错误", `点「计算错误」应写进 wrongReasons[105]，实际「${labeled.value}」`);
+      check(labeled.gone, "标完错因后提示应立刻消失");
+      await page.waitFor("!state.storageDirty", { label: "错因保存完成" });
+
+      /* 刷新后处方卡要把新标的那条算进去：概念不清 2 + 计算错误 2。 */
+      await page.reload();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "再次刷新完成" });
+      const after = await page.evaluate(`(async () => {
+        /* 上次退出时停在处方训练里，刷新会恢复成 smart 模式；处方卡只读错题与错因，
+           不依赖分析题，直接切回看板即可。 */
+        state.mode = "progress";
+        renderProgress();
+        const el = document.querySelector(".reason-card");
+        return el ? el.textContent.replace(/\\s+/g, " ").trim() : "";
+      })()`);
+      check(after.includes("4 题已归类"), `刷新后应统计到 4 条已归类，实际「${after}」`);
+      check(after.includes("计算错误 · 2 题"), `刷新后计算错误应为 2 题，实际「${after}」`);
+    },
+  },
+  {
     name: "confidence-ask",
     title: "答错就地标信心：点一下即写库，看板立刻能分出盲区",
     async run({ page, mock, check }) {
