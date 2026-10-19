@@ -2573,6 +2573,19 @@ body[data-mode="exam"] .question-pane:has(.exam-home) .answer-card-wrap {
   color: var(--muted, #5b6472);
 }
 
+/* 解析区底部的「全站」客观参照（见 renderCrowdStat）。
+   刻意做得比掌握校准的问句弱：它只是参照，不引导任何操作。 */
+.crowd-stat {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted, #5b6472);
+}
+
+.crowd-stat.is-empty {
+  opacity: .68;
+}
+
+
 /* ── 「薄弱章节」卡的行 +「只练这一章」按钮（见 renderWeakChapterCard） ─────────
    一行 = 章名 / 正确率 + 可练题量 / 按钮。题量写在按钮上：
    按钮上写几道，这一轮就发几道（同错题本「开始训练」的规则）；

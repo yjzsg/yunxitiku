@@ -89,6 +89,13 @@ const state = {
   tagFilter: "",
   answerCardPage: 0,
   answerCardPageSize: 50,
+  /* 全站统计（见下方「全站答题统计」段）：本页取回的比例缓存 + 上报定时器。
+     缓存只在内存里：它只是「别人答得怎么样」的旁路信息，刷新后重新取一次就行，
+     没必要为它占 localStorage。 */
+  crowdQuestions: {},
+  crowdQuestionInFlight: {},
+  crowdCourse: null,
+  crowdFlushTimer: null,
   verifyMode: "paper",
   shuffledOrder: null,
   shuffleKey: "",
@@ -218,6 +225,19 @@ const WEAK_MIN_VERIFIED = 5;
 const CONFIDENCE_SURE = "确定";
 /* 一次最多发多少道：题量再大也是一轮练得完的量，不是把整个盲区倒给用户。 */
 const CALIBRATION_MAX_IDS = 60;
+/* 全站答题统计（服务端 QuestionStatsStore）：
+   上报的只有 (题号, 对错) —— 没有用户名、没有答案、没有时间。服务端也只累计计数。
+   · 攒着发：答一题发一次请求太碎（一堂课几百个），4 秒攒一批；
+   · 存 localStorage：刷新/关页不丢，配额满就丢队列（统计是旁路，不能挤掉草稿）；
+   · 门槛 3 次与服务端 QuestionMinAttempts 对齐：低于这个数不展示比例，
+     样本太小的比例会误导人，也让「谁答错了」变得可猜。 */
+const CROWD_QUEUE_KEY = "yt.crowdQueue.v1";
+const CROWD_QUEUE_LIMIT = 400;
+const CROWD_FLUSH_DELAY_MS = 4000;
+const CROWD_RETRY_DELAY_MS = 60000;
+const CROWD_MIN_ATTEMPTS = 3;
+/* 一门课的全站总览多久重取一次。它变化很慢，没必要每次进看板都打一次接口。 */
+const CROWD_COURSE_TTL_MS = 10 * 60 * 1000;
 /* 弱项类题的轮换冷却：N 天内出现过的降到候选队尾（不是硬排除，
    池子不够时仍然会被用上，不会出现「凑不满」）。 */
 const TRAINING_COOLDOWN_DAYS = 3;
@@ -1598,6 +1618,8 @@ async function enterApp(user, options = {}) {
      必须在 applyQuestionWindow / restoreLastCourse 之前接回来，否则界面先按
      服务器那份旧数据渲染一遍，再被替换掉。 */
   applyPendingSaveDraft();
+  /* 上次没发完的全站统计（匿名计数）补发一次；统计失败不影响任何功能，所以不 await。 */
+  if (readCrowdQueue().length) scheduleCrowdFlush(1500);
   // 题量/题序是题单窗口的一部分，要在 restoreLastCourse → loadQuestions 之前落位
   applyQuestionWindow();
   $("loginView").classList.add("hidden");
@@ -5321,6 +5343,7 @@ function renderQuestion() {
   renderSearchMatches();
   renderAnswerCard();
   renderConfidenceAsk(q, revealAnswer);
+  renderCrowdStat(q, revealAnswer);
   updateStats();
   animateQuestionEntry(q.id);
 }
@@ -6220,6 +6243,226 @@ function resultAlreadyRecorded(courseStore, q, scopeId) {
   return entry.scope === scopeId && entry.answer === currentAnswerSnapshot(q.id);
 }
 
+/* ── 全站答题统计（匿名） ─────────────────────────────────────────────
+   两个方向：
+   · 上报：每答一题记一条 (题号, 对错) 到本地队列，攒够 4 秒批量发。
+     **不走 api()**：那条路径收到 401 会弹「登录已失效」并要求导出备份 ——
+     统计是旁路功能，不该因为它把用户从答题界面里拽出来。这里用裸 fetch，失败静默。
+   · 展示：答完一题在解析下面写「全站 N 次作答 · M% 答错」；学习看板加一张
+     「全站参照」卡（本科目总正确率 vs 自己的）。两者都只是参照，不参与任何判定。 */
+
+function readCrowdQueue() {
+  try {
+    const raw = localStorage.getItem(CROWD_QUEUE_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter((row) => Number(row?.q) > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCrowdQueue(list) {
+  try {
+    localStorage.setItem(CROWD_QUEUE_KEY, JSON.stringify(list.slice(-CROWD_QUEUE_LIMIT)));
+  } catch {
+    /* 配额满：丢掉整条队列也比让草稿存不进去好（草稿里是用户的作答）。 */
+    try { localStorage.removeItem(CROWD_QUEUE_KEY); } catch { /* 无能为力 */ }
+  }
+}
+
+function enqueueCrowdAnswer(questionId, correct) {
+  const id = Number(questionId || 0);
+  if (!id) return;
+  /* 管理员在后台编题、试答案不算考生作答；主观题没有客观对错，也排除。 */
+  if (isAdmin()) return;
+  const queue = readCrowdQueue();
+  queue.push({ q: id, ok: !!correct });
+  writeCrowdQueue(queue);
+  scheduleCrowdFlush(CROWD_FLUSH_DELAY_MS);
+}
+
+function scheduleCrowdFlush(delay = CROWD_FLUSH_DELAY_MS) {
+  if (state.crowdFlushTimer) return;
+  state.crowdFlushTimer = setTimeout(() => {
+    state.crowdFlushTimer = null;
+    flushCrowdAnswers().catch(() => { /* flush 内部已处理失败 */ });
+  }, Math.max(0, delay));
+}
+
+async function flushCrowdAnswers() {
+  const queue = readCrowdQueue();
+  if (!queue.length) return;
+  const batch = queue.slice(0, 200);
+  try {
+    const headers = { "Content-Type": "application/json" };
+    const token = localStorage.getItem(SESSION_TOKEN_KEY);
+    if (token) headers["X-Session-Token"] = token;
+    const res = await fetch("/api/stats/answers", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ items: batch }),
+    });
+    if (!res.ok) throw new Error(`stats ${res.status}`);
+    /* 只删掉**发出去的这批**：发请求期间用户可能又答了几题，那些追加在队尾。 */
+    writeCrowdQueue(readCrowdQueue().slice(batch.length));
+    if (readCrowdQueue().length) scheduleCrowdFlush(CROWD_FLUSH_DELAY_MS);
+  } catch {
+    /* 失败不清队列 —— 断网、服务端 503 都该留着下次再发。 */
+    scheduleCrowdFlush(CROWD_RETRY_DELAY_MS);
+  }
+}
+
+/* 页面要藏起来/关掉了：用 keepalive fetch 推一次（普通 fetch 会被取消）。
+   不用 sendBeacon 是因为它带不了 X-Session-Token 头，token 会话会被判 401，
+   而 sendBeacon 只要「入队成功」就返回 true —— 我们收不到 401，队列会被白清掉。
+   用 keepalive 的代价：如果页面真的在响应回来前销毁，Promise 不会 resolve，
+   队列留着、下次开页重发一次 → 这一批可能被重复计数（详见服务端注释：重复无害）。 */
+function flushCrowdBeacon() {
+  const queue = readCrowdQueue();
+  if (!queue.length) return;
+  try {
+    const headers = { "Content-Type": "application/json" };
+    const token = localStorage.getItem(SESSION_TOKEN_KEY);
+    if (token) headers["X-Session-Token"] = token;
+    fetch("/api/stats/answers", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ items: queue.slice(0, 200) }),
+      keepalive: true,
+    })
+      .then((res) => {
+        if (res.ok) writeCrowdQueue(readCrowdQueue().slice(200));
+      })
+      .catch(() => { /* 留着下次开页再发 */ });
+  } catch { /* 忽略：统计是旁路功能 */ }
+}
+
+async function fetchCrowdQuestion(id) {
+  const qid = Number(id || 0);
+  if (!qid) return null;
+  try {
+    const res = await fetch(`/api/stats/questions?ids=${qid}`);
+    if (!res.ok) return null;
+    const payload = await res.json();
+    return (payload?.items || []).find((row) => Number(row.id) === qid) || null;
+  } catch {
+    return null;
+  }
+}
+
+function crowdStatFor(id) {
+  const key = Number(id || 0);
+  return Object.prototype.hasOwnProperty.call(state.crowdQuestions, key) ? state.crowdQuestions[key] : undefined;
+}
+
+function ensureCrowdQuestion(id, onLoaded) {
+  const qid = Number(id || 0);
+  if (!qid) return;
+  if (Object.prototype.hasOwnProperty.call(state.crowdQuestions, qid)) return;
+  if (state.crowdQuestionInFlight[qid]) return;
+  state.crowdQuestionInFlight[qid] = true;
+  fetchCrowdQuestion(qid)
+    .then((row) => {
+      state.crowdQuestions[qid] = row;
+      onLoaded?.(row);
+    })
+    .catch(() => { /* 拿不到就不显示比例，不打扰用户 */ })
+    .finally(() => { delete state.crowdQuestionInFlight[qid]; });
+}
+
+/* 解析区的「全站」行。位置在答案框末尾，和掌握校准的追问同一处
+   （都只在「已经能看到答案」时才出现，避免提前泄题）。 */
+function renderCrowdStat(q, revealAnswer) {
+  const box = $("answerBox");
+  if (!box) return;
+  const old = $("crowdStat");
+  if (!revealAnswer || !q || isSubjective(q)) {
+    old?.remove();
+    return;
+  }
+  /* 已经取过（哪怕是「没有数据」）就不再请求：null 也是有效缓存值。 */
+  if (crowdStatFor(q.id) === undefined) {
+    /* 回调里必须重新拿**详情对象**：题单里的条目只有 id/stem，没有 options，
+       直接传进去会被 isSubjective() 判成主观题，把刚渲染好的整行删掉。 */
+    ensureCrowdQuestion(q.id, () => {
+      const item = state.questions[state.currentIndex];
+      if (Number(item?.id) === Number(q.id) && item.detail) renderCrowdStat(item.detail, true);
+    });
+  }
+  const row = crowdStatFor(q.id);
+  const el = old || document.createElement("div");
+  el.id = "crowdStat";
+  el.className = "crowd-stat";
+  if (row && Number(row.attempts) >= CROWD_MIN_ATTEMPTS) {
+    const mine = normalizeAnswer(state.answers[q.id])
+      ? (isAnswerCorrect(q) ? "你答对了" : "你答错了")
+      : "";
+    el.textContent = `全站 ${Number(row.attempts).toLocaleString("zh-CN")} 次作答 · ${Math.round(Number(row.rate) * 100)}% 答错${mine ? ` · ${mine}` : ""}`;
+  } else {
+    el.textContent = `全站作答数据还不够（每题满 ${CROWD_MIN_ATTEMPTS} 次才统计）`;
+    el.classList.add("is-empty");
+  }
+  if (!old) box.appendChild(el);
+}
+
+/* 学习看板的「全站参照」卡：本科目的全站正确率 vs 自己的确认正确率。
+   两个分母不同（全站按**作答次数**、自己按**已确认题数**），所以文案里写清楚口径，
+   只让人看相对高低，不把两个百分比当成同一个指标比较。 */
+function ensureCrowdCourse(courseId, onLoaded) {
+  const id = Number(courseId || 0);
+  if (!id) return;
+  const cached = state.crowdCourse;
+  if (cached && Number(cached.courseId) === id && Date.now() - Number(cached.at || 0) < CROWD_COURSE_TTL_MS) return;
+  if (cached && Number(cached.courseId) === id && cached.loading) return;
+  state.crowdCourse = { courseId: id, at: 0, attempts: 0, wrong: 0, rate: 0, loading: true };
+  fetch(`/api/stats/course?courseId=${id}`)
+    .then((res) => (res.ok ? res.json() : null))
+    .then((payload) => {
+      if (!payload?.ok) throw new Error("stats course failed");
+      state.crowdCourse = {
+        courseId: id,
+        at: Date.now(),
+        attempts: Number(payload.attempts || 0),
+        wrong: Number(payload.wrong || 0),
+        rate: Number(payload.rate || 0),
+        loading: false,
+      };
+      onLoaded?.();
+    })
+    .catch(() => {
+      state.crowdCourse = { courseId: id, at: Date.now(), attempts: 0, wrong: 0, rate: 0, loading: false, failed: true };
+    });
+}
+
+function renderCrowdCourseCard(stats) {
+  const courseId = Number(state.currentCourse?.id || 0);
+  if (!courseId) return "";
+  ensureCrowdCourse(courseId, () => {
+    if (state.mode === "progress") renderProgress();
+  });
+  const cached = state.crowdCourse;
+  const myVerified = Number(stats?.verified || 0);
+  const myRate = myVerified ? Math.round(Number(stats?.correct || 0) / myVerified * 100) : null;
+  const mineText = myRate === null ? "你还没确认过题目" : `你：已确认 ${myVerified} 题 · 正确率 ${myRate}%`;
+  if (!cached || Number(cached.courseId) !== courseId || cached.loading) {
+    return `<div class="study-card muted-card">
+      <span>全站参照</span>
+      <b>正在读取…</b>
+      <small>${escapeHtml(mineText)}</small>
+    </div>`;
+  }
+  const attempts = Number(cached.attempts || 0);
+  /* 服务端给的 rate 是**答错率**（与单题接口同一个口径），这里换算成正确率再显示。 */
+  const body = attempts >= CROWD_MIN_ATTEMPTS
+    ? `全站：${attempts.toLocaleString("zh-CN")} 次作答 · 正确率 ${Math.round((1 - Number(cached.rate)) * 100)}%`
+    : "全站作答数据还不够（满 3 次开始统计）";
+  return `<div class="study-card">
+    <span>全站参照</span>
+    <b>${escapeHtml(body)}</b>
+    <small>${escapeHtml(mineText)} · 口径不同（全站按作答次数、你按已确认题数），只看相对高低</small>
+  </div>`;
+}
+
 function recordResultEntry(courseStore, q, scopeId, isRight) {
   if (!courseStore) return;
   courseStore.resultLog ||= {};
@@ -6345,6 +6588,9 @@ function markResult(q) {
   }
   /* 记账：只有真的推进过（或本来就没记过）才写 ---- 写进去的是这一轮的幂等依据。 */
   if (!logged) recordResultEntry(courseStore, q, scopeId, isRight);
+  /* 全站统计：与本地记账同一个幂等开关，一道题的一次作答只上报一次。
+     主观题没有客观对错，不上报（否则「多少人答错」会被文本比对污染）。 */
+  if (!logged && !isSubjective(q)) enqueueCrowdAnswer(q.id, isRight);
   syncCurrentTrainingSession(q.id);
 }
 
@@ -7498,6 +7744,7 @@ function renderStudyDashboard(courseStore, stats, items) {
       </div>
       ${renderWeakChapterCard(courseStore, items, allWeak, weak, weakBelowCount)}
       ${renderCalibrationCard(courseStore, items)}
+      ${renderCrowdCourseCard(stats)}
       <div class="study-card">
         <span>学习日报</span>
         <b>${savedReport ? "今日已记录" : "今日未记录"}</b>
@@ -14577,6 +14824,10 @@ window.addEventListener("resize", debounce(() => {
   applyResponsiveAnswerCard();
   syncAnswerCardSpace();
 }, 120));
+/* 断网时攒下来的统计，一恢复网络就发（否则要等下一次答题的 4 秒定时）。 */
+window.addEventListener("online", () => {
+  if (readCrowdQueue().length) scheduleCrowdFlush(0);
+});
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     /* 默认（未勾「离开页面时暂停计时」）只存草稿、不暂停 ——
@@ -14589,6 +14840,8 @@ document.addEventListener("visibilitychange", () => {
         if (!flushPendingSaveBeacon()) handleUserSaveError(new Error("保存失败，请检查网络后重试"));
       });
     }
+    /* 统计队列顺手推出去：这一批很小（≤6KB），beacon 能带得动。 */
+    flushCrowdBeacon();
     return;
   }
   /* 回到前台时，如果还有未保存的改动（例如刚才那次保存失败），补一次保存。 */
@@ -14645,6 +14898,7 @@ window.addEventListener("beforeunload", (event) => {
     state.saveTimer = null;
   }
   flushPendingSaveBeacon();
+  flushCrowdBeacon();
 });
 
 init().catch((err) => {

@@ -243,6 +243,34 @@ sealed class QuestionBank
         return row is null ? 0 : ToInt(row["icourseid"]);
     }
 
+    /// <summary>
+    /// 批量查题目归属（课程 / 章节）。给全站统计用：作答记录只存题号，课程/章节每次现查，
+    /// 这样换库、拉库之后归属自动跟上。查不到的题不在结果里。
+    /// </summary>
+    public Dictionary<int, (int CourseId, int ChapterId)> GetQuestionPlacements(IEnumerable<int> ids)
+    {
+        var result = new Dictionary<int, (int, int)>();
+        var list = ids.Where(id => id > 0).Distinct().ToList();
+        // SQLite 的参数个数有上限（默认 999），按 400 一批。
+        foreach (var chunk in list.Chunk(400))
+        {
+            var parameters = new Dictionary<string, object?>();
+            var names = new List<string>();
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                var name = "@id" + i;
+                names.Add(name);
+                parameters[name] = chunk[i];
+            }
+            var rows = Query($"select isubjectid, icourseid, ichapterid from coursesubject where isubjectid in ({string.Join(",", names)})", parameters);
+            foreach (var row in rows)
+            {
+                result[ToInt(row["isubjectid"])] = (ToInt(row["icourseid"]), ToInt(row["ichapterid"]));
+            }
+        }
+        return result;
+    }
+
     /// <summary>这门课在库里的章节/题目增量水位（没有则 null）——用于"可更新"探测。</summary>
     public (string? Chapter, string? Subject) CourseWatermarks(int courseId)
     {

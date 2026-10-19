@@ -552,4 +552,103 @@ export const scenarios = [
       return { ask, labeled, card };
     },
   },
+  {
+    name: "crowd-stats",
+    title: "全站答题统计：答完一题看到「全站 N 次作答 · M% 答错」，上报真的落到服务端",
+    async run({ page, mock, check }) {
+      /* 这条同时守三件容易一起坏的事：
+         ① 上报队列真的会发出去（含会话令牌），发完清空；失败时**不能**清；
+         ② 答案没展开之前不能提前透露全站比例，展开后才渲染；
+         ③ 学习看板的「全站参照」用同一份数据，且把服务端的**答错率**换算成正确率。 */
+      const data = {
+        profile: { name: "e2e", createdAt: "2026-01-01 00:00:00" },
+        courses: {
+          "1": {
+            answers: {},
+            done: {},
+            correct: {},
+            wrong: {},
+            verified: {},
+            lastSubjectId: 101,
+          },
+        },
+        settings: {},
+      };
+      await mock.ctl("/__ctl/seed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      /* 预置：101 已经被作答 9 次、其中 6 次答错（67% 答错），已经过了「满 3 次」门槛。 */
+      await mock.ctl("/__ctl/stats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: [{ q: 101, attempts: 9, wrong: 6 }] }),
+      });
+      await page.goto();
+      await page.waitFor("typeof state !== 'undefined' && !!state.storageRevision", { label: "首屏加载完成" });
+      await page.evaluate(`(async () => {
+        state.mode = "practice";
+        await loadQuestions();
+        state.currentIndex = state.questions.findIndex((q) => Number(q.id) === 101);
+        await loadCurrentQuestion();
+      })()`);
+      await page.waitFor("state.questions.some((q) => Number(q.id) === 101 && !!q.detail)",
+        { label: "101 题题干就绪" });
+
+      /* 答案还藏着的时候，全站行不该出现（提前看到比例会影响作答）。 */
+      const before = await page.evaluate("!!document.getElementById('crowdStat')");
+      check(before === false, "答案未展开时不该出现全站比例");
+
+      /* 走真实路径答错：101 的正确答案是 A，这里选 B。 */
+      await page.evaluate(`(() => {
+        const idx = state.questions.findIndex((q) => Number(q.id) === 101 && !!q.detail);
+        if (idx < 0) throw new Error("101 题没在题单里");
+        state.currentIndex = idx;
+        renderQuestion();
+        const q = state.questions[idx].detail;
+        saveSubjectiveAnswer(q, "B");
+        confirmCurrentAnswer();
+      })()`);
+      await page.waitFor("!!document.getElementById('crowdStat')", { label: "全站行出现", timeout: 10000 });
+      await page.waitFor(`document.getElementById("crowdStat").textContent.includes("9 次作答")`,
+        { label: "全站比例渲染完成", timeout: 10000 });
+      const line = await page.evaluate(`document.getElementById("crowdStat").textContent.replace(/\\s+/g, " ").trim()`);
+      check(line.includes("9 次作答") && line.includes("67%") && line.includes("答错"),
+        `应显示「9 次作答 · 67% 答错」，实际「${line}」`);
+      check(line.includes("你答错了"), `答错后应标出「你答错了」，实际「${line}」`);
+
+      /* 等 4 秒的去抖上报真的发出、队列清空（失败会留着重试，所以「清空」本身是断言）。 */
+      await page.waitFor("(() => { try { return JSON.parse(localStorage.getItem('yt.crowdQueue.v1') || '[]').length === 0; } catch (error) { return false; } })()",
+        { label: "统计队列已发完", timeout: 15000 });
+      const statsCtl = await mock.ctl("/__ctl/stats");
+      check(Array.isArray(statsCtl.posts) && statsCtl.posts.length >= 1, `应至少上报过一次，实际 ${statsCtl.posts?.length || 0} 次`);
+      const posted = (statsCtl.posts || []).flatMap((post) => post.items || []);
+      check(posted.some((item) => Number(item.q) === 101 && item.ok === false), "上报内容应包含「101 答错」");
+      check((statsCtl.posts || []).every((post) => Array.isArray(post.items) && post.items.length > 0),
+        "每次上报都该带内容（空批次不该发请求）");
+      check(Number(statsCtl.stats["101"]?.attempts) === 10 && Number(statsCtl.stats["101"]?.wrong) === 7,
+        `服务端应把 101 累加到 10 次 / 7 错，实际 ${JSON.stringify(statsCtl.stats["101"])}`);
+
+      /* 学习看板的「全站参照」：10 次作答、答错 7 次 → 正确率 30%。 */
+      await page.evaluate(`(async () => {
+        await loadAnalysisQuestions();
+        state.mode = "progress";
+        renderProgress();
+      })()`);
+      await page.waitFor(`(() => { const el = document.querySelector(".study-dashboard"); const text = el ? el.textContent : ""; return text.includes("全站参照") && text.includes("全站："); })()`,
+        { label: "全站参照卡渲染完成", timeout: 10000 });
+      const card = await page.evaluate(`(() => {
+        const el = Array.from(document.querySelectorAll(".study-card")).find((node) => node.textContent.includes("全站参照"));
+        return el ? el.textContent.replace(/\\s+/g, " ").trim() : "";
+      })()`);
+      check(card.includes("10 次作答"), `看板应显示全站 10 次作答，实际「${card}」`);
+      check(card.includes("正确率 30%"), `看板应把答错率换算成正确率 30%，实际「${card}」`);
+      check(card.includes("你：已确认 1 题"), `看板应写出自己的口径，实际「${card}」`);
+
+      const snap = await page.snapshot();
+      check(snap.modalVisible === false, "统计流程不该牵出冲突框");
+      return { line, card, posted: posted.length };
+    },
+  },
 ];

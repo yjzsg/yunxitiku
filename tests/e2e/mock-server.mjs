@@ -57,6 +57,9 @@ export async function startMockServer(opts = {}) {
     /* 接下来若干个 /api/user/patch 请求直接回 400（模拟服务端结构分叉拒绝）。
        客户端必须退回整包保存，不能把这次改动丢掉。 */
     rejectPatch: 0,
+    /* 全站统计：stats 是「服务器上已有的比例」，statPosts 记每次上报（断言用）。 */
+    stats: Object.create(null),
+    statPosts: [],
   };
 
   const json = (res, code, obj) => {
@@ -75,9 +78,24 @@ export async function startMockServer(opts = {}) {
     if (p === "/__ctl/saves") return json(res, 200, state.saves);
     if (p === "/__ctl/loads") return json(res, 200, state.loads);
     if (p === "/__ctl/body") return json(res, 200, { revision: state.revision(), body: state.body });
+    /* 全站统计的控制面：GET 看当前统计与每次上报，POST {rows:[{q,attempts,wrong}]} 预置。 */
+    if (p === "/__ctl/stats") {
+      if (req.method === "POST") {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        for (const row of payload.rows || []) {
+          const id = Number(row?.q || 0);
+          if (id <= 0) continue;
+          state.stats[id] = { attempts: Number(row.attempts || 0), wrong: Number(row.wrong || 0) };
+        }
+      }
+      return json(res, 200, { stats: state.stats, posts: state.statPosts });
+    }
     if (p === "/__ctl/reset") {
       state.body = ""; state.saves = []; state.loads = []; state.requests = [];
       state.saveDelay = 0; state.loadDelay = 0; state.rejectPatch = 0;
+      state.stats = Object.create(null); state.statPosts = [];
       return json(res, 200, { ok: true });
     }
     if (p === "/__ctl/config") {
@@ -115,6 +133,52 @@ export async function startMockServer(opts = {}) {
     if (p === "/api/auth/login") return json(res, 200, { ok: true, user: USER, token: "tok-e2e" });
     if (p === "/api/auth/logout") return json(res, 200, { ok: true });
     if (p === "/api/health") return json(res, 200, { ok: true, sqlite: true });
+
+    /* 全站答题统计：与真实服务端同一套语义 —— 只累计 (题号, 对错)，题数满 3 才对外给比例。 */
+    if (p === "/api/stats/answers" && req.method === "POST") {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const accepted = [];
+      for (const item of items) {
+        const id = Number(item?.q || 0);
+        if (id <= 0) continue;
+        const row = state.stats[id] || (state.stats[id] = { attempts: 0, wrong: 0 });
+        row.attempts += 1;
+        if (!item.ok) row.wrong += 1;
+        accepted.push({ q: id, ok: !!item.ok });
+      }
+      state.statPosts.push({ at: Date.now(), items: accepted, token: String(req.headers["x-session-token"] || "") });
+      return json(res, 200, { ok: true, accepted: accepted.length });
+    }
+    if (p === "/api/stats/questions") {
+      const ids = String(url.searchParams.get("ids") || "").split(",").map(Number).filter((id) => id > 0);
+      const items = ids
+        .map((id) => {
+          const row = state.stats[id];
+          return row && row.attempts >= 3
+            ? { id, attempts: row.attempts, wrong: row.wrong, rate: row.wrong / row.attempts }
+            : null;
+        })
+        .filter(Boolean);
+      return json(res, 200, { ok: true, threshold: 3, items });
+    }
+    if (p === "/api/stats/course") {
+      let attempts = 0;
+      let wrong = 0;
+      for (const row of Object.values(state.stats)) {
+        attempts += row.attempts;
+        wrong += row.wrong;
+      }
+      return json(res, 200, {
+        ok: true,
+        courseId: Number(url.searchParams.get("courseId") || 0),
+        attempts,
+        wrong,
+        rate: attempts ? wrong / attempts : 0,
+      });
+    }
 
     if (p === "/api/user/load") {
       /* 先按请求时刻取快照，再延迟回包 —— 这就是真实竞态的形态：
