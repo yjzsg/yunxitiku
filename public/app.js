@@ -2471,6 +2471,9 @@ const PATCH_MAX_OPS = 2000;
 const PATCH_MAX_BYTES = 512 * 1024;
 /* 服务端不认增量（老版本 404 / 合并被拒 400）：本次就退回整包，并且以后别再试。 */
 let patchUnavailable = false;
+/* 统计接口不存在（旧版服务端）时置位：整页不再上报、也不再每分钟重试。
+   不持久化——服务端升级后刷新一次就自动恢复。 */
+let crowdUnavailable = false;
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -6274,7 +6277,7 @@ function enqueueCrowdAnswer(questionId, correct) {
   const id = Number(questionId || 0);
   if (!id) return;
   /* 管理员在后台编题、试答案不算考生作答；主观题没有客观对错，也排除。 */
-  if (isAdmin()) return;
+  if (isAdmin() || crowdUnavailable) return;
   const queue = readCrowdQueue();
   queue.push({ q: id, ok: !!correct });
   writeCrowdQueue(queue);
@@ -6302,7 +6305,15 @@ async function flushCrowdAnswers() {
       headers,
       body: JSON.stringify({ items: batch }),
     });
-    if (!res.ok) throw new Error(`stats ${res.status}`);
+    if (!res.ok) {
+      /* 旧版服务端没有统计接口：清掉队列、整页不再重试，别拿 404 每分钟敲一次。 */
+      if (res.status === 404 || res.status === 405 || res.status === 501) {
+        crowdUnavailable = true;
+        writeCrowdQueue([]);
+        return;
+      }
+      throw new Error(`stats ${res.status}`);
+    }
     /* 只删掉**发出去的这批**：发请求期间用户可能又答了几题，那些追加在队尾。 */
     writeCrowdQueue(readCrowdQueue().slice(batch.length));
     if (readCrowdQueue().length) scheduleCrowdFlush(CROWD_FLUSH_DELAY_MS);
@@ -6331,6 +6342,11 @@ function flushCrowdBeacon() {
       keepalive: true,
     })
       .then((res) => {
+        if (res.status === 404 || res.status === 405 || res.status === 501) {
+          crowdUnavailable = true;
+          writeCrowdQueue([]);
+          return;
+        }
         if (res.ok) writeCrowdQueue(readCrowdQueue().slice(200));
       })
       .catch(() => { /* 留着下次开页再发 */ });

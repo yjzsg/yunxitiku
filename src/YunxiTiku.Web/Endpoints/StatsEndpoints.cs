@@ -114,8 +114,9 @@ internal static class StatsEndpoints
     }
 
     /// <summary>
-    /// 解析 <c>{"items":[{"q":101,"ok":true}]}</c>。宽容一点：<c>ok</c> 接受 true/false、1/0、"1"/"0"，
-    /// 因为老客户端可能把布尔压成数字。解析不了的条目直接丢，不让一条脏数据废掉整批。
+    /// 解析 <c>{"items":[{"q":101,"ok":true}]}</c>。宽容一点：<c>ok</c> 接受 true/false、1/0、"1"/"0"/"true"/"false"，
+    /// 因为老客户端可能把布尔压成数字。解析不了的**整条丢掉**——尤其不能把认不出的 ok 当成「答错」，
+    /// 那会给统计里塞进假错题；一条脏数据也不该废掉整批。
     /// </summary>
     private static List<(int QuestionId, bool Correct)> ParseItems(string body)
     {
@@ -135,15 +136,21 @@ internal static class StatsEndpoints
             if (element.TryGetProperty("q", out var q) && q.ValueKind == JsonValueKind.Number) id = q.GetInt32();
             if (id <= 0) continue;
             if (!element.TryGetProperty("ok", out var ok)) continue;
-            var correct = ok.ValueKind switch
+            bool? correct = ok.ValueKind switch
             {
                 JsonValueKind.True => true,
                 JsonValueKind.False => false,
                 JsonValueKind.Number => ok.GetInt32() != 0,
-                JsonValueKind.String => ok.GetString() is "1" or "true" or "True",
-                _ => false,
+                JsonValueKind.String => ok.GetString() switch
+                {
+                    "1" or "true" or "True" => true,
+                    "0" or "false" or "False" => false,
+                    _ => null,
+                },
+                _ => null,
             };
-            result.Add((id, correct));
+            if (correct is null) continue;
+            result.Add((id, correct.Value));
         }
         return result;
     }
